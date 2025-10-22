@@ -1,0 +1,30 @@
+{
+  "name": "webrtc-h264-streamer",
+  "version": "1.0.0",
+  "description": "WebRTC H.264 streaming server with UDP input",
+  "type": "module",
+  "main": "src/server.js",
+  "scripts": {
+    "start": "node src/server.js",
+    "dev": "nodemon src/server.js",
+    "test-udp": "node src/test.js"
+  },
+  "keywords": [
+    "webrtc",
+    "h264",
+    "streaming",
+    "udp",
+    "rtsp"
+  ],
+  "author": "",
+  "license": "MIT",
+  "dependencies": {
+    "cors": "^2.8.5",
+    "dotenv": "^17.2.3",
+    "express": "^4.21.2",
+    "werift": "^0.17.7"
+  },
+  "devDependencies": {
+    "nodemon": "^3.0.1"
+  }
+}
