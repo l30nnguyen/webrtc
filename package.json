@@ -7,7 +7,9 @@
   "scripts": {
     "start": "node src/server.js",
     "dev": "nodemon src/server.js",
-    "test-udp": "node src/test.js"
+    "test-udp": "node src/test.js",
+    "webrtc": "python3 src/webrtc_gateway.py",
+    "install": "pip install aiohttp aiortc av aiohttp_cors"
   },
   "keywords": [
     "webrtc",
