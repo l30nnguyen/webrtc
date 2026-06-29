@@ -1,0 +1,21 @@
+{
+  "apps": [
+    {
+      "name": "webrtc_signalling",
+      "script": "src/signaling-server.py",
+      "interpreter": "./venv/bin/python3",
+      "args": "0.0.0.0:8000",
+      "exec_mode": "fork",
+      "autorestart": true,
+      "watch": false
+    },
+    {
+      "name": "webrtc_tunnel",
+      "script": "cloudflared",
+      "args": "tunnel run 9442255b-fb2e-4037-a16f-dc884ca1b182",
+      "exec_mode": "fork",
+      "autorestart": true,
+      "restart_delay": 5000
+    }
+  ]
+}
