@@ -28,6 +28,8 @@ echo "[1/6] Installing nginx, certbot, python3 dependencies..."
 
 apt-get update -y
 apt-get install -y nginx certbot python3-certbot-nginx python3-pip python3-venv
+python3 -m venv venv
+./venv/bin/pip install aiohttp aiortc av aiohttp_cors websockets
 
 # =============================================================================
 # 2. Copy ws.html to web root

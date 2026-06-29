@@ -336,12 +336,15 @@
             if (document.getElementById('use-stun').checked) {
                 config.iceServers = [
                     { urls: 'stun:stun.l.google.com:19302' },
-                    {
-                        urls: 'turn:' + turn_url,
+                ];
+                if (turn_url) {
+                    config.iceServers.push({
+                        urls: ['turn:' + turn_url + '?transport=udp',
+                            'turn:' + turn_url + '?transport=tcp'],
                         username: turn_username,
                         credential: turn_password
-                    }
-                ];
+                    });
+                }
             }
 
             let pc = new RTCPeerConnection(config);
