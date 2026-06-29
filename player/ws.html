@@ -378,7 +378,11 @@
                 document.getElementById('media').style.display = 'block';
                 const video = document.getElementById('video');
                 video.srcObject = evt.streams[0];
-                video.play();
+                video.play().catch(err => {
+                    // Autoplay was blocked - user interaction required
+                    console.warn("Autoplay blocked, waiting for user click");
+                    video.controls = true; // show controls so user can manually play
+                });
             };
 
             // Receive data channel
@@ -466,7 +470,7 @@
         }
 
         function start() {
-            const serverUrl = document.getElementById('serverUrl').value || 'webrtc-player.theihouses.com';
+            const serverUrl = document.getElementById('serverUrl').value || 'webrtc.5gen.care';
             const serverPort = document.getElementById('serverPort').value || '443';
 
             clientId = randomId(10);
