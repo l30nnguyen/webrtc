@@ -1,0 +1,603 @@
+<!DOCTYPE html>
+<html lang="en">
+
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>WebRTC Stream Viewer</title>
+    <script src="https://webrtc.github.io/adapter/adapter-latest.js"></script>
+    <style>
+        * {
+            margin: 0;
+            padding: 0;
+            box-sizing: border-box;
+        }
+
+        body {
+            font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Arial, sans-serif;
+            background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+            min-height: 100vh;
+            padding: 20px;
+        }
+
+        .container {
+            max-width: 1200px;
+            margin: 0 auto;
+        }
+
+        .card {
+            background: white;
+            border-radius: 12px;
+            padding: 24px;
+            margin-bottom: 20px;
+            box-shadow: 0 10px 40px rgba(0, 0, 0, 0.1);
+        }
+
+        h1 {
+            color: #2d3748;
+            margin-bottom: 24px;
+            font-size: 28px;
+        }
+
+        h2 {
+            color: #2d3748;
+            margin-bottom: 16px;
+            font-size: 20px;
+        }
+
+        .input-group {
+            display: flex;
+            gap: 12px;
+            margin-bottom: 20px;
+            flex-wrap: wrap;
+            align-items: center;
+        }
+
+        input[type="text"] {
+            flex: 1;
+            min-width: 200px;
+            padding: 12px 16px;
+            border: 2px solid #e2e8f0;
+            border-radius: 8px;
+            font-size: 14px;
+        }
+
+        input[type="text"]:focus {
+            outline: none;
+            border-color: #667eea;
+        }
+
+        input[type="checkbox"] {
+            width: 20px;
+            height: 20px;
+            cursor: pointer;
+        }
+
+        label {
+            cursor: pointer;
+            color: #2d3748;
+            font-size: 14px;
+        }
+
+        .checkbox-group {
+            display: flex;
+            align-items: center;
+            gap: 8px;
+        }
+
+        button {
+            padding: 12px 24px;
+            border: none;
+            border-radius: 8px;
+            font-size: 14px;
+            font-weight: 600;
+            cursor: pointer;
+            transition: all 0.3s;
+        }
+
+        .btn-primary {
+            background: #667eea;
+            color: white;
+        }
+
+        .btn-primary:hover {
+            background: #5568d3;
+        }
+
+        .btn-danger {
+            background: #f56565;
+            color: white;
+        }
+
+        .btn-danger:hover {
+            background: #e53e3e;
+        }
+
+        button:disabled {
+            opacity: 0.5;
+            cursor: not-allowed;
+        }
+
+        .video-container {
+            position: relative;
+            background: #000;
+            border-radius: 8px;
+            overflow: hidden;
+            margin-bottom: 20px;
+        }
+
+        video {
+            width: 100%;
+            height: auto;
+            display: block;
+        }
+
+        .stats-grid {
+            display: grid;
+            grid-template-columns: repeat(auto-fit, minmax(200px, 1fr));
+            gap: 16px;
+            margin-bottom: 20px;
+        }
+
+        .stat-item {
+            background: #f7fafc;
+            padding: 16px;
+            border-radius: 8px;
+            border-left: 4px solid #667eea;
+        }
+
+        .stat-label {
+            color: #718096;
+            font-size: 12px;
+            text-transform: uppercase;
+            margin-bottom: 4px;
+        }
+
+        .stat-value {
+            color: #2d3748;
+            font-size: 20px;
+            font-weight: 700;
+        }
+
+        .log-container {
+            background: #1a202c;
+            color: #a0aec0;
+            padding: 16px;
+            border-radius: 8px;
+            max-height: 300px;
+            overflow-y: auto;
+            font-family: 'Monaco', 'Courier New', monospace;
+            font-size: 12px;
+            line-height: 1.6;
+        }
+
+        .log-entry {
+            margin-bottom: 4px;
+        }
+
+        .log-time {
+            color: #4299e1;
+        }
+
+        .log-error {
+            color: #fc8181;
+        }
+
+        .log-success {
+            color: #68d391;
+        }
+
+        .log-warn {
+            color: #f6ad55;
+        }
+
+        pre {
+            background: #f7fafc;
+            padding: 12px;
+            border-radius: 8px;
+            overflow-x: auto;
+            font-size: 11px;
+            line-height: 1.5;
+            max-height: 300px;
+            overflow-y: auto;
+        }
+
+        #message-box {
+            margin-top: 15px;
+            padding: 10px;
+            border-radius: 6px;
+            font-size: 0.9rem;
+            display: none;
+            /* Hidden by default */
+        }
+    </style>
+</head>
+
+<body>
+    <div class="container">
+        <div class="card">
+            <h1>🎥 IPCAM WebRTC Viewer Demo</h1>
+
+            <div class="input-group">
+                <input type="text" id="serverId" placeholder="Device UDID" value="tEaMxZWKobYHJ"
+                    style="max-width: 5000px;">
+                <input type="text" id="serverUrl" placeholder="Signaling Server" value="webrtc.5gen.care">
+                <input type="text" id="serverPort" placeholder="Port" value="443" style="max-width: 100px;">
+                <div class="checkbox-group">
+                    <input id="use-stun" type="checkbox" checked />
+                    <label for="use-stun">Use STUN</label>
+                </div>
+                <button class="btn-primary" id="start" onclick="start()">Start</button>
+                <button class="btn-danger" id="stop" style="display: none" onclick="stop()">Stop</button>
+            </div>
+
+            <div class="video-container" id="media" style="display: none">
+                <video id="video" autoplay playsinline controls></video>
+            </div>
+
+            <div class="stats-grid">
+                <div class="stat-item">
+                    <div class="stat-label">ICE Connection</div>
+                    <div class="stat-value" id="ice-connection-state">-</div>
+                </div>
+                <div class="stat-item">
+                    <div class="stat-label">ICE Gathering</div>
+                    <div class="stat-value" id="ice-gathering-state">-</div>
+                </div>
+                <div class="stat-item">
+                    <div class="stat-label">Signaling</div>
+                    <div class="stat-value" id="signaling-state">-</div>
+                </div>
+                <div class="stat-item">
+                    <div class="stat-label">Data Channel</div>
+                    <div class="stat-value" id="dc-status">-</div>
+                </div>
+            </div>
+            <div id="mdns-warning"
+                style="display: none; background: #fff3cd; border: 2px solid #ffc107; border-radius: 8px; padding: 16px; margin-top: 16px;">
+                <div style="display: flex; align-items: start; gap: 12px;">
+                    <div style="font-size: 24px;">⚠️</div>
+                    <div style="flex: 1;">
+                        <div style="font-weight: 600; color: #856404; margin-bottom: 8px;">IP Hiding Detected</div>
+                        <div style="color: #856404; font-size: 14px; margin-bottom: 12px;">
+                            Hide local IP addresses will cause connection issues
+                        </div>
+                        <div
+                            style="background: white; padding: 12px; border-radius: 6px; font-family: monospace; font-size: 13px; margin-bottom: 12px; border: 1px solid #ddd; text-align: left;">
+                            <strong>Fix on chrome :</strong><br>
+                            <div class="mt-2 mb-2">
+                                1. Open:
+                                <!-- Flex container to align code and button horizontally -->
+                                <div class="flex items-center justify-between gap-2 mt-1">
+                                    <code
+                                        style="background: #f0f0f0; padding: 4px 6px; border-radius: 3px; flex-grow: 1; overflow: hidden; white-space: nowrap; text-overflow: ellipsis;">chrome://flags/#enable-webrtc-hide-local-ips-with-mdns</code>
+
+                                    <!-- Button style reduced to match text height -->
+                                    <button
+                                        onclick="copyToClipboard('chrome://flags/#enable-webrtc-hide-local-ips-with-mdns')"
+                                        class="flex-shrink-0 transition duration-150 ease-in-out hover:bg-yellow-600 active:bg-yellow-700"
+                                        style="padding: 4px 10px; background: #ffc107; border: none; border-radius: 4px; cursor: pointer; font-weight: 600; font-size: 13px; color: #333;">
+                                        📋 Copy
+                                    </button>
+                                </div>
+                            </div>
+                            2. Set to: <strong>Disabled</strong><br>
+                            3. Restart Chrome
+                        </div>
+                        <div id="message-box" class="bg-green-100 text-green-700 border border-green-200"></div>
+                    </div>
+                </div>
+            </div>
+        </div>
+
+        <div class="card">
+            <h2>📊 Data Channel</h2>
+            <div class="log-container" id="data-channel"></div>
+        </div>
+
+        <div class="card">
+            <h2>📄 SDP</h2>
+            <h3 style="margin-top: 16px; margin-bottom: 8px; color: #4a5568; font-size: 16px;">Offer</h3>
+            <pre id="offer-sdp"></pre>
+            <h3 style="margin-top: 16px; margin-bottom: 8px; color: #4a5568; font-size: 16px;">Answer</h3>
+            <pre id="answer-sdp"></pre>
+        </div>
+    </div>
+
+    <script>
+        const iceConnectionLog = document.getElementById('ice-connection-state'),
+            iceGatheringLog = document.getElementById('ice-gathering-state'),
+            signalingLog = document.getElementById('signaling-state'),
+            dataChannelLog = document.getElementById('data-channel'),
+            dcStatusLog = document.getElementById('dc-status');
+
+        let clientId = null;
+        let websocket = null;
+        let pc = null;
+        let dc = null;
+        let turn_url = null;
+        let turn_username = null;
+        let turn_password = null;
+
+        function log(message, type = 'info') {
+            const time = new Date().toLocaleTimeString();
+            const className = type === 'error' ? 'log-error' :
+                type === 'success' ? 'log-success' :
+                    type === 'warn' ? 'log-warn' : '';
+            dataChannelLog.innerHTML += `<div class="log-entry ${className}"><span class="log-time">[${time}]</span> ${message}</div>`;
+            dataChannelLog.scrollTop = dataChannelLog.scrollHeight;
+        }
+
+        function createPeerConnection() {
+            const config = {
+                bundlePolicy: "max-bundle",
+            };
+
+            if (document.getElementById('use-stun').checked) {
+                config.iceServers = [
+                    { urls: 'stun:stun.l.google.com:19302' },
+                    {
+                        urls: 'turn:' + turn_url,
+                        username: turn_username,
+                        credential: turn_password
+                    }
+                ];
+            }
+
+            let pc = new RTCPeerConnection(config);
+            pc.addEventListener('icecandidate', (event) => {
+                if (event.candidate && event.candidate.candidate) {
+                    const candidate = event.candidate.candidate;
+                    if (candidate.includes('.local')) {
+                        document.getElementById('mdns-warning').style.display = 'block';
+                    }
+                }
+            });
+
+            pc.addEventListener('iceconnectionstatechange', () => {
+                iceConnectionLog.textContent = pc.iceConnectionState;
+                log(`ICE Connection: ${pc.iceConnectionState}`, 'info');
+            });
+            iceConnectionLog.textContent = pc.iceConnectionState;
+
+            pc.addEventListener('icegatheringstatechange', () => {
+                iceGatheringLog.textContent = pc.iceGatheringState;
+                log(`ICE Gathering: ${pc.iceGatheringState}`, 'info');
+            });
+            iceGatheringLog.textContent = pc.iceGatheringState;
+
+            pc.addEventListener('signalingstatechange', () => {
+                signalingLog.textContent = pc.signalingState;
+                log(`Signaling: ${pc.signalingState}`, 'info');
+            });
+            signalingLog.textContent = pc.signalingState;
+
+            // Receive audio/video track
+            pc.ontrack = (evt) => {
+                log(`✅ Track received: ${evt.track.kind}`, 'success');
+                document.getElementById('media').style.display = 'block';
+                const video = document.getElementById('video');
+                video.srcObject = evt.streams[0];
+                video.play();
+            };
+
+            // Receive data channel
+            pc.ondatachannel = (evt) => {
+                dc = evt.channel;
+
+                dc.onopen = () => {
+                    dcStatusLog.textContent = 'Open';
+                    log('📡 Data channel opened', 'success');
+                };
+
+                let dcTimeout = null;
+                dc.onmessage = (evt) => {
+                    if (typeof evt.data !== 'string') {
+                        return;
+                    }
+
+                    const params = evt.data.split(' ');
+                    dcTimeout = setTimeout(() => {
+                        if (!dc) {
+                            return;
+                        }
+                        params[0] = 'Pong';
+                        const message = params.join(" ");
+                        log(`← Network latency ${parseInt(params[1]) / 2}ms`, 'success');
+                        dc.send(message);
+                    }, 1000);
+                }
+
+                dc.onclose = () => {
+                    clearTimeout(dcTimeout);
+                    dcTimeout = null;
+                    dcStatusLog.textContent = 'Closed';
+                    log('📡 Data channel closed', 'warn');
+                };
+            }
+
+            return pc;
+        }
+
+        async function waitGatheringComplete() {
+            return new Promise((resolve) => {
+                if (pc.iceGatheringState === 'complete') {
+                    resolve();
+                } else {
+                    pc.addEventListener('icegatheringstatechange', () => {
+                        if (pc.iceGatheringState === 'complete') {
+                            resolve();
+                        }
+                    });
+                }
+            });
+        }
+
+        async function sendAnswer(pc) {
+            await pc.setLocalDescription(await pc.createAnswer());
+            await waitGatheringComplete();
+
+            const answer = pc.localDescription;
+            document.getElementById('answer-sdp').textContent = answer.sdp;
+
+            const serverId = document.getElementById('serverId').value || 'server';
+            websocket.send(JSON.stringify({
+                id: serverId,
+                type: answer.type,
+                sdp: answer.sdp,
+            }));
+            log(`📤 Answer sent to ${serverId}`, 'success');
+        }
+
+        async function handleOffer(offer) {
+            pc = createPeerConnection();
+            await pc.setRemoteDescription(offer);
+            log('✅ Remote description set', 'success');
+            await sendAnswer(pc);
+        }
+
+        function sendRequest() {
+            const serverId = document.getElementById('serverId').value || 'server';
+            websocket.send(JSON.stringify({
+                id: serverId,
+                type: "request",
+            }));
+            log(`📤 Sent connection request to ${serverId}`, 'info');
+        }
+
+        function start() {
+            const serverUrl = document.getElementById('serverUrl').value || 'webrtc-player.theihouses.com';
+            const serverPort = document.getElementById('serverPort').value || '443';
+
+            clientId = randomId(10);
+            const wsUrl = `wss://${serverUrl}/${clientId}`;
+
+            log(`🔌 Connecting to ${wsUrl}...`, 'info');
+            websocket = new WebSocket(wsUrl);
+
+            websocket.onopen = () => {
+                log('✅ WebSocket connected', 'success');
+                document.getElementById('start').style.display = 'none';
+                document.getElementById('stop').style.display = 'inline-block';
+                document.getElementById('media').style.display = 'block';
+                sendRequest();
+            };
+
+            websocket.onmessage = async (evt) => {
+                if (typeof evt.data !== 'string') {
+                    return;
+                }
+                const message = JSON.parse(evt.data);
+                if (message.type == "offer") {
+                    log('📥 Received offer from server', 'info');
+                    document.getElementById('offer-sdp').textContent = message.sdp;
+                    turn_url = message.candidates.url;
+                    turn_username = message.candidates.username;
+                    turn_password = message.candidates.password;
+                    await handleOffer(message);
+                }
+            };
+
+            websocket.onclose = () => {
+                log('❌ WebSocket closed', 'error');
+            };
+
+            websocket.onerror = (error) => {
+                log(`❌ WebSocket error: ${error}`, 'error');
+            };
+        }
+
+        function stop() {
+            document.getElementById('stop').style.display = 'none';
+            document.getElementById('media').style.display = 'none';
+            document.getElementById('start').style.display = 'inline-block';
+
+            // close data channel
+            if (dc) {
+                dc.close();
+                dc = null;
+            }
+
+            // close transceivers
+            if (pc && pc.getTransceivers) {
+                pc.getTransceivers().forEach((transceiver) => {
+                    if (transceiver.stop) {
+                        transceiver.stop();
+                    }
+                });
+            }
+
+            // close local audio/video
+            if (pc) {
+                pc.getSenders().forEach((sender) => {
+                    const track = sender.track;
+                    if (track !== null) {
+                        sender.track.stop();
+                    }
+                });
+
+                // close peer connection
+                pc.close();
+                pc = null;
+            }
+
+            // close websocket
+            if (websocket) {
+                websocket.close();
+                websocket = null;
+            }
+
+            log('🔌 Disconnected', 'info');
+        }
+
+        // Helper function to generate a random ID
+        function randomId(length) {
+            const characters = '0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz';
+            const pickRandom = () => characters.charAt(Math.floor(Math.random() * characters.length));
+            return [...Array(length)].map(pickRandom).join('');
+        }
+
+        // Helper function to generate a timestamp
+        let startTime = null;
+
+        // Initialize
+        log('🎬 Ready to connect', 'info');
+        function copyToClipboard(text) {
+            const tempInput = document.createElement('textarea');
+            tempInput.value = text;
+            document.body.appendChild(tempInput);
+
+            // Select the text field
+            tempInput.select();
+            tempInput.setSelectionRange(0, 99999); // For mobile devices
+
+            let success = false;
+            try {
+                // Execute the copy command
+                success = document.execCommand('copy');
+            } catch (err) {
+                console.error('Failed to copy text:', err);
+            }
+
+            document.body.removeChild(tempInput);
+
+            const messageBox = document.getElementById('message-box');
+            messageBox.style.display = 'block';
+
+            if (success) {
+                messageBox.textContent = 'Copied.';
+                messageBox.className = 'bg-green-100 text-green-700 border border-green-200';
+            } else {
+                messageBox.textContent = 'Error. Please copy manually!';
+                messageBox.className = 'bg-red-100 text-red-700 border border-red-200';
+            }
+
+            // Hide message after 3 seconds
+            setTimeout(() => {
+                messageBox.style.display = 'none';
+            }, 3000);
+        }
+    </script>
+</body>
+
+</html>
