@@ -219,7 +219,7 @@
             <h1>🎥 IPCAM WebRTC Viewer Demo</h1>
 
             <div class="input-group">
-                <input type="text" id="serverId" placeholder="Device UDID" value="tEaMxZWKobYHJ"
+                <input type="text" id="serverId" placeholder="Device UDID" value="tEaMKdECF7A9Y"
                     style="max-width: 5000px;">
                 <input type="text" id="serverUrl" placeholder="Signaling Server" value="webrtc.5gen.care">
                 <input type="text" id="serverPort" placeholder="Port" value="443" style="max-width: 100px;">
@@ -292,6 +292,12 @@
 
         <div class="card">
             <h2>📊 Data Channel</h2>
+            
+            <div class="input-group" style="margin-top: 15px; margin-bottom: 15px;">
+                <input type="text" id="dc-command-input" placeholder="Type your message or command here..." disabled />
+                <button class="btn-primary" id="dc-send-btn" onclick="sendCustomMessage()" disabled>Send</button>
+            </div>
+
             <div class="log-container" id="data-channel"></div>
         </div>
 
@@ -315,10 +321,7 @@
         let websocket = null;
         let pc = null;
         let dc = null;
-        let turn_url = null;
-        let turn_username = null;
-        let turn_password = null;
-
+        
         function log(message, type = 'info') {
             const time = new Date().toLocaleTimeString();
             const className = type === 'error' ? 'log-error' :
@@ -328,22 +331,47 @@
             dataChannelLog.scrollTop = dataChannelLog.scrollHeight;
         }
 
-        function createPeerConnection() {
+        function sendCustomMessage() {
+            const inputEl = document.getElementById('dc-command-input');
+            const message = inputEl.value.trim();
+            
+            if (dc && dc.readyState === 'open' && message) {
+                dc.send(message);
+                log(`→ Sent custom command: ${message}`, 'info');
+                inputEl.value = '';
+            } else if (!message) {
+                log('❌ Cannot send an empty message', 'warn');
+            } else {
+                log('❌ Data channel is not open', 'error');
+            }
+        }
+
+        document.getElementById('dc-command-input').addEventListener('keypress', function(e) {
+            if (e.key === 'Enter') {
+                sendCustomMessage();
+            }
+        });
+
+        function createPeerConnection(offer) {
             const config = {
                 bundlePolicy: "max-bundle",
             };
-
+                    
             if (document.getElementById('use-stun').checked) {
-                config.iceServers = [
-                    { urls: 'stun:stun.l.google.com:19302' },
-                ];
-                if (turn_url) {
+                config.iceServers = [];
+                if (offer.candidates.url) {
+                    const turnHost = offer.candidates.url.split('?')[0];
                     config.iceServers.push({
-                        urls: ['turn:' + turn_url + '?transport=udp',
-                            'turn:' + turn_url + '?transport=tcp'],
-                        username: turn_username,
-                        credential: turn_password
+                        urls: [
+                            'turn:' + turnHost + '?transport=udp',
+                            // 'turn:' + turnHost + '?transport=tcp'
+                        ],
+                        username: offer.candidates.username,
+                        credential: offer.candidates.password
                     });
+                    log('TURN configured: ' + turnHost, 'info');
+                } else {
+                    log('No TURN server info received from device offer', 'warn');
                 }
             }
 
@@ -355,6 +383,10 @@
                         document.getElementById('mdns-warning').style.display = 'block';
                     }
                 }
+            });
+
+            pc.addEventListener('icecandidateerror', (event) => {
+                log(`❌ ICE candidate error: url=${event.url} errorCode=${event.errorCode} errorText=${event.errorText}`, 'error');
             });
 
             pc.addEventListener('iceconnectionstatechange', () => {
@@ -395,6 +427,8 @@
                 dc.onopen = () => {
                     dcStatusLog.textContent = 'Open';
                     log('📡 Data channel opened', 'success');
+                    document.getElementById('dc-command-input').disabled = false;
+                    document.getElementById('dc-send-btn').disabled = false;
                 };
 
                 let dcTimeout = null;
@@ -408,10 +442,14 @@
                         if (!dc) {
                             return;
                         }
-                        params[0] = 'Pong';
-                        const message = params.join(" ");
-                        log(`← Network latency ${parseInt(params[1]) / 2}ms`, 'success');
-                        dc.send(message);
+                        if(params[0].toUpperCase() == "PING") {
+                            params[0] = 'Pong';
+                            const message = params.join(" ");
+                            log(`← Network latency ${parseInt(params[1]) / 2}ms`, 'success');
+                            dc.send(message);
+                        } else {
+                            log(`← Response from device: ${evt.data}`, 'info');
+                        }
                     }, 1000);
                 }
 
@@ -420,6 +458,8 @@
                     dcTimeout = null;
                     dcStatusLog.textContent = 'Closed';
                     log('📡 Data channel closed', 'warn');
+                    document.getElementById('dc-command-input').disabled = true;
+                    document.getElementById('dc-send-btn').disabled = true;
                 };
             }
 
@@ -457,7 +497,7 @@
         }
 
         async function handleOffer(offer) {
-            pc = createPeerConnection();
+            pc = createPeerConnection(offer);
             await pc.setRemoteDescription(offer);
             log('✅ Remote description set', 'success');
             await sendAnswer(pc);
@@ -498,9 +538,6 @@
                 if (message.type == "offer") {
                     log('📥 Received offer from server', 'info');
                     document.getElementById('offer-sdp').textContent = message.sdp;
-                    turn_url = message.candidates.url;
-                    turn_username = message.candidates.username;
-                    turn_password = message.candidates.password;
                     await handleOffer(message);
                 }
             };
@@ -525,7 +562,10 @@
                 dc = null;
             }
 
-            // close transceivers
+            document.getElementById('dc-command-input').disabled = true;
+            document.getElementById('dc-send-btn').disabled = true;
+            document.getElementById('dc-command-input').value = '';
+
             if (pc && pc.getTransceivers) {
                 pc.getTransceivers().forEach((transceiver) => {
                     if (transceiver.stop) {
