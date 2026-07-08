@@ -392,6 +392,70 @@
             pc.addEventListener('iceconnectionstatechange', () => {
                 iceConnectionLog.textContent = pc.iceConnectionState;
                 log(`ICE Connection: ${pc.iceConnectionState}`, 'info');
+
+                if (pc.iceConnectionState === 'connected' || pc.iceConnectionState === 'completed') {
+                    // Track previous bytes for speed calculation
+                    window._prevBytesSent = 0;
+                    window._prevBytesRecv = 0;
+                    window._lastRtt = null;
+
+                    if (window._statsInterval) clearInterval(window._statsInterval);
+                    window._statsInterval = setInterval(async () => {
+                        if (!pc || pc.iceConnectionState === 'closed' || pc.iceConnectionState === 'failed') {
+                            clearInterval(window._statsInterval);
+                            return;
+                        }
+                        try {
+                            const stats = await pc.getStats();
+                            let activePair = null;
+                            const candidates = {};
+
+                            stats.forEach(r => {
+                                if (r.type === 'local-candidate' || r.type === 'remote-candidate')
+                                    candidates[r.id] = r;
+                            });
+
+                            stats.forEach(r => {
+                                if (r.type === 'candidate-pair' && r.state === 'succeeded' && r.nominated)
+                                    activePair = r;
+                            });
+
+                            if (activePair) {
+                                const localCand  = candidates[activePair.localCandidateId];
+                                const remoteCand = candidates[activePair.remoteCandidateId];
+
+                                const localType  = localCand  ? localCand.candidateType  : '?';
+                                const remoteType = remoteCand ? remoteCand.candidateType : '?';
+                                const localAddr  = localCand  ? `${localCand.address}:${localCand.port}`   : '?';
+                                const remoteAddr = remoteCand ? `${remoteCand.address}:${remoteCand.port}` : '?';
+                                const proto      = localCand  ? localCand.protocol : '?';
+
+                                const pathLabel = remoteType === 'relay' ? '🔄 RELAY'
+                                               : remoteType === 'srflx'  ? '🌐 REMOTE'
+                                               : '🏠 LAN';
+
+                                const bytesSent = activePair.bytesSent || 0;
+                                const bytesRecv = activePair.bytesReceived || 0;
+
+                                // Calculate KB/s speed over the 2s interval
+                                const uploadKBs   = ((bytesSent - window._prevBytesSent) / 1024 / 2).toFixed(1);
+                                const downloadKBs = ((bytesRecv - window._prevBytesRecv) / 1024 / 2).toFixed(1);
+                                window._prevBytesSent = bytesSent;
+                                window._prevBytesRecv = bytesRecv;
+
+                                // RTT from last PING message (stored by dc.onmessage)
+                                const rttStr = window._lastRtt !== null ? ` | 🔁 RTT ${window._lastRtt}ms` : '';
+
+                                log(`${pathLabel}(${proto}) ${localType}(${localAddr}) → ${remoteType}(${remoteAddr}) | ↑${uploadKBs}KB/s ↓${downloadKBs}KB/s${rttStr}`, 'info');
+                            }
+                        } catch(e) {}
+                    }, 2000);
+                } else if (pc.iceConnectionState === 'disconnected' || pc.iceConnectionState === 'failed' || pc.iceConnectionState === 'closed') {
+                    if (window._statsInterval) {
+                        clearInterval(window._statsInterval);
+                        window._statsInterval = null;
+                    }
+                }
             });
             iceConnectionLog.textContent = pc.iceConnectionState;
 
@@ -445,7 +509,8 @@
                         if(params[0].toUpperCase() == "PING") {
                             params[0] = 'Pong';
                             const message = params.join(" ");
-                            log(`← Network latency ${parseInt(params[1]) / 2}ms`, 'success');
+                            // Store RTT for stats interval to pick up — no separate log line
+                            window._lastRtt = parseInt(params[1]) / 2;
                             dc.send(message);
                         } else {
                             log(`← Response from device: ${evt.data}`, 'info');
