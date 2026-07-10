@@ -247,9 +247,9 @@
                     <select id="filterSelect" style="font-size:12px;padding:2px 4px;border-radius:4px;border:none">
                         <option value="none">None</option>
                         <option value="deblock">Deblock</option>
-                        <option value="smooth">Smooth</option>
+                        <option value="smooth" selected>Smooth</option>
                         <option value="sharpen">Sharpen</option>
-                        <option value="deblock+sharpen" selected>Deblock+Sharpen</option>
+                        <option value="deblock+sharpen">Deblock+Sharpen</option>
                     </select>
                 </div>
             </div>
@@ -417,6 +417,7 @@
                     window._prevBytesSent = 0;
                     window._prevBytesRecv = 0;
                     window._lastRtt = null;
+                    window._device_version = "";
                     window._prevVideoFrames = 0;
                     window._prevAudioFrames = 0;
                     window._prevVideoPacketsLost = 0;
@@ -473,8 +474,8 @@
 
                                 // RTT from last PING message (stored by dc.onmessage)
                                 const rttStr = window._lastRtt !== null ? ` | 🔁 RTT ${window._lastRtt}ms` : '';
-
-                                log(`${pathLabel}(${proto}) ${localType}(${localAddr}) → ${remoteType}(${remoteAddr}) | ↑${uploadKBs}KB/s ↓${downloadKBs}KB/s${rttStr}`, 'info');
+                                const devVer = window._device_version !== "" ? ` | Version ${window._device_version}` : '';
+                                log(`${pathLabel}(${proto}) ${localType}(${localAddr}) → ${remoteType}(${remoteAddr}) | ↑${uploadKBs}KB/s ↓${downloadKBs}KB/s${rttStr}${devVer}`, 'info');
                             }
 
                             // Track video and audio stats
@@ -678,6 +679,7 @@
                             const message = params.join(" ");
                             // Store RTT for stats interval to pick up — no separate log line
                             window._lastRtt = parseInt(params[1]) / 2;
+                            window._device_version = params[3];
                             dc.send(message);
                         } else {
                             log(`← Response from device: ${evt.data}`, 'info');
