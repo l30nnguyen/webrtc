@@ -768,9 +768,14 @@
                 }
                 const message = JSON.parse(evt.data);
                 if (message.type == "offer") {
-                    log('📥 Received offer from server', 'info');
+                    log('📥 Received offer from camera', 'info');
                     document.getElementById('offer-sdp').textContent = message.sdp;
                     await handleOffer(message);
+                } else if (message.type == "error") {
+                    log(`❌ Error from server: ${message.msg}`, 'error');
+                    stop();
+                } else if (message.type == "notif") {
+                    log(`Notification from camera: ${message.msg}`, 'info');
                 }
             };
 
