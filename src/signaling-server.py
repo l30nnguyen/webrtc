@@ -46,10 +46,7 @@ async def handle_websocket(websocket):
                 print('Client {} not found'.format(destination_id))
                 error_response = {
                     "type": "error",
-                    "error": {
-                        "id": 404,
-                        "msg": "Device offline"
-                    }
+                    "msg": "Device offline"
                 }
                 await websocket.send(json.dumps(error_response))
 
