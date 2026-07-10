@@ -132,6 +132,13 @@
             display: block;
         }
 
+        #videoCanvas {
+            width: 100%;
+            height: auto;
+            display: block;
+            image-rendering: auto;
+        }
+
         .stats-grid {
             display: grid;
             grid-template-columns: repeat(auto-fit, minmax(200px, 1fr));
@@ -216,10 +223,10 @@
 <body>
     <div class="container">
         <div class="card">
-            <h1>🎥 IPCAM WebRTC Viewer Demo V1.1</h1>
+            <h1>🎥 IPCAM WebRTC Viewer Demo V1.2</h1>
 
             <div class="input-group">
-                <input type="text" id="serverId" placeholder="Device UDID" value="tEaMKdECF7A9Y"
+                <input type="text" id="serverId" placeholder="Device UDID" value="tEaMKdECF44DK"
                     style="max-width: 5000px;">
                 <input type="text" id="serverUrl" placeholder="Signaling Server" value="webrtc.5gen.care">
                 <input type="text" id="serverPort" placeholder="Port" value="443" style="max-width: 100px;">
@@ -232,7 +239,19 @@
             </div>
 
             <div class="video-container" id="media" style="display: none">
-                <video id="video" autoplay playsinline controls></video>
+                <video id="video" autoplay playsinline muted style="display:none"></video>
+                <audio id="remoteAudio" autoplay></audio>
+                <canvas id="videoCanvas"></canvas>
+                <div style="position:absolute;top:8px;right:8px;display:flex;gap:6px;align-items:center;background:rgba(0,0,0,0.5);padding:4px 8px;border-radius:6px">
+                    <label style="color:#fff;font-size:12px;margin:0">Filter:</label>
+                    <select id="filterSelect" style="font-size:12px;padding:2px 4px;border-radius:4px;border:none">
+                        <option value="none">None</option>
+                        <option value="deblock">Deblock</option>
+                        <option value="smooth">Smooth</option>
+                        <option value="sharpen">Sharpen</option>
+                        <option value="deblock+sharpen" selected>Deblock+Sharpen</option>
+                    </select>
+                </div>
             </div>
 
             <div class="stats-grid">
@@ -398,6 +417,15 @@
                     window._prevBytesSent = 0;
                     window._prevBytesRecv = 0;
                     window._lastRtt = null;
+                    window._prevVideoFrames = 0;
+                    window._prevAudioFrames = 0;
+                    window._prevVideoPacketsLost = 0;
+                    window._prevVideoPacketsReceived = 0;
+                    window._prevAudioPacketsLost = 0;
+                    window._prevAudioPacketsReceived = 0;
+                    window._lastFramesDecoded = undefined;
+                    window._lastFramesReceived = undefined;
+                    window._lastVideoTime = 0;
 
                     if (window._statsInterval) clearInterval(window._statsInterval);
                     window._statsInterval = setInterval(async () => {
@@ -448,6 +476,91 @@
 
                                 log(`${pathLabel}(${proto}) ${localType}(${localAddr}) → ${remoteType}(${remoteAddr}) | ↑${uploadKBs}KB/s ↓${downloadKBs}KB/s${rttStr}`, 'info');
                             }
+
+                            // Track video and audio stats
+                            let videoStats = null;
+                            let audioStats = null;
+                            
+                            stats.forEach(r => {
+                                if (r.type === 'inbound-rtp') {
+                                    if (r.kind === 'video') {
+                                        videoStats = r;
+                                    } else if (r.kind === 'audio') {
+                                        audioStats = r;
+                                    }
+                                }
+                            });
+                            
+                            let statsLine = [];
+                            
+                            if (videoStats) {
+                                const framesDelta = (videoStats.framesReceived || 0) - window._prevVideoFrames;
+                                const videoFps = (framesDelta / 2).toFixed(1);
+
+                                // Video bitrate KB/s
+                                const videoBytesNow = videoStats.bytesReceived || 0;
+                                const videoBitrateKBs = ((videoBytesNow - (window._prevVideoBytes || 0)) / 1024 / 2).toFixed(1);
+                                window._prevVideoBytes = videoBytesNow;
+
+                                const videoLostDelta = (videoStats.packetsLost || 0) - window._prevVideoPacketsLost;
+                                const videoRecvDelta = (videoStats.packetsReceived || 0) - window._prevVideoPacketsReceived;
+                                const videoTotalDelta = videoLostDelta + videoRecvDelta;
+                                const videoRecentDrop = videoTotalDelta > 0 ? (videoLostDelta / videoTotalDelta * 100).toFixed(2) : 0;
+                                
+                                const videoTotal = (videoStats.packetsLost || 0) + (videoStats.packetsReceived || 0);
+                                const videoTotalDrop = videoTotal > 0 ? (videoStats.packetsLost / videoTotal * 100).toFixed(2) : 0;
+                                
+                                // Stall detection
+                                if (window._lastFramesDecoded !== undefined &&
+                                    videoStats.framesDecoded === window._lastFramesDecoded &&
+                                    (videoStats.framesReceived || 0) > window._lastFramesReceived) {
+                                    log('⚠️ Video frozen detected — decoder stalled', 'warn');
+                                }
+                                
+                                const framesDecoded = videoStats.framesDecoded || 0;
+                                const framesReceived = videoStats.framesReceived || 0;
+                                const framesDropped = videoStats.framesDropped || 0;
+                                const keyFramesDecoded = videoStats.keyFramesDecoded || 0;
+                                const pliCount = videoStats.pliCount || 0;
+                                const nackCount = videoStats.nackCount || 0;
+                                
+                                statsLine.push(`🎬 Video: ${videoFps}fps ${videoBitrateKBs}KB/s | drop(recent/total): ${videoRecentDrop}%/${videoTotalDrop}% | decoded:${framesDecoded} received:${framesReceived} dropped:${framesDropped} key:${keyFramesDecoded} pli:${pliCount} nack:${nackCount}`);
+                                
+                                window._prevVideoFrames = framesReceived;
+                                window._prevVideoPacketsLost = videoStats.packetsLost || 0;
+                                window._prevVideoPacketsReceived = videoStats.packetsReceived || 0;
+                                window._lastFramesDecoded = framesDecoded;
+                                window._lastFramesReceived = framesReceived;
+                            }
+                            
+                            if (audioStats) {
+                                // Audio bitrate KB/s
+                                const audioBytesNow = audioStats.bytesReceived || 0;
+                                const audioBitrateKBs = ((audioBytesNow - (window._prevAudioBytes || 0)) / 1024 / 2).toFixed(1);
+                                window._prevAudioBytes = audioBytesNow;
+
+                                // Audio "fps" = packets/s (each packet = one audio chunk)
+                                const audioPacketsNow = audioStats.packetsReceived || 0;
+                                const audioChunksPerSec = ((audioPacketsNow - (window._prevAudioPacketsForFps || 0)) / 2).toFixed(1);
+                                window._prevAudioPacketsForFps = audioPacketsNow;
+
+                                const audioLostDelta = (audioStats.packetsLost || 0) - window._prevAudioPacketsLost;
+                                const audioRecvDelta = (audioStats.packetsReceived || 0) - window._prevAudioPacketsReceived;
+                                const audioTotalDelta = audioLostDelta + audioRecvDelta;
+                                const audioRecentDrop = audioTotalDelta > 0 ? (audioLostDelta / audioTotalDelta * 100).toFixed(2) : 0;
+                                
+                                const audioTotal = (audioStats.packetsLost || 0) + (audioStats.packetsReceived || 0);
+                                const audioTotalDrop = audioTotal > 0 ? (audioStats.packetsLost / audioTotal * 100).toFixed(2) : 0;
+                                
+                                statsLine.push(`🔊 Audio: ${audioChunksPerSec}pkt/s ${audioBitrateKBs}KB/s | drop(recent/total): ${audioRecentDrop}%/${audioTotalDrop}%`);
+                                
+                                window._prevAudioPacketsLost = audioStats.packetsLost || 0;
+                                window._prevAudioPacketsReceived = audioStats.packetsReceived || 0;
+                            }
+                            
+                            if (statsLine.length > 0) {
+                                log(statsLine.join(' | '), 'info');
+                            }
                         } catch(e) {}
                     }, 2000);
                 } else if (pc.iceConnectionState === 'disconnected' || pc.iceConnectionState === 'failed' || pc.iceConnectionState === 'closed') {
@@ -472,16 +585,70 @@
             signalingLog.textContent = pc.signalingState;
 
             // Receive audio/video track
+            const videoEl = document.getElementById('video');
+            const audioEl = document.getElementById('remoteAudio');
+            const canvas  = document.getElementById('videoCanvas');
+            const ctx     = canvas.getContext('2d', { willReadFrequently: true });
+
+            // Canvas render loop with optional deblocking filter
+            let renderLoop = null;
+            function startRenderLoop() {
+                if (renderLoop) cancelAnimationFrame(renderLoop);
+                function render() {
+                    if (videoEl.readyState >= 2) {
+                        const filter = document.getElementById('filterSelect').value;
+                        if (canvas.width !== videoEl.videoWidth || canvas.height !== videoEl.videoHeight) {
+                            canvas.width  = videoEl.videoWidth  || 1280;
+                            canvas.height = videoEl.videoHeight || 720;
+                        }
+                        switch(filter) {
+                            case 'deblock':
+                                canvas.style.filter = 'blur(0.4px) contrast(1.05)';
+                                break;
+                            case 'smooth':
+                                canvas.style.filter = 'blur(0.7px) brightness(1.02)';
+                                break;
+                            case 'sharpen':
+                                canvas.style.filter = 'contrast(1.15) saturate(1.1)';
+                                break;
+                            case 'deblock+sharpen':
+                                canvas.style.filter = 'blur(0.4px) contrast(1.2) saturate(1.05)';
+                                break;
+                            default:
+                                canvas.style.filter = 'none';
+                        }
+                        ctx.drawImage(videoEl, 0, 0);
+                    }
+                    renderLoop = requestAnimationFrame(render);
+                }
+                render();
+            }
+
+            videoEl.addEventListener('loadedmetadata', () => {
+                canvas.width  = videoEl.videoWidth;
+                canvas.height = videoEl.videoHeight;
+                startRenderLoop();
+            });
+
+            // Route video and audio tracks to separate elements
+            // Video → muted hidden <video> (source for canvas)
+            // Audio → visible <audio> (unmuted, plays sound)
+            const videoStream = new MediaStream();
+            const audioStream = new MediaStream();
+
             pc.ontrack = (evt) => {
                 log(`✅ Track received: ${evt.track.kind}`, 'success');
                 document.getElementById('media').style.display = 'block';
-                const video = document.getElementById('video');
-                video.srcObject = evt.streams[0];
-                video.play().catch(err => {
-                    // Autoplay was blocked - user interaction required
-                    console.warn("Autoplay blocked, waiting for user click");
-                    video.controls = true; // show controls so user can manually play
-                });
+
+                if (evt.track.kind === 'video') {
+                    videoStream.addTrack(evt.track);
+                    videoEl.srcObject = videoStream;
+                    videoEl.play().catch(e => console.warn('Video play blocked:', e));
+                } else if (evt.track.kind === 'audio') {
+                    audioStream.addTrack(evt.track);
+                    audioEl.srcObject = audioStream;
+                    audioEl.play().catch(e => console.warn('Audio play blocked:', e));
+                }
             };
 
             // Receive data channel
@@ -651,6 +818,12 @@
                 // close peer connection
                 pc.close();
                 pc = null;
+                
+                // Clean up watchdog
+                if (window._videoWatchdog) {
+                    clearInterval(window._videoWatchdog);
+                    window._videoWatchdog = null;
+                }
             }
 
             // close websocket
