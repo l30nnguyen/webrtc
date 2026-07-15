@@ -223,11 +223,14 @@
 <body>
     <div class="container">
         <div class="card">
-            <h1>🎥 IPCAM WebRTC Viewer Demo V1.2</h1>
+            <h1>🎥 IPCAM WebRTC Viewer Demo V1.3</h1>
 
             <div class="input-group">
-                <input type="text" id="serverId" placeholder="Device UDID" value="tEaMKdECF44DK"
-                    style="max-width: 5000px;">
+                <input type="text" id="serverId" list="deviceList" placeholder="Device UDID" style="max-width: 5000px;">
+                <datalist id="deviceList">
+                    <option value="tEaMKdECF44DK" label="Thich -VN1">
+                    <option value="tEaMKdECF7A9Y" label="Leon - VN2">
+                </datalist>
                 <input type="text" id="serverUrl" placeholder="Signaling Server" value="webrtc.5gen.care">
                 <input type="text" id="serverPort" placeholder="Port" value="443" style="max-width: 100px;">
                 <div class="checkbox-group">
@@ -670,21 +673,21 @@
                     }
 
                     const params = evt.data.split(' ');
-                    dcTimeout = setTimeout(() => {
-                        if (!dc) {
-                            return;
-                        }
-                        if(params[0].toUpperCase() == "PING") {
-                            params[0] = 'Pong';
-                            const message = params.join(" ");
-                            // Store RTT for stats interval to pick up — no separate log line
-                            window._lastRtt = parseInt(params[1]) / 2;
-                            window._device_version = params[3];
-                            dc.send(message);
-                        } else {
-                            log(`← Response from device: ${evt.data}`, 'info');
-                        }
-                    }, 1000);
+                    
+                    if (!dc) {
+                        return;
+                    }
+
+                    if (params[0].toUpperCase() === "PING") {
+                        params[0] = 'Pong';
+                        const message = params.join(" ");
+                        // Store RTT for stats interval to pick up — no separate log line
+                        window._lastRtt = parseInt(params[1]) / 2;
+                        window._device_version = params[3];
+                        dc.send(message);
+                    } else {
+                        log(`← Response from device: ${evt.data}`, 'info');
+                    }
                 }
 
                 dc.onclose = () => {
