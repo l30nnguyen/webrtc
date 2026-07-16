@@ -476,7 +476,7 @@
                                 window._prevBytesRecv = bytesRecv;
 
                                 // RTT from last PING message (stored by dc.onmessage)
-                                const rttStr = window._lastRtt !== null ? ` | 🔁 RTT ${window._lastRtt}ms` : '';
+                                const rttStr = window._lastRtt !== null ? ` | 🔁 ping ${window._lastRtt}ms` : '';
                                 const devVer = window._device_version !== "" ? ` | Version ${window._device_version}` : '';
                                 log(`${pathLabel}(${proto}) ${localType}(${localAddr}) → ${remoteType}(${remoteAddr}) | ↑${uploadKBs}KB/s ↓${downloadKBs}KB/s${rttStr}${devVer}`, 'info');
                             }
