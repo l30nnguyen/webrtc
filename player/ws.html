@@ -223,7 +223,7 @@
 <body>
     <div class="container">
         <div class="card">
-            <h1>🎥 IPCAM WebRTC Viewer Demo V1.3</h1>
+            <h1>🎥 IPCAM WebRTC Viewer Demo V1.4</h1>
 
             <div class="input-group">
                 <input type="text" id="serverId" list="deviceList" placeholder="Device UDID" style="max-width: 5000px;">
@@ -344,13 +344,25 @@
         let pc = null;
         let dc = null;
         
+        // Smart auto-scroll: follow latest unless user scrolled up
+        let _autoScroll = true;
+        function initAutoScroll() {
+            dataChannelLog.addEventListener('scroll', () => {
+                const distFromBottom = dataChannelLog.scrollHeight - dataChannelLog.scrollTop - dataChannelLog.clientHeight;
+                _autoScroll = distFromBottom < 40; // re-enable if within 40px of bottom
+            });
+        }
+        initAutoScroll();
+
         function log(message, type = 'info') {
             const time = new Date().toLocaleTimeString();
             const className = type === 'error' ? 'log-error' :
                 type === 'success' ? 'log-success' :
                     type === 'warn' ? 'log-warn' : '';
             dataChannelLog.innerHTML += `<div class="log-entry ${className}"><span class="log-time">[${time}]</span> ${message}</div>`;
-            dataChannelLog.scrollTop = dataChannelLog.scrollHeight;
+            if (_autoScroll) {
+                dataChannelLog.scrollTop = dataChannelLog.scrollHeight;
+            }
         }
 
         function sendCustomMessage() {
@@ -417,12 +429,15 @@
 
                 if (pc.iceConnectionState === 'connected' || pc.iceConnectionState === 'completed') {
                     // Track previous bytes for speed calculation
-                    window._prevBytesSent = 0;
-                    window._prevBytesRecv = 0;
+                    window._prevBytesSent = null;
+                    window._prevBytesRecv = null;
                     window._lastRtt = null;
                     window._device_version = "";
-                    window._prevVideoFrames = 0;
+                    window._prevVideoFrames = null;
+                    window._prevVideoBytes = null;
                     window._prevAudioFrames = 0;
+                    window._prevAudioBytes = null;
+                    window._prevAudioPacketsForFps = null;
                     window._prevVideoPacketsLost = 0;
                     window._prevVideoPacketsReceived = 0;
                     window._prevAudioPacketsLost = 0;
@@ -498,12 +513,23 @@
                             let statsLine = [];
                             
                             if (videoStats) {
-                                const framesDelta = (videoStats.framesReceived || 0) - window._prevVideoFrames;
-                                const videoFps = (framesDelta / 2).toFixed(1);
-
-                                // Video bitrate KB/s
                                 const videoBytesNow = videoStats.bytesReceived || 0;
-                                const videoBitrateKBs = ((videoBytesNow - (window._prevVideoBytes || 0)) / 1024 / 2).toFixed(1);
+                                const framesNow = videoStats.framesReceived || 0;
+
+                                // Skip first interval — prev values are null, would show negative
+                                if (window._prevVideoBytes === null || window._prevVideoFrames === null) {
+                                    window._prevVideoBytes = videoBytesNow;
+                                    window._prevVideoFrames = framesNow;
+                                    window._prevVideoPacketsLost = videoStats.packetsLost || 0;
+                                    window._prevVideoPacketsReceived = videoStats.packetsReceived || 0;
+                                    window._lastFramesDecoded = videoStats.framesDecoded || 0;
+                                    window._lastFramesReceived = framesNow;
+                                    return;
+                                }
+
+                                const framesDelta = framesNow - window._prevVideoFrames;
+                                const videoFps = (framesDelta / 2).toFixed(1);
+                                const videoBitrateKBs = ((videoBytesNow - window._prevVideoBytes) / 1024 / 2).toFixed(1);
                                 window._prevVideoBytes = videoBytesNow;
 
                                 const videoLostDelta = (videoStats.packetsLost || 0) - window._prevVideoPacketsLost;
@@ -514,12 +540,23 @@
                                 const videoTotal = (videoStats.packetsLost || 0) + (videoStats.packetsReceived || 0);
                                 const videoTotalDrop = videoTotal > 0 ? (videoStats.packetsLost / videoTotal * 100).toFixed(2) : 0;
                                 
-                                // Stall detection
+                                // Stall detection with reason
                                 if (window._lastFramesDecoded !== undefined &&
                                     videoStats.framesDecoded === window._lastFramesDecoded &&
-                                    (videoStats.framesReceived || 0) > window._lastFramesReceived) {
-                                    log('⚠️ Video frozen detected — decoder stalled', 'warn');
+                                    framesNow > window._lastFramesReceived) {
+                                    const pliDelta  = (videoStats.pliCount  || 0) - (window._lastPliCount  || 0);
+                                    const nackDelta = (videoStats.nackCount || 0) - (window._lastNackCount || 0);
+                                    const dropDelta = (videoStats.framesDropped || 0) - (window._lastDropped || 0);
+                                    let reason = '';
+                                    if (pliDelta > 0)  reason += ` pli+${pliDelta}(waiting for keyframe)`;
+                                    if (nackDelta > 0) reason += ` nack+${nackDelta}(retransmit request)`;
+                                    if (dropDelta > 0) reason += ` dropped+${dropDelta}(jitter/late)`;
+                                    if (!reason)       reason  = ' no keyframe/missing reference frame';
+                                    log(`⚠️ Decoder stalled —${reason}`, 'warn');
                                 }
+                                window._lastPliCount  = videoStats.pliCount  || 0;
+                                window._lastNackCount = videoStats.nackCount || 0;
+                                window._lastDropped   = videoStats.framesDropped || 0;
                                 
                                 const framesDecoded = videoStats.framesDecoded || 0;
                                 const framesReceived = videoStats.framesReceived || 0;
@@ -530,7 +567,7 @@
                                 
                                 statsLine.push(`🎬 Video: ${videoFps}fps ${videoBitrateKBs}KB/s | drop(recent/total): ${videoRecentDrop}%/${videoTotalDrop}% | decoded:${framesDecoded} received:${framesReceived} dropped:${framesDropped} key:${keyFramesDecoded} pli:${pliCount} nack:${nackCount}`);
                                 
-                                window._prevVideoFrames = framesReceived;
+                                window._prevVideoFrames = framesNow;
                                 window._prevVideoPacketsLost = videoStats.packetsLost || 0;
                                 window._prevVideoPacketsReceived = videoStats.packetsReceived || 0;
                                 window._lastFramesDecoded = framesDecoded;
@@ -538,14 +575,24 @@
                             }
                             
                             if (audioStats) {
+                                const audioBytesNow   = audioStats.bytesReceived   || 0;
+                                const audioPacketsNow = audioStats.packetsReceived || 0;
+
+                                // Skip first interval
+                                if (window._prevAudioBytes === null || window._prevAudioPacketsForFps === null) {
+                                    window._prevAudioBytes          = audioBytesNow;
+                                    window._prevAudioPacketsForFps  = audioPacketsNow;
+                                    window._prevAudioPacketsLost    = audioStats.packetsLost || 0;
+                                    window._prevAudioPacketsReceived = audioPacketsNow;
+                                    return;
+                                }
+
                                 // Audio bitrate KB/s
-                                const audioBytesNow = audioStats.bytesReceived || 0;
-                                const audioBitrateKBs = ((audioBytesNow - (window._prevAudioBytes || 0)) / 1024 / 2).toFixed(1);
+                                const audioBitrateKBs = ((audioBytesNow - window._prevAudioBytes) / 1024 / 2).toFixed(1);
                                 window._prevAudioBytes = audioBytesNow;
 
-                                // Audio "fps" = packets/s (each packet = one audio chunk)
-                                const audioPacketsNow = audioStats.packetsReceived || 0;
-                                const audioChunksPerSec = ((audioPacketsNow - (window._prevAudioPacketsForFps || 0)) / 2).toFixed(1);
+                                // Audio packets/s
+                                const audioChunksPerSec = ((audioPacketsNow - window._prevAudioPacketsForFps) / 2).toFixed(1);
                                 window._prevAudioPacketsForFps = audioPacketsNow;
 
                                 const audioLostDelta = (audioStats.packetsLost || 0) - window._prevAudioPacketsLost;
