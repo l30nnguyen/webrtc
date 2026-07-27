@@ -24,6 +24,16 @@ logger.addHandler(logging.StreamHandler(sys.stdout))
 clients = {}       # client_id -> websocket
 device_info = {}  # client_id -> {connected_at, path, type}
 
+def load_turn_config():
+    try:
+        with open('turn.conf', 'r') as f:
+            servers = json.load(f)
+            if isinstance(servers, list):
+                return servers
+    except Exception as e:
+        print('Failed to read turn.conf: {}'.format(e))
+    return []
+
 
 async def handle_websocket(websocket):
     client_id = None
@@ -56,6 +66,11 @@ async def handle_websocket(websocket):
             destination_websocket = clients.get(destination_id)
             if destination_websocket:
                 message['id'] = client_id
+                if client_id.startswith('Player') and message.get('type') == 'request':
+                    servers = load_turn_config()
+                    if servers:
+                        message['turn'] = servers
+                        print('[{}] TURN padded to request for {}'.format(client_id, destination_id))
                 data = json.dumps(message)
                 print('[{}] >> {}'.format(destination_id, data))
                 send_start = time.time()
