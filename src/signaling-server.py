@@ -14,13 +14,15 @@ import time
 import asyncio
 import logging
 import websockets
+from aiohttp import web
 
 
 logger = logging.getLogger('websockets')
 logger.setLevel(logging.INFO)
 logger.addHandler(logging.StreamHandler(sys.stdout))
 
-clients = {}
+clients = {}       # client_id -> websocket
+device_info = {}  # client_id -> {connected_at, path, type}
 
 
 async def handle_websocket(websocket):
@@ -32,6 +34,11 @@ async def handle_websocket(websocket):
         print('Client {} connected'.format(client_id))
 
         clients[client_id] = websocket
+        device_info[client_id] = {
+            'connected_at': time.strftime('%Y-%m-%dT%H:%M:%SZ', time.gmtime()),
+            'path': websocket.request.path,
+            'remote': str(websocket.remote_address),
+        }
         while True:
             data = await websocket.recv()
             print('[{}] << {}'.format(client_id, data))
@@ -67,13 +74,42 @@ async def handle_websocket(websocket):
     finally:
         if client_id:
             del clients[client_id]
+            device_info.pop(client_id, None)
             print('Client {} disconnected'.format(client_id))
 
 
+# ── HTTP REST handlers ──────────────────────────────────────────────────────
+
+async def http_devices(request):
+    """GET /devices — return all currently connected clients."""
+    result = []
+    for cid, info in device_info.items():
+        result.append({
+            'id': cid,
+            'connected_at': info['connected_at'],
+            'remote': info['remote'],
+            'path': info['path'],
+        })
+    return web.json_response({
+        'count': len(result),
+        'devices': result,
+    }, headers={'Access-Control-Allow-Origin': '*'})
+
+
+async def http_health(request):
+    """GET /health — liveness check."""
+    return web.json_response({'status': 'ok', 'clients': len(clients)},
+                             headers={'Access-Control-Allow-Origin': '*'})
+
+
+# ── Main ─────────────────────────────────────────────────────────────────────
+
 async def main():
-    # Usage: ./server.py [[host:]port] [SSL certificate file]
+    # Usage: ./server.py [[host:]port] [SSL certificate file] [http port]
+    # Example: ./server.py 8000 cert.pem 8080
     endpoint_or_port = sys.argv[1] if len(sys.argv) > 1 else "8000"
-    ssl_cert = sys.argv[2] if len(sys.argv) > 2 else None
+    http_port        = int(sys.argv[2]) if len(sys.argv) > 2 else 8080
+    ssl_cert         = sys.argv[3] if len(sys.argv) > 3 else None
 
     endpoint = endpoint_or_port if ':' in endpoint_or_port else "127.0.0.1:" + endpoint_or_port
 
@@ -83,11 +119,25 @@ async def main():
     else:
         ssl_context = None
 
-    print('Listening on {}'.format(endpoint))
     host, port = endpoint.rsplit(':', 1)
 
-    server = await websockets.serve(handle_websocket, host, int(port), ssl=ssl_context)
-    await server.wait_closed()
+    # WebSocket signaling server
+    ws_server = await websockets.serve(handle_websocket, host, int(port), ssl=ssl_context)
+    print('WebSocket signaling listening on {}'.format(endpoint))
+
+    # HTTP REST server (always plain HTTP, sits behind nginx)
+    app = web.Application()
+    app.router.add_get('/devices', http_devices)
+    app.router.add_get('/health',  http_health)
+    runner = web.AppRunner(app)
+    await runner.setup()
+    site = web.TCPSite(runner, host, http_port)
+    await site.start()
+    print('HTTP REST API listening on {}:{}'.format(host, http_port))
+    print('  GET http://{}:{}/devices  — list online devices'.format(host, http_port))
+    print('  GET http://{}:{}/health   — health check'.format(host, http_port))
+
+    await ws_server.wait_closed()
 
 
 if __name__ == '__main__':
