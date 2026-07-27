@@ -10,6 +10,7 @@
 import sys
 import ssl
 import json
+import time
 import asyncio
 import logging
 import websockets
@@ -33,15 +34,25 @@ async def handle_websocket(websocket):
         clients[client_id] = websocket
         while True:
             data = await websocket.recv()
-            print('Client {} << {}'.format(client_id, data))
+            print('[{}] << {}'.format(client_id, data))
             message = json.loads(data)
+
+            # Handle clean disconnect message
+            if message.get('type') == 'bye':
+                print('[{}] sent bye, closing cleanly'.format(client_id))
+                await websocket.close(1000, 'Client disconnected')
+                break
+
             destination_id = message['id']
             destination_websocket = clients.get(destination_id)
             if destination_websocket:
                 message['id'] = client_id
                 data = json.dumps(message)
-                print('Client {} >> {}'.format(destination_id, data))
+                print('[{}] >> {}'.format(destination_id, data))
+                send_start = time.time()
                 await destination_websocket.send(data)
+                send_elapsed = (time.time() - send_start) * 1000
+                print('[{}] >> {} : sent in {:.2f}ms'.format(destination_id, data, send_elapsed))
             else:
                 print('Client {} not found'.format(destination_id))
                 error_response = {

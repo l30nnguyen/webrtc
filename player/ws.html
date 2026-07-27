@@ -831,8 +831,12 @@
                 }
             };
 
-            websocket.onclose = () => {
-                log('❌ WebSocket closed', 'error');
+            websocket.onclose = (evt) => {
+                if (evt.code === 1000) {
+                    log('🔌 WebSocket closed cleanly', 'info');
+                } else {
+                    log(`❌ WebSocket closed: code=${evt.code} reason=${evt.reason || 'unknown'}`, 'error');
+                }
             };
 
             websocket.onerror = (error) => {
@@ -883,11 +887,18 @@
                 }
             }
 
-            // close websocket
-            if (websocket) {
-                websocket.close();
-                websocket = null;
+            // Send proper close signal to signaling server before closing
+            if (websocket && websocket.readyState === WebSocket.OPEN) {
+                try {
+                    // Notify server this client is leaving cleanly
+                    websocket.send(JSON.stringify({ id: clientId, type: 'bye' }));
+                } catch(e) {}
+                // Close with normal closure code (1000) and reason
+                websocket.close(1000, 'User disconnected');
+            } else if (websocket) {
+                websocket.close(1000, 'User disconnected');
             }
+            websocket = null;
 
             log('🔌 Disconnected', 'info');
         }
