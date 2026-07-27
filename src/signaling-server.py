@@ -26,7 +26,7 @@ device_info = {}  # client_id -> {connected_at, path, type}
 
 def load_turn_config():
     try:
-        with open('turn.conf', 'r') as f:
+        with open('cfg/turn.conf', 'r') as f:
             servers = json.load(f)
             if isinstance(servers, list):
                 return servers
