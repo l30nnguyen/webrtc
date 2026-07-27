@@ -581,15 +581,16 @@
             };
                     
             config.iceServers = [];
-            if (offer.candidates.url) {
-                const turnHost = offer.candidates.url.split('?')[0];
+            const candidates = Array.isArray(offer.candidates) ? offer.candidates : [offer.candidates];
+            if (candidates.length > 0) {
+                const firstCandidate = candidates[0];
+                const turnHost = firstCandidate.url.split('?')[0];
                 config.iceServers.push({
                     urls: [
                         'turn:' + turnHost + '?transport=udp',
-                        // 'turn:' + turnHost + '?transport=tcp'
                     ],
-                    username: offer.candidates.username,
-                    credential: offer.candidates.password
+                    username: firstCandidate.username,
+                    credential: firstCandidate.password
                 });
                 log('TURN configured: ' + turnHost, 'info');
             } else {
