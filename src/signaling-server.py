@@ -56,7 +56,6 @@ async def handle_websocket(websocket):
         device_info[client_id] = {
             'connected_at': time.strftime('%Y-%m-%dT%H:%M:%SZ', time.gmtime()),
             'path': websocket.request.path,
-            'remote': str(websocket.remote_address),
             'type': device_type,
         }
         while True:
@@ -118,7 +117,6 @@ async def http_devices(request):
         result.append({
             'id': cid,
             'connected_at': info['connected_at'],
-            'remote': info['remote'],
             'path': info['path'],
             'type': info['type'],
         })

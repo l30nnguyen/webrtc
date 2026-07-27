@@ -499,7 +499,6 @@
                 return `<div class="device-card ${isSelected}" onclick="selectDevice('${d.id}', this)">
                     <div class="device-status"></div>
                     <div class="device-id">${d.id}</div>
-                    <div class="device-meta">🌐 ${d.remote}</div>
                     <div class="device-meta">⏱ Since ${connectedAt}</div>
                 </div>`;
             }).join('');
