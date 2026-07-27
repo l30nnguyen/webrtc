@@ -4,6 +4,7 @@
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <link rel="icon" href="data:,">
     <title>WebRTC Stream Viewer</title>
     <script src="https://webrtc.github.io/adapter/adapter-latest.js"></script>
     <style>
@@ -325,7 +326,7 @@
 <body>
     <div class="container">
         <div class="card">
-            <h1>🎥 IPCAM WebRTC Viewer Demo V1.3</h1>
+            <h1>🎥 IPCAM WebRTC Viewer Demo V1.4</h1>
 
             <!-- Server config row -->
             <div class="input-group" style="margin-bottom:10px">
@@ -465,7 +466,7 @@
                 const hRes  = await fetch(`https://${serverUrl}:${apiPort}/api/health`,
                                           { signal: AbortSignal.timeout(3000) });
                 const hData = await hRes.json();
-                healthBadge.textContent = `🟢 Server (${hData.clients} online)`;
+                healthBadge.textContent = `🟢 Server (${hData.clients} online) v${hData.version || '?'}`;
                 healthBadge.className   = 'health-badge';
             } catch(e) {
                 healthBadge.textContent = '🔴 Server offline';
@@ -476,7 +477,7 @@
 
             // Fetch device list
             try {
-                const res  = await fetch(`https://${serverUrl}:${apiPort}/api/devices`,
+                const res  = await fetch(`https://${serverUrl}:${apiPort}/api/devices?type=producer`,
                                          { signal: AbortSignal.timeout(3000) });
                 const data = await res.json();
                 renderDeviceGrid(data.devices || []);
@@ -951,7 +952,7 @@
             const serverUrl = document.getElementById('serverUrl').value || 'webrtc.5gen.care';
             const serverPort = '443';
 
-            clientId = randomId(10);
+            clientId = randomId(32, 'Player');
             const wsUrl = `wss://${serverUrl}/${clientId}`;
 
             log(`🔌 Connecting to ${wsUrl}...`, 'info');
@@ -1051,10 +1052,11 @@
         }
 
         // Helper function to generate a random ID
-        function randomId(length) {
+        function randomId(length, prefix = '') {
             const characters = '0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz';
             const pickRandom = () => characters.charAt(Math.floor(Math.random() * characters.length));
-            return [...Array(length)].map(pickRandom).join('');
+            const randLen = length - prefix.length;
+            return prefix + [...Array(randLen)].map(pickRandom).join('');
         }
 
         // Helper function to generate a timestamp

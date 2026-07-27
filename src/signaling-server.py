@@ -33,11 +33,13 @@ async def handle_websocket(websocket):
         client_id = splitted.pop(0)
         print('Client {} connected'.format(client_id))
 
+        device_type = 'consumer' if client_id.startswith('Player') else 'producer'
         clients[client_id] = websocket
         device_info[client_id] = {
             'connected_at': time.strftime('%Y-%m-%dT%H:%M:%SZ', time.gmtime()),
             'path': websocket.request.path,
             'remote': str(websocket.remote_address),
+            'type': device_type,
         }
         while True:
             data = await websocket.recv()
@@ -81,14 +83,21 @@ async def handle_websocket(websocket):
 # ── HTTP REST handlers ──────────────────────────────────────────────────────
 
 async def http_devices(request):
-    """GET /devices — return all currently connected clients."""
+    """GET /devices — return all currently connected clients.
+    Query params:
+      type  — filter by device type (e.g. ?type=producer)
+    """
+    type_filter = request.query.get('type', None)
     result = []
     for cid, info in device_info.items():
+        if type_filter and info.get('type') != type_filter:
+            continue
         result.append({
             'id': cid,
             'connected_at': info['connected_at'],
             'remote': info['remote'],
             'path': info['path'],
+            'type': info['type'],
         })
     return web.json_response({
         'count': len(result),
@@ -98,8 +107,11 @@ async def http_devices(request):
 
 async def http_health(request):
     """GET /health — liveness check."""
-    return web.json_response({'status': 'ok', 'clients': len(clients)},
-                             headers={'Access-Control-Allow-Origin': '*'})
+    return web.json_response({
+        'status': 'ok',
+        'clients': len(clients),
+        'version': '2.0.0',
+    }, headers={'Access-Control-Allow-Origin': '*'})
 
 
 # ── Main ─────────────────────────────────────────────────────────────────────
