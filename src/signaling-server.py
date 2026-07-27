@@ -35,6 +35,14 @@ def load_turn_config():
     return []
 
 
+def load_version():
+    try:
+        with open('cfg/version', 'r') as f:
+            return f.read().strip()
+    except Exception:
+        return 'unknown'
+
+
 async def handle_websocket(websocket):
     client_id = None
     try:
@@ -72,7 +80,7 @@ async def handle_websocket(websocket):
                         message['turn'] = servers
                         print('[{}] TURN padded to request for {}'.format(client_id, destination_id))
                 data = json.dumps(message)
-                print('[{}] >> {}'.format(destination_id, data))
+                # print('[{}] >> {}'.format(destination_id, data))
                 send_start = time.time()
                 await destination_websocket.send(data)
                 send_elapsed = (time.time() - send_start) * 1000
@@ -125,7 +133,7 @@ async def http_health(request):
     return web.json_response({
         'status': 'ok',
         'clients': len(clients),
-        'version': '2.0.0',
+        'version': load_version(),
     }, headers={'Access-Control-Allow-Origin': '*'})
 
 

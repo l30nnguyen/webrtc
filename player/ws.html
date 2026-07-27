@@ -326,7 +326,7 @@
 <body>
     <div class="container">
         <div class="card">
-            <h1>🎥 IPCAM WebRTC Viewer Demo V1.4</h1>
+            <h1>🎥 IPCAM WebRTC Viewer Demo <span id="viewerVersion"></span></h1>
 
             <!-- Server config row -->
             <div class="input-group" style="margin-bottom:10px">
@@ -468,6 +468,7 @@
                 const hData = await hRes.json();
                 healthBadge.textContent = `🟢 Server (${hData.clients} online) v${hData.version || '?'}`;
                 healthBadge.className   = 'health-badge';
+                document.getElementById('viewerVersion').textContent = 'v' + (hData.version || '?');
             } catch(e) {
                 healthBadge.textContent = '🔴 Server offline';
                 healthBadge.className   = 'health-badge offline';
