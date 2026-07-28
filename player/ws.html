@@ -496,10 +496,12 @@
             grid.innerHTML = devices.map(d => {
                 const isSelected   = d.id === _selectedDeviceId ? 'selected' : '';
                 const connectedAt  = new Date(d.connected_at).toLocaleTimeString();
+                const latency      = d.rtt/2;
                 return `<div class="device-card ${isSelected}" onclick="selectDevice('${d.id}', this)">
                     <div class="device-status"></div>
                     <div class="device-id">${d.id}</div>
                     <div class="device-meta">⏱ Since ${connectedAt}</div>
+                    <div class="device-meta">⏱ Latency ${latency}ms</div>
                 </div>`;
             }).join('');
 
