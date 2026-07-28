@@ -4,10 +4,11 @@
       "name": "webrtc_signalling",
       "script": "src/signaling-server.py",
       "interpreter": "./venv/bin/python3",
-      "args": "0.0.0.0:8000",
+      "args": "8000",
       "exec_mode": "fork",
       "autorestart": true,
-      "watch": false
+      "watch": false,
+      "log_date_format": "YYYY-MM-DD HH:mm:ss"
     }
   ]
 }
