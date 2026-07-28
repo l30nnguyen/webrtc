@@ -356,9 +356,9 @@
                     <select id="filterSelect" style="font-size:12px;padding:2px 4px;border-radius:4px;border:none">
                         <option value="none">None</option>
                         <option value="deblock">Deblock</option>
-                        <option value="smooth" selected>Smooth</option>
+                        <option value="smooth">Smooth</option>
                         <option value="sharpen">Sharpen</option>
-                        <option value="deblock+sharpen">Deblock+Sharpen</option>
+                        <option value="deblock+sharpen selected">Deblock+Sharpen</option>
                     </select>
                 </div>
             </div>
@@ -497,11 +497,12 @@
                 const isSelected   = d.id === _selectedDeviceId ? 'selected' : '';
                 const connectedAt  = new Date(d.connected_at).toLocaleTimeString();
                 const latency      = d.rtt/2;
+                const latencyFormatted = Number.isFinite(latency) ? latency.toFixed(1) : '—';
                 return `<div class="device-card ${isSelected}" onclick="selectDevice('${d.id}', this)">
                     <div class="device-status"></div>
                     <div class="device-id">${d.id}</div>
                     <div class="device-meta">⏱ Since ${connectedAt}</div>
-                    <div class="device-meta">⏱ Latency ${latency}ms</div>
+                    <div class="device-meta">⏱ Latency ${latencyFormatted}ms</div>
                 </div>`;
             }).join('');
 
