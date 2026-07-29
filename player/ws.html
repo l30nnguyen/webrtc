@@ -506,12 +506,19 @@
             grid.innerHTML = devices.map(d => {
                 const isSelected   = d.id === _selectedDeviceId ? 'selected' : '';
                 const connectedAt  = new Date(d.connected_at).toLocaleTimeString();
+                const durationMs   = Date.now() - new Date(d.connected_at).getTime();
+                const durationMin  = Math.floor(durationMs / 60000);
+                const durationH    = Math.floor(durationMin / 60);
+                const durationD    = Math.floor(durationH / 24);
+                const durationStr  = durationD > 0 ? `${durationD}d ${durationH % 24}h ${durationMin % 60}m` :
+                                     durationH > 0 ? `${durationH}h ${durationMin % 60}m` :
+                                     `${durationMin}m`;
                 const latency      = d.rtt/2;
                 const latencyFormatted = Number.isFinite(latency) ? latency.toFixed(1) : '—';
                 return `<div class="device-card ${isSelected}" onclick="selectDevice('${d.id}', this)">
                     <div class="device-status"></div>
                     <div class="device-id">${d.id}</div>
-                    <div class="device-meta">⏱ Since ${connectedAt}</div>
+                    <div class="device-meta">⏱ Since ${connectedAt} (${durationStr})</div>
                     <div class="device-meta">⏱ Latency ${latencyFormatted}ms</div>
                 </div>`;
             }).join('');
