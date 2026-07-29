@@ -1,7 +1,7 @@
 {
   "apps": [
     {
-      "name": "webrtc_signalling_python",
+      "name": "webrtc_python",
       "script": "src/python/src/signaling-server.py",
       "interpreter": "./venv/bin/python3",
       "args": "8000",
@@ -11,10 +11,12 @@
       "log_date_format": "YYYY-MM-DD HH:mm:ss"
     },
     {
-      "name": "webrtc_signalling_go",
-      "script": "src/go/src/signaling-server.go",
+      "name": "webrtc_go",
+      "cwd": "src/go",
+      "script": "src/signaling-server.go",
       "interpreter": "go",
-      "args": "run -port 8443 -player player/ws.html",
+      "interpreter_args": "run",
+      "args": "-root ../.. -port 8443 -https",
       "exec_mode": "fork",
       "autorestart": true,
       "watch": false,

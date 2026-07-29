@@ -49,9 +49,10 @@ type Server struct {
 	mu         sync.RWMutex
 	upgrader   websocket.Upgrader
 	playerPath string
+	rootDir    string
 }
 
-func NewServer(playerPath string) *Server {
+func NewServer(playerPath string, rootDir string) *Server {
 	return &Server{
 		clients: make(map[string]*Client),
 		upgrader: websocket.Upgrader{
@@ -60,11 +61,12 @@ func NewServer(playerPath string) *Server {
 			CheckOrigin:     func(r *http.Request) bool { return true },
 		},
 		playerPath: playerPath,
+		rootDir:    rootDir,
 	}
 }
 
-func loadTurnConfig() []map[string]interface{} {
-	data, err := os.ReadFile("cfg/turn.conf")
+func (s *Server) loadTurnConfig() []map[string]interface{} {
+	data, err := os.ReadFile(s.rootDir + "cfg/turn.conf")
 	if err != nil {
 		return nil
 	}
@@ -75,8 +77,8 @@ func loadTurnConfig() []map[string]interface{} {
 	return servers
 }
 
-func loadVersion() string {
-	data, err := os.ReadFile("cfg/version")
+func (s *Server) loadVersion() string {
+	data, err := os.ReadFile(s.rootDir + "cfg/version")
 	if err != nil {
 		return "unknown"
 	}
@@ -204,7 +206,7 @@ func (s *Server) readPump(c *Client) {
 		if exists {
 			msg["id"] = c.ID
 			if strings.HasPrefix(c.ID, "Player") && msg["type"] == "request" {
-				if servers := loadTurnConfig(); len(servers) > 0 {
+				if servers := s.loadTurnConfig(); len(servers) > 0 {
 					msg["turn"] = servers
 				}
 			}
@@ -304,7 +306,7 @@ func (s *Server) handleHealth(w http.ResponseWriter, r *http.Request) {
 	json.NewEncoder(w).Encode(map[string]interface{}{
 		"status":  "ok",
 		"clients": n,
-		"version": loadVersion(),
+		"version": s.loadVersion(),
 	})
 }
 
@@ -314,17 +316,23 @@ func (s *Server) handleDownloads(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "Invalid filename", http.StatusBadRequest)
 		return
 	}
-	filepath := "downloads/" + filename
+	filepath := s.rootDir + "downloads/" + filename
 	http.ServeFile(w, r, filepath)
 }
 
 func main() {
 	port := flag.Int("port", 8000, "Listen port")
-	certFile := flag.String("cert", "", "TLS cert+key PEM file")
-	playerPath := flag.String("player", "player/ws.html", "Path to ws.html")
+	rootDir := flag.String("root", "", "Root directory for config and downloads (default: current dir)")
+	https := flag.Bool("https", false, "Enable HTTPS (uses cert.pem from root directory)")
 	flag.Parse()
 
-	srv := NewServer(*playerPath)
+	root := *rootDir
+	if root != "" && !strings.HasSuffix(root, "/") {
+		root += "/"
+	}
+
+	playerPath := root + "player/ws.html"
+	srv := NewServer(playerPath, root)
 	go srv.sweepInactiveClients()
 
 	addr := fmt.Sprintf(":%d", *port)
@@ -333,8 +341,9 @@ func main() {
 		Handler: srv,
 	}
 
-	if *certFile != "" {
-		cert, err := tls.LoadX509KeyPair(*certFile, *certFile)
+	if *https {
+		certPath := root + "cert.pem"
+		cert, err := tls.LoadX509KeyPair(certPath, certPath)
 		if err != nil {
 			log.Fatalf("TLS: %v", err)
 		}
@@ -344,14 +353,14 @@ func main() {
 		}
 		log.Printf("Listening on wss://0.0.0.0%s", addr)
 		log.Printf("  GET https://0.0.0.0%s/         — WebRTC Player", addr)
-		log.Printf("  GET https://0.0.0.0%s/devices  — list online devices", addr)
-		log.Printf("  GET https://0.0.0.0%s/health   — health check", addr)
+		log.Printf("  GET https://0.0.0.0%s/api/devices  — list online devices", addr)
+		log.Printf("  GET https://0.0.0.0%s/api/health   — health check", addr)
 		log.Fatal(httpServer.ListenAndServeTLS("", ""))
 	} else {
 		log.Printf("Listening on ws://0.0.0.0%s", addr)
 		log.Printf("  GET http://0.0.0.0%s/         — WebRTC Player", addr)
-		log.Printf("  GET http://0.0.0.0%s/devices  — list online devices", addr)
-		log.Printf("  GET http://0.0.0.0%s/health   — health check", addr)
+		log.Printf("  GET http://0.0.0.0%s/api/devices  — list online devices", addr)
+		log.Printf("  GET http://0.0.0.0%s/api/health   — health check", addr)
 		log.Fatal(httpServer.ListenAndServe())
 	}
 }
