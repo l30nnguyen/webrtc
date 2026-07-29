@@ -333,6 +333,10 @@
                 <input type="text" id="serverUrl" placeholder="Signaling Server" value="webrtc.5gen.care" style="max-width:280px">
                 <button id="refreshBtn" onclick="fetchDevices()">🔄 Refresh</button>
                 <span id="healthBadge" class="health-badge offline">⚪ Server</span>
+                <label style="display:flex;align-items:center;gap:6px;margin-left:auto">
+                    <input type="checkbox" id="devServer" onchange="updatePort()">
+                    <span style="font-size:13px">dev server</span>
+                </label>
             </div>
 
             <!-- Device picker -->
@@ -449,6 +453,13 @@
         let websocket = null;
         let pc = null;
         let dc = null;
+        let apiPort = '443';
+        
+        function updatePort() {
+            const devServer = document.getElementById('devServer').checked;
+            apiPort = devServer ? '8443' : '443';
+            log(`🔀 Switched to ${devServer ? 'dev' : 'production'} server (port ${apiPort})`, 'info');
+        }
         
         // ── Device Picker ──────────────────────────────────────────────────────
         let _selectedDeviceId = null;
@@ -457,7 +468,6 @@
 
         async function fetchDevices() {
             const serverUrl   = document.getElementById('serverUrl').value || 'webrtc.5gen.care';
-            const apiPort     = '443';
             const healthBadge = document.getElementById('healthBadge');
             const grid        = document.getElementById('deviceGrid');
 
@@ -954,10 +964,9 @@
 
         function start() {
             const serverUrl = document.getElementById('serverUrl').value || 'webrtc.5gen.care';
-            const serverPort = '443';
 
             clientId = randomId(32, 'Player');
-            const wsUrl = `wss://${serverUrl}/${clientId}`;
+            const wsUrl = apiPort === '443' ? `wss://${serverUrl}/${clientId}` : `wss://${serverUrl}:${apiPort}/${clientId}`;
 
             log(`🔌 Connecting to ${wsUrl}...`, 'info');
             websocket = new WebSocket(wsUrl);

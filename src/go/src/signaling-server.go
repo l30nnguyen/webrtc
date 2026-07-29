@@ -38,6 +38,8 @@ type Client struct {
 	Send      chan []byte
 	done      chan struct{}
 	closeOnce sync.Once
+	pingMu    sync.Mutex
+	pingTime  time.Time
 }
 
 func (c *Client) Close() {
@@ -166,6 +168,13 @@ func (s *Server) readPump(c *Client) {
 	c.Conn.SetPongHandler(func(string) error {
 		c.Conn.SetReadDeadline(time.Now().Add(pongWait))
 		c.Info.LastSeen = time.Now()
+		c.pingMu.Lock()
+		if !c.pingTime.IsZero() {
+			rtt := time.Since(c.pingTime).Milliseconds()
+			c.Info.RTT = float64(rtt)
+			c.pingTime = time.Time{}
+		}
+		c.pingMu.Unlock()
 		return nil
 	})
 
@@ -246,6 +255,9 @@ func (s *Server) writePump(c *Client) {
 			}
 		case <-ticker.C:
 			c.Conn.SetWriteDeadline(time.Now().Add(WriteWait))
+			c.pingMu.Lock()
+			c.pingTime = time.Now()
+			c.pingMu.Unlock()
 			if err := c.Conn.WriteMessage(websocket.PingMessage, nil); err != nil {
 				return
 			}

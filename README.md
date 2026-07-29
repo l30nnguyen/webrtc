@@ -17,6 +17,7 @@ Python WebSocket signaling server for WebRTC peer connections with HTTP REST API
 
 | RAM | Max Connections | Safe Production |
 |-----|----------------|-----------------|
+| 1GB | ~50,000 | ~30,000-40,000 |
 | 2GB | ~100,000+ | ~50,000-80,000 |
 
 **Why Go is 5-10x more efficient:**

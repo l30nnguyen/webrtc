@@ -28,11 +28,11 @@ go build -o signaling-server src/signaling-server.go
 ### Start the server
 
 ```bash
-# Basic usage (no TLS)
-./signaling-server -port 8000 -player ../player/ws.html
+# With HTTPS (uses cert.pem from root directory)
+./signaling-server -root ../.. -port 8000 -https
 
-# With TLS certificate (combined cert+key PEM file)
-./signaling-server -port 8000 -cert cert.pem -player ../player/ws.html
+# Without HTTPS (HTTP only)
+./signaling-server -root ../.. -port 8000
 ```
 
 ### Flags
@@ -40,13 +40,13 @@ go build -o signaling-server src/signaling-server.go
 | Flag | Default | Description |
 |------|---------|-------------|
 | `-port` | 8000 | Listen port |
-| `-cert` | "" | TLS cert+key PEM file (enables WSS) |
-| `-player` | "player/ws.html" | Path to ws.html |
+| `-root` | "" | Root directory for config, downloads, and cert.pem |
+| `-https` | false | Enable HTTPS (uses cert.pem from root directory) |
 
 ### Run without building
 
 ```bash
-go run src/signaling-server.go -port 8000 -cert cert.pem -player ../player/ws.html
+go run src/signaling-server.go -root ../.. -port 8000 -https
 ```
 
 ## API Endpoints
