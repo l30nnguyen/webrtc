@@ -1,17 +1,16 @@
 {
   "apps": [
     {
-      "name": "webrtc_python",
-      "script": "src/python/src/signaling-server.py",
-      "interpreter": "./venv/bin/python3",
-      "args": "8000",
+      "name": "webrtc_prod",
+      "script": "./signaling-server",
+      "args": "-root . -port 8443 -https",
       "exec_mode": "fork",
-      "autorestart": true,
+      "autorestart": false,
       "watch": false,
       "log_date_format": "YYYY-MM-DD HH:mm:ss"
     },
     {
-      "name": "webrtc_go",
+      "name": "webrtc_dev",
       "cwd": "src/go",
       "script": "src/signaling-server.go",
       "interpreter": "go",

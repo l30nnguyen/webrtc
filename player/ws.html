@@ -458,7 +458,7 @@
         function updatePort() {
             const devServer = document.getElementById('devServer').checked;
             apiPort = devServer ? '8443' : '443';
-            log(`🔀 Switched to ${devServer ? 'dev' : 'production'} server (port ${apiPort})`, 'info');
+            log(`🔀 Switched to ${devServer ? 'dev' : 'production'} server`, 'info');
         }
         
         // ── Device Picker ──────────────────────────────────────────────────────
