@@ -3,7 +3,7 @@
     {
       "name": "webrtc_prod",
       "script": "./signaling-server",
-      "args": "-root . -port 8443 -https",
+      "args": "-root . -port 443 -https",
       "exec_mode": "fork",
       "autorestart": false,
       "watch": false,

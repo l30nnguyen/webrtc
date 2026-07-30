@@ -15,6 +15,7 @@ echo "Build successful!"
 
 # Start/restart with PM2
 echo "Starting PM2..."
-pm2 start pm2_start.json --only webrtc_go --update-env
+pm2 start pm2_start.json --only webrtc_prod --update-env
 
 echo "Deployment complete!"
+#sudo setcap 'cap_net_bind_service=+ep' signaling-server
