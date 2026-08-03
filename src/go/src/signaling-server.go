@@ -3,9 +3,12 @@ package main
 import (
 	"crypto/tls"
 	"encoding/json"
+	"errors"
 	"flag"
 	"fmt"
+	"io"
 	"log"
+	"net"
 	"net/http"
 	"os"
 	"strings"
@@ -181,10 +184,31 @@ func (s *Server) readPump(c *Client) {
 	for {
 		_, message, err := c.Conn.ReadMessage()
 		if err != nil {
-			if websocket.IsUnexpectedCloseError(err, websocket.CloseGoingAway, websocket.CloseNormalClosure) {
+			var closeErr *websocket.CloseError
+
+			if errors.As(err, &closeErr) {
+				switch closeErr.Code {
+				case websocket.CloseNormalClosure, websocket.CloseGoingAway:
+					// 1000 or 1001: Client sent a clean disconnect frame
+					log.Printf("[%s] Connection closed normally (%d)", c.ID, closeErr.Code)
+
+				case websocket.CloseAbnormalClosure:
+					// 1006: Hard drop at TCP/TLS layer (socket reset, peer crash, network timeout)
+					log.Printf("[%s] Connection dropped abnormally (1006 / unexpected EOF)", c.ID)
+
+				default:
+					// Other WebSocket RFC close codes (e.g., 1002 protocol error, 1003 invalid payload, 1008 policy violation)
+					log.Printf("[%s] WebSocket close frame received with code %d: %v", c.ID, closeErr.Code, closeErr.Text)
+				}
+			} else if errors.Is(err, io.EOF) || errors.Is(err, net.ErrClosed) {
+				// Low-level network socket EOF or closed connection before a WS frame could be parsed
+				log.Printf("[%s] Network connection reset/EOF", c.ID)
+			} else {
+				// Generic IO/read errors
 				log.Printf("[%s] Read error: %v", c.ID, err)
 			}
-			break
+
+			break // Exit loop and trigger cleanup
 		}
 
 		c.Info.LastSeen = time.Now()
