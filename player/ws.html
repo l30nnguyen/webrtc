@@ -367,6 +367,12 @@
                 </div>
             </div>
 
+            <div class="input-group" aria-label="Camera talkback">
+                <button class="btn-primary" id="enableMic" disabled>Enable microphone</button>
+                <button class="btn-danger" id="talk" disabled aria-pressed="false" style="touch-action:none;user-select:none">Hold to talk</button>
+                <span id="talkStatus" role="status" aria-live="polite">Connect to use talkback</span>
+            </div>
+
             <div class="stats-grid">
                 <div class="stat-item">
                     <div class="stat-label">ICE Connection</div>
@@ -454,6 +460,194 @@
         let pc = null;
         let dc = null;
         let apiPort = '443';
+
+        // PTT controller owns only one PeerConnection generation. No capture is
+        // requested until the user explicitly enables the microphone.
+        class TalkbackController {
+            constructor(audio, render, capture = constraints => navigator.mediaDevices.getUserMedia(constraints), report = () => {}) {
+                this.audio = audio;
+                this.render = render;
+                this.capture = capture;
+                this.report = report;
+                this.generation = 0;
+                this.sequence = 0;
+                this.reset();
+            }
+            update(message) {
+                if (message) this.message = message;
+                const ready = !!this.sender && this.channel?.readyState === 'open' && this.connected;
+                this.render({ enable: ready && !this.track && !this.pending,
+                    talk: ready && !!this.track, pressed: !!this.requestId,
+                    message: this.message });
+            }
+            reset() {
+                this.release();
+                ++this.generation;
+                if (this.track) this.track.stop();
+                if (this.pendingTrack) this.pendingTrack.stop();
+                this.pendingTrack = null;
+                this.track = null;
+                this.sender = null;
+                this.peer = null;
+                this.channel = null;
+                this.connected = false;
+                this.pending = false;
+                this.update('Connect to use talkback');
+            }
+            configure(peer) {
+                this.reset();
+                this.peer = peer;
+                const transceiver = peer.getTransceivers().find(t => t.mid === 'talkback');
+                if (transceiver && transceiver.receiver.track.kind === 'audio') {
+                    transceiver.direction = 'sendonly';
+                    this.sender = transceiver.sender;
+                    this.update('Waiting for talkback connection');
+                } else {
+                    this.update('Talkback is unavailable on this camera');
+                }
+            }
+            connection(peer) {
+                if (this.peer !== peer) return;
+                this.connected = ['connected', 'completed'].includes(peer.iceConnectionState);
+                if (!this.connected) this.release();
+                if (['closed', 'failed'].includes(peer.iceConnectionState)) {
+                    this.reset();
+                    return;
+                }
+                this.update(this.sender && this.connected ? 'Enable microphone to talk' : undefined);
+            }
+            setChannel(peer, channel) {
+                if (this.peer !== peer) return;
+                this.channel = channel;
+                this.update();
+            }
+            async enable() {
+                if (!this.sender || this.pending || this.track || !this.connected || this.channel?.readyState !== 'open') return;
+                if (!window.isSecureContext || !navigator.mediaDevices?.getUserMedia) {
+                    this.update('Microphone requires HTTPS or localhost');
+                    return;
+                }
+                const generation = this.generation, sender = this.sender;
+                this.pending = true;
+                this.update('Allow microphone access');
+                let stream;
+                try {
+                    stream = await this.capture({ audio: { channelCount: 1, echoCancellation: true, noiseSuppression: true }, video: false });
+                    const track = stream.getAudioTracks()[0];
+                    // Never attach an enabled microphone, including while a permission dialog is open.
+                    stream.getTracks().forEach(t => { t.enabled = false; });
+                    if (!track) throw new Error('No microphone audio track');
+                    if (generation !== this.generation) { stream.getTracks().forEach(t => t.stop()); return; }
+                    this.pendingTrack = track;
+                    await sender.replaceTrack(track);
+                    if (generation !== this.generation) { stream.getTracks().forEach(t => t.stop()); return; }
+                    this.pendingTrack = null;
+                    this.track = track;
+                    stream.getTracks().filter(t => t !== track).forEach(t => t.stop());
+                    track.onended = () => {
+                        if (this.track !== track) return;
+                        this.release();
+                        this.track = null;
+                        this.update('Microphone disconnected. Enable it again');
+                    };
+                    this.update('Ready — hold to talk');
+                } catch (error) {
+                    if (stream) stream.getTracks().forEach(t => t.stop());
+                    if (generation === this.generation) this.update('Microphone unavailable: ' + error.message);
+                } finally {
+                    if (generation === this.generation) { this.pendingTrack = null; this.pending = false; this.update(); }
+                }
+            }
+            send(action, requestId = this.requestId) {
+                if (!requestId || this.channel?.readyState !== 'open') return false;
+                try { this.channel.send(JSON.stringify({ type: 'ptt', action, requestId })); return true; }
+                catch (_) { return false; }
+            }
+            press() {
+                if (this.requestId || !this.track || !this.connected || this.channel?.readyState !== 'open') return;
+                this.requestId = this.generation + '-' + (++this.sequence) + '-' + Date.now();
+                this.lastGrant = Date.now();
+                if (!this.send('start')) { this.release(); return; }
+                this.update('Requesting speaker');
+                this.timer = setInterval(() => {
+                    // Stop locally if acknowledgements cease; camera has its own lease.
+                    if (Date.now() - this.lastGrant >= 2500 || !this.send('keepalive')) {
+                        this.release();
+                        this.update('Talkback timed out. Release and try again');
+                    }
+                }, 1000);
+            }
+            messageFrom(peer, channel, text) {
+                let message;
+                try { message = JSON.parse(text); } catch (_) { return false; }
+                if (!message || typeof message !== 'object' || Array.isArray(message) || message.type !== 'ptt') return false;
+                if (peer !== this.peer || channel !== this.channel || !this.requestId || message.requestId !== this.requestId) return true;
+                if (message.action === 'granted') {
+                    this.lastGrant = Date.now();
+                    if (this.track && this.connected) {
+                        if (this.savedMute === undefined) this.savedMute = this.audio.muted;
+                        this.audio.muted = true;
+                        this.track.enabled = true;
+                        this.update('Talking — release to listen');
+                    }
+                } else if (['busy', 'error', 'stopped'].includes(message.action)) {
+                    this.release();
+                    const detail = typeof message.message === 'string' && message.message
+                        ? message.message : (message.action === 'busy' ? 'Camera speaker is busy' : 'Talkback stopped');
+                    const code = typeof message.code === 'string' && message.code ? ' [' + message.code + ']' : '';
+                    this.update(code && !detail.includes(code.trim()) ? detail + code : detail);
+                    this.report('Talkback ' + message.action + code + ': ' + detail + ' (request ' + message.requestId + ')');
+                }
+                return true;
+            }
+            release() {
+                if (this.track) this.track.enabled = false;
+                if (this.timer) clearInterval(this.timer);
+                this.timer = null;
+                const requestId = this.requestId;
+                this.requestId = null; // Invalidate before sending stop, including synchronous callbacks.
+                this.send('stop', requestId);
+                if (this.savedMute !== undefined) { this.audio.muted = this.savedMute; this.savedMute = undefined; }
+                // Pointerup, lost capture and blur can all follow the same error.
+                // Only an actual release may replace the last camera diagnostic.
+                if (requestId) this.update(this.track ? 'Ready — hold to talk' : undefined);
+            }
+        }
+        const talkback = new TalkbackController(document.getElementById('remoteAudio'), state => {
+            document.getElementById('enableMic').disabled = !state.enable;
+            document.getElementById('talk').disabled = !state.talk;
+            document.getElementById('talk').setAttribute('aria-pressed', String(state.pressed));
+            document.getElementById('talkStatus').textContent = state.message || '';
+        }, undefined, message => {
+            // Device error details are untrusted text, never HTML.
+            const entry = document.createElement('div');
+            entry.className = 'log-entry log-warn';
+            entry.textContent = '[' + new Date().toLocaleTimeString() + '] ' + message;
+            dataChannelLog.appendChild(entry);
+            dataChannelLog.scrollTop = dataChannelLog.scrollHeight;
+        });
+        document.getElementById('enableMic').addEventListener('click', () => talkback.enable());
+        const talkButton = document.getElementById('talk');
+        let talkPointer = null;
+        talkButton.addEventListener('pointerdown', event => {
+            if (event.button !== 0 || talkPointer !== null) return;
+            event.preventDefault();
+            talkPointer = event.pointerId;
+            talkButton.setPointerCapture(event.pointerId);
+            talkback.press();
+        });
+        const releaseTalk = () => { talkPointer = null; talkback.release(); };
+        for (const name of ['pointerup', 'pointercancel', 'lostpointercapture', 'blur']) talkButton.addEventListener(name, releaseTalk);
+        talkButton.addEventListener('keydown', event => {
+            if (event.key === ' ' || event.key === 'Enter') { event.preventDefault(); if (!event.repeat) talkback.press(); }
+        });
+        talkButton.addEventListener('keyup', event => {
+            if (event.key === ' ' || event.key === 'Enter') { event.preventDefault(); releaseTalk(); }
+        });
+        window.addEventListener('blur', releaseTalk);
+        document.addEventListener('visibilitychange', () => { if (document.hidden) releaseTalk(); });
+        window.addEventListener('pagehide', () => talkback.reset());
+
         
         function updatePort() {
             const devServer = document.getElementById('devServer').checked;
@@ -632,6 +826,7 @@
             });
 
             pc.addEventListener('iceconnectionstatechange', () => {
+                talkback.connection(pc);
                 iceConnectionLog.textContent = pc.iceConnectionState;
                 log(`ICE Connection: ${pc.iceConnectionState}`, 'info');
 
@@ -877,9 +1072,12 @@
 
             // Receive data channel
             pc.ondatachannel = (evt) => {
+                if (talkback.peer !== pc) { evt.channel.close(); return; }
                 dc = evt.channel;
+                const channel = dc;
 
                 dc.onopen = () => {
+                    talkback.setChannel(pc, channel);
                     dcStatusLog.textContent = 'Open';
                     log('📡 Data channel opened', 'success');
                     document.getElementById('dc-command-input').disabled = false;
@@ -892,6 +1090,7 @@
                         return;
                     }
 
+                    if (talkback.messageFrom(pc, channel, evt.data)) return;
                     const params = evt.data.split(' ');
                     
                     if (!dc) {
@@ -911,6 +1110,7 @@
                 }
 
                 dc.onclose = () => {
+                    if (talkback.channel === channel) talkback.reset();
                     clearTimeout(dcTimeout);
                     dcTimeout = null;
                     dcStatusLog.textContent = 'Closed';
@@ -923,7 +1123,7 @@
             return pc;
         }
 
-        async function waitGatheringComplete() {
+        async function waitGatheringComplete(pc) {
             return new Promise((resolve) => {
                 if (pc.iceGatheringState === 'complete') {
                     resolve();
@@ -939,7 +1139,8 @@
 
         async function sendAnswer(pc) {
             await pc.setLocalDescription(await pc.createAnswer());
-            await waitGatheringComplete();
+            await waitGatheringComplete(pc);
+            if (talkback.peer !== pc || !websocket || websocket.readyState !== WebSocket.OPEN) return;
 
             const answer = pc.localDescription;
             document.getElementById('answer-sdp').textContent = answer.sdp;
@@ -954,10 +1155,16 @@
         }
 
         async function handleOffer(offer) {
-            pc = createPeerConnection(offer);
-            await pc.setRemoteDescription(offer);
+            talkback.reset();
+            if (pc) pc.close();
+            const peer = createPeerConnection(offer);
+            pc = peer;
+            await peer.setRemoteDescription(offer);
+            if (pc !== peer) return;
+            talkback.configure(peer);
+            talkback.connection(peer);
             log('✅ Remote description set', 'success');
-            await sendAnswer(pc);
+            await sendAnswer(peer);
         }
 
         function sendRequest() {
@@ -987,7 +1194,7 @@
             };
 
             websocket.onmessage = async (evt) => {
-                if (typeof evt.data !== 'string') {
+                if (websocket !== signalingSocket || typeof evt.data !== 'string') {
                     return;
                 }
                 const message = JSON.parse(evt.data);
@@ -1003,7 +1210,9 @@
                 }
             };
 
+            const signalingSocket = websocket;
             websocket.onclose = () => {
+                if (websocket === signalingSocket) stop();
                 log('❌ WebSocket closed', 'error');
             };
 
@@ -1013,6 +1222,7 @@
         }
 
         function stop() {
+            talkback.reset();
             document.getElementById('stop').style.display = 'none';
             document.getElementById('media').style.display = 'none';
             document.getElementById('start').style.display = 'inline-block';
