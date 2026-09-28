@@ -133,3 +133,78 @@ pm2 start pm2_start.json
 ```
 
 The default configuration uses the Go server.
+
+## TLS certificate renewal
+
+`renewcert.sh` checks and renews `webrtc.5gen.care` through nginx's HTTP-01
+webroot at `/var/www/certbot`, then atomically writes `cert.pem` as the current
+`fullchain.pem` plus `privkey.pem`. It uses an explicit
+`certbot certonly --webroot` request every time, rather than `certbot renew`,
+so a stale standalone renewal configuration cannot conflict with nginx on port
+80. Before starting Certbot, it creates the challenge directory if needed and
+verifies that a local TCP listener is active on port 80. It restarts the PM2
+applications only when that generated file differs from the one currently
+served.
+
+Run it daily as root. It restarts PM2 as the owner of the deployment directory
+(for example, `admin` for `/home/admin/webrtc`), so it uses that user's PM2
+daemon rather than creating `/root/.pm2`:
+
+```bash
+0 0 * * * /home/leon/code/webrtc/server/renewcert.sh >> /var/log/webrtc-cert-renewal.log 2>&1
+```
+
+The deployed nginx site must serve this path from the same webroot:
+
+```nginx
+location /.well-known/acme-challenge/ {
+    root /var/www/certbot;
+}
+```
+
+If an earlier deployment failed with `certbot webroot does not exist`, pull the
+updated script and run it again as root. It creates
+`/var/www/certbot/.well-known/acme-challenge` safely when absent:
+
+```bash
+git pull
+sudo ./renewcert.sh
+```
+
+If it reports no listener on port 80, start or repair nginx before retrying.
+The command is safe to use to inspect that listener:
+
+```bash
+sudo ss -ltnp 'sport = :80'
+sudo ./renewcert.sh
+```
+
+The script restarts `webrtc_prod` and `webrtc_dev` by default because nginx
+redirects public HTTP traffic to port 8443. On a host that uses different
+process names, set them explicitly, for example
+`PM2_APPS=signaling-prod renewcert.sh`.
+
+If the script is deployed in a root-owned directory but PM2 belongs to another
+account, set that account explicitly. This also supports a deliberate
+root-owned PM2 deployment:
+
+```bash
+sudo PM2_USER=admin /home/admin/webrtc/server/renewcert.sh
+sudo PM2_USER=root PM2_USER_HOME=/root PM2_HOME=/root/.pm2 ./renewcert.sh
+```
+
+If an older version published `cert.pem` but failed to restart PM2, the
+running Go server still presents its old in-memory certificate. Repair that
+state once after pulling this update:
+
+```bash
+sudo FORCE_RESTART=1 ./renewcert.sh
+```
+
+The script records a pending restart after each certificate publication and
+retries it on the next run if PM2 fails. `FORCE_RESTART=1` is only needed to
+recover publications made by the older script, which did not leave that marker.
+
+For compatibility the generated PEM keeps mode `644`. If the signaling server
+runs under a dedicated group, set `CERT_MODE=640` and grant that group read
+access to the file.
