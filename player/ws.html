@@ -68,6 +68,15 @@
             border-color: #667eea;
         }
 
+        #recordingSelect {
+            min-width: 220px;
+            padding: 12px 16px;
+            border: 2px solid #e2e8f0;
+            border-radius: 8px;
+            font-size: 14px;
+            background: white;
+        }
+
         input[type="checkbox"] {
             width: 20px;
             height: 20px;
@@ -373,6 +382,16 @@
                 <span id="talkStatus" role="status" aria-live="polite">Connect to use talkback</span>
             </div>
 
+            <div class="input-group" aria-label="Recording playback">
+                <button class="btn-primary" id="recordingLoad" disabled>Load recordings</button>
+                <select id="recordingSelect" disabled aria-label="Recording">
+                    <option value="">No recordings loaded</option>
+                </select>
+                <button class="btn-primary" id="recordingPlay" disabled>Play recording</button>
+                <button class="btn-danger" id="recordingStop" disabled>Return to live</button>
+                <span id="recordingStatus" role="status" aria-live="polite">Connect to load recordings</span>
+            </div>
+
             <div class="stats-grid">
                 <div class="stat-item">
                     <div class="stat-label">ICE Connection</div>
@@ -613,6 +632,202 @@
                 if (requestId) this.update(this.track ? 'Ready — hold to talk' : undefined);
             }
         }
+
+        // Recording playback is scoped to the current PeerConnection generation.
+        // Camera replies carry the request ID so delayed replies from an older
+        // connection or an earlier button press cannot change this UI.
+        class RecordingController {
+            constructor(render, report = () => {}) {
+                this.render = render;
+                this.report = report;
+                this.generation = 0;
+                this.sequence = 0;
+                this.reset();
+            }
+            update(message) {
+                if (message !== undefined) this.message = message;
+                const ready = !!this.peer && this.connected && this.channel?.readyState === 'open';
+                this.render({
+                    ready,
+                    files: this.files.slice(),
+                    selectedPath: this.selectedPath,
+                    playing: this.playing,
+                    message: this.message
+                });
+            }
+            stopCountdown() {
+                if (this.countdownTimer !== null) clearInterval(this.countdownTimer);
+                this.countdownTimer = null;
+                this.startedAt = 0;
+                this.durationMs = 0;
+            }
+            playbackMessage(path, remainingMs) {
+                const seconds = Math.ceil(remainingMs / 1000);
+                return (path ? 'Playing ' + path : 'Playing recording') + ' (' +
+                    Math.floor(seconds / 60) + ':' + String(seconds % 60).padStart(2, '0') + ' remaining)';
+            }
+            startCountdown(path, durationMs) {
+                this.stopCountdown();
+                if (!Number.isFinite(durationMs) || durationMs <= 0) {
+                    this.update(path ? 'Playing ' + path : 'Playing recording');
+                    return;
+                }
+                this.startedAt = performance.now();
+                this.durationMs = durationMs;
+                const render = () => {
+                    const remainingMs = Math.max(0, this.durationMs - (performance.now() - this.startedAt));
+                    this.update(this.playbackMessage(path, remainingMs));
+                };
+                render();
+                this.countdownTimer = setInterval(render, 1000);
+            }
+            reset() {
+                this.stopCountdown();
+                ++this.generation;
+                this.peer = null;
+                this.channel = null;
+                this.connected = false;
+                this.files = [];
+                this.selectedPath = '';
+                this.pending = new Map();
+                this.latestListRequestId = null;
+                this.latestMediaRequestId = null;
+                this.activeRequestId = null;
+                this.playing = false;
+                this.update('Connect to load recordings');
+            }
+            configure(peer) {
+                this.reset();
+                this.peer = peer;
+                this.update('Waiting for recording connection');
+            }
+            connection(peer) {
+                if (this.peer !== peer) return;
+                this.connected = ['connected', 'completed'].includes(peer.iceConnectionState);
+                if (!this.connected) {
+                    this.stopCountdown();
+                    this.pending.clear();
+                    this.activeRequestId = null;
+                    this.playing = false;
+                    this.files = [];
+                    this.selectedPath = '';
+                }
+                this.update(this.connected ? undefined : 'Connection lost');
+            }
+            setChannel(peer, channel) {
+                if (this.peer !== peer) return;
+                this.channel = channel;
+                this.update();
+            }
+            request(action, path = '') {
+                if (!this.peer || !this.connected || this.channel?.readyState !== 'open') {
+                    this.update('Recording controls are unavailable');
+                    return null;
+                }
+                if (action === 'play' && (!path || !this.files.some(file => file.path === path))) {
+                    this.update('Select a recording first');
+                    return null;
+                }
+                const requestId = this.generation + '-' + (++this.sequence) + '-' + Date.now();
+                const message = { type: 'recording', action, requestId };
+                if (action === 'play') message.path = path;
+                try {
+                    if (action === 'list' && this.latestListRequestId) this.pending.delete(this.latestListRequestId);
+                    this.channel.send(JSON.stringify(message));
+                    if (action === 'play' || action === 'stop') {
+                        // A newer media command supersedes any earlier play/stop
+                        // acknowledgement and the prior active playback.
+                        for (const [id, pendingAction] of this.pending) {
+                            if (pendingAction === 'play' || pendingAction === 'stop') this.pending.delete(id);
+                        }
+                        this.latestMediaRequestId = requestId;
+                        this.activeRequestId = null;
+                        this.playing = false;
+                        this.stopCountdown();
+                    }
+                    this.pending.set(requestId, action);
+                    if (action === 'list') {
+                        this.latestListRequestId = requestId;
+                        this.update('Loading recordings');
+                    } else if (action === 'play') {
+                        this.update('Starting recording');
+                    } else {
+                        this.update('Returning to live view');
+                    }
+                    return requestId;
+                } catch (_) {
+                    this.update('Unable to send recording request');
+                    return null;
+                }
+            }
+            load() { return this.request('list'); }
+            play() { return this.request('play', this.selectedPath); }
+            stop() { return this.request('stop'); }
+            select(path) {
+                this.selectedPath = this.files.some(file => file.path === path) ? path : '';
+                this.update();
+            }
+            messageFrom(peer, channel, text) {
+                let message;
+                try { message = JSON.parse(text); } catch (_) { return false; }
+                if (!message || typeof message !== 'object' || Array.isArray(message) || message.type !== 'recording') return false;
+                if (peer !== this.peer || channel !== this.channel || typeof message.requestId !== 'string') return true;
+
+                const request = this.pending.get(message.requestId);
+                const active = message.requestId === this.activeRequestId;
+                if (message.action === 'list') {
+                    if (request !== 'list' || message.requestId !== this.latestListRequestId) return true;
+                    this.pending.delete(message.requestId);
+                    const files = Array.isArray(message.files) ? message.files : [];
+                    this.files = files.filter(file => file && typeof file.path === 'string' && file.path.length > 0)
+                        .map(file => ({ path: file.path }));
+                    if (!this.files.some(file => file.path === this.selectedPath)) {
+                        this.selectedPath = this.files.length ? this.files[0].path : '';
+                    }
+                    this.update(this.files.length ? this.files.length + ' recording' + (this.files.length === 1 ? '' : 's') + ' loaded' : 'No recordings found');
+                    return true;
+                }
+                if (message.action === 'playing') {
+                    if (request !== 'play' || message.requestId !== this.latestMediaRequestId) return true;
+                    this.pending.delete(message.requestId);
+                    this.activeRequestId = message.requestId;
+                    this.playing = true;
+                    const path = typeof message.path === 'string' ? message.path : this.selectedPath;
+                    this.startCountdown(path, message.durationMs);
+                    return true;
+                }
+                if (message.action === 'live') {
+                    if (message.requestId !== this.latestMediaRequestId || (request !== 'stop' && !active)) return true;
+                    this.pending.delete(message.requestId);
+                    this.activeRequestId = null;
+                    this.playing = false;
+                    this.stopCountdown();
+                    this.update('Live view');
+                    return true;
+                }
+                if (message.action === 'ended') {
+                    if (!active || message.requestId !== this.latestMediaRequestId) return true;
+                    this.activeRequestId = null;
+                    this.playing = false;
+                    this.stopCountdown();
+                    this.update('Recording ended — live view');
+                    return true;
+                }
+                if (message.action === 'error') {
+                    const listRequest = request === 'list';
+                    const mediaRequest = (request === 'play' || request === 'stop' || active)
+                        && message.requestId === this.latestMediaRequestId;
+                    if (!listRequest && !mediaRequest) return true;
+                    this.pending.delete(message.requestId);
+                    if (active) { this.activeRequestId = null; this.playing = false; this.stopCountdown(); }
+                    const detail = typeof message.message === 'string' && message.message ? message.message : 'Recording request failed';
+                    this.update(detail);
+                    this.report('Recording error: ' + detail + ' (request ' + message.requestId + ')');
+                    return true;
+                }
+                return true;
+            }
+        }
         const talkback = new TalkbackController(document.getElementById('remoteAudio'), state => {
             document.getElementById('enableMic').disabled = !state.enable;
             document.getElementById('talk').disabled = !state.talk;
@@ -626,7 +841,43 @@
             dataChannelLog.appendChild(entry);
             dataChannelLog.scrollTop = dataChannelLog.scrollHeight;
         });
+        const recording = new RecordingController(state => {
+            const load = document.getElementById('recordingLoad');
+            const select = document.getElementById('recordingSelect');
+            const play = document.getElementById('recordingPlay');
+            const stop = document.getElementById('recordingStop');
+            load.disabled = !state.ready;
+            select.disabled = !state.ready || state.files.length === 0;
+            play.disabled = !state.ready || !state.selectedPath;
+            stop.disabled = !state.ready;
+            select.textContent = '';
+            if (state.files.length === 0) {
+                const option = document.createElement('option');
+                option.value = '';
+                option.textContent = 'No recordings loaded';
+                select.appendChild(option);
+            } else {
+                for (const file of state.files) {
+                    const option = document.createElement('option');
+                    option.value = file.path;
+                    option.textContent = file.path;
+                    option.selected = file.path === state.selectedPath;
+                    select.appendChild(option);
+                }
+            }
+            document.getElementById('recordingStatus').textContent = state.message || '';
+        }, message => {
+            const entry = document.createElement('div');
+            entry.className = 'log-entry log-warn';
+            entry.textContent = '[' + new Date().toLocaleTimeString() + '] ' + message;
+            dataChannelLog.appendChild(entry);
+            dataChannelLog.scrollTop = dataChannelLog.scrollHeight;
+        });
         document.getElementById('enableMic').addEventListener('click', () => talkback.enable());
+        document.getElementById('recordingLoad').addEventListener('click', () => recording.load());
+        document.getElementById('recordingSelect').addEventListener('change', event => recording.select(event.target.value));
+        document.getElementById('recordingPlay').addEventListener('click', () => recording.play());
+        document.getElementById('recordingStop').addEventListener('click', () => recording.stop());
         const talkButton = document.getElementById('talk');
         let talkPointer = null;
         talkButton.addEventListener('pointerdown', event => {
@@ -646,7 +897,7 @@
         });
         window.addEventListener('blur', releaseTalk);
         document.addEventListener('visibilitychange', () => { if (document.hidden) releaseTalk(); });
-        window.addEventListener('pagehide', () => talkback.reset());
+        window.addEventListener('pagehide', () => { talkback.reset(); recording.reset(); });
 
         
         function updatePort() {
@@ -827,6 +1078,7 @@
 
             pc.addEventListener('iceconnectionstatechange', () => {
                 talkback.connection(pc);
+                recording.connection(pc);
                 iceConnectionLog.textContent = pc.iceConnectionState;
                 log(`ICE Connection: ${pc.iceConnectionState}`, 'info');
 
@@ -1072,12 +1324,13 @@
 
             // Receive data channel
             pc.ondatachannel = (evt) => {
-                if (talkback.peer !== pc) { evt.channel.close(); return; }
+                if (talkback.peer !== pc || recording.peer !== pc) { evt.channel.close(); return; }
                 dc = evt.channel;
                 const channel = dc;
 
                 dc.onopen = () => {
                     talkback.setChannel(pc, channel);
+                    recording.setChannel(pc, channel);
                     dcStatusLog.textContent = 'Open';
                     log('📡 Data channel opened', 'success');
                     document.getElementById('dc-command-input').disabled = false;
@@ -1091,6 +1344,7 @@
                     }
 
                     if (talkback.messageFrom(pc, channel, evt.data)) return;
+                    if (recording.messageFrom(pc, channel, evt.data)) return;
                     const params = evt.data.split(' ');
                     
                     if (!dc) {
@@ -1111,6 +1365,7 @@
 
                 dc.onclose = () => {
                     if (talkback.channel === channel) talkback.reset();
+                    if (recording.channel === channel) recording.reset();
                     clearTimeout(dcTimeout);
                     dcTimeout = null;
                     dcStatusLog.textContent = 'Closed';
@@ -1156,6 +1411,7 @@
 
         async function handleOffer(offer) {
             talkback.reset();
+            recording.reset();
             if (pc) pc.close();
             const peer = createPeerConnection(offer);
             pc = peer;
@@ -1163,6 +1419,8 @@
             if (pc !== peer) return;
             talkback.configure(peer);
             talkback.connection(peer);
+            recording.configure(peer);
+            recording.connection(peer);
             log('✅ Remote description set', 'success');
             await sendAnswer(peer);
         }
@@ -1223,6 +1481,7 @@
 
         function stop() {
             talkback.reset();
+            recording.reset();
             document.getElementById('stop').style.display = 'none';
             document.getElementById('media').style.display = 'none';
             document.getElementById('start').style.display = 'inline-block';
