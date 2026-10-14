@@ -1,379 +1,296 @@
-# SID Licensing Protocol — Architecture Design Document (v2)
+# SID licensing and camera viewing architecture
 
-Status: **For Review**
-Supersedes: `sid_licensing_architecture.md` (v1)
-Change driver: fail-open-on-availability / fail-closed-on-integrity requirement for LicenseServer outages.
+Status: **Current architecture and integration contract** (2026-10-13). This is the single authoritative SID contract. It consolidates the current format and camera-password viewing flow with applicable issuance, deployment, and future entitlement/revocation planning. Older 107-character SID details are historical; LicenseServer remains a separate future entitlement service, not a component of the signaling-server binary.
 
----
+## Product and deployment model
 
-## 1. Design Goals & Constraints
+Center is a normal signaling-server instance behind the load balancer. It uses the same `signaling-server` binary as other instances. Its single TLS listener is configured on port **8443** in the current deployment and serves `POST /v1/challenge`, `POST /verify`, `POST /v1/view`, WebSocket signaling (WSS), the player page, health, and other existing HTTP routes. The CLI's default listen port remains 8000, so deployments must pass `-port 8443`. There is no standalone Center executable, service, or port 9443. The `-center` option enables Center APIs on that server process; it does not select a different binary or listener.
 
-- SID is exactly **64 ASCII characters**, Base64URL-encoded, decoding to a **48-byte** raw binary payload (zero padding).
-- Payload carries a full, untruncated **Ed25519** signature (32 bytes) — offline-verifiable using an embedded public key, no network required.
-- **Offline check** (device + CenterServer): proves a SID was legitimately issued. Never depends on any database.
-- **Online check** (LicenseServer): proves a SID is *currently* active (not expired/refunded/revoked). Depends on a database, and databases can go down.
-- **Service decoupling:** routing (CenterServer), entitlement truth (LicenseServer), and product logic (MainServer) are independent services with independent failure domains.
-- **Zero-knowledge downstream:** past the point of signature verification, only `SHA-256(SID)` ("digest") is ever stored, logged, or transmitted — never the raw SID.
-- **60-minute grace window:** a SID that passes offline verification gets immediate access; background/async validation catches anything wrong within that window and kicks it globally.
-- **Availability requirement (new in v2):** if LicenseServer is down, cryptographically legitimate SIDs must **still** be allowed in (fail-open). Once LicenseServer recovers, any SID that should have been rejected during the outage gets caught and blocked globally (fail-closed catch-up). This must hold **without weakening any of the properties above**.
-- **Issued-SID database:** the organization maintains a full record of every SID ever released (for audits, support, business reporting). This store is **out of the runtime trust/verification path** — nothing in the access-decision flow reads from or depends on it. It is bookkeeping, not an authority.
+The load balancer presents the stable HTTPS/WSS origin and forwards traffic to signaling-server instances. A Center response returns the configured MainServer WSS root; the camera and viewer use that address and the ticket audience must match it exactly. Deployments may direct clients to the same instance or an assigned signaling instance, but cross-node camera/player routing requires fleet routing and shared registry work described below; this document does not claim that capability is deployed.
 
----
+## Credential model and trust boundaries
 
-## 2. SID Binary Format (unchanged from v1)
+The SID remains the canonical **118-character**, unpadded Base64URL Ed25519-signed value. The 88 decoded bytes are laid out as follows; the signature covers exactly the first 24 payload bytes:
 
-```
-0                   1                   2                   3
-0 1 2 3 4 5 6 7 8 9 0 1 2 3 4 5 6 7 8 9 0 1 2 3 4 5 6 7 8 9 0 1
-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+
-|                   Issued Timestamp (4 Bytes)                   |
-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+
-|   Flags / License Type (2B)   |   Entropy / Device Nonce...   |
-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+
-|                       ... Entropy (10 Bytes Total)            |
-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+
-|                    Full Ed25519 Signature (32 Bytes)           |
-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+
-```
+| Byte offsets | Size | Field | Encoding / rule |
+| --- | ---: | --- | --- |
+| 0 | 1 | Version | Unsigned byte; current value `2` |
+| 1–4 | 4 | Issued time | Unsigned Unix seconds, big-endian |
+| 5–6 | 2 | Flags | Big-endian; exactly one of publisher `0x0001` or viewer `0x0002` |
+| 7–14 | 8 | Tenant | 6–8 lowercase ASCII letters/digits, right-padded with zero bytes |
+| 15–23 | 9 | Nonce | Fresh cryptographically random bytes |
+| 24–87 | 64 | Ed25519 signature | Full signature over bytes 0–23 |
 
-- **Payload (16 bytes):** Issued Timestamp (4B) + Flags/License Type (2B) + Entropy/Nonce (10B).
-- **Signature (32 bytes):** `Ed25519.Sign(PrivateKey, Payload)`.
-- `SID = Base64URL( Payload(16B) || Signature(32B) )` → exactly 64 characters.
-- No expiry field is embedded — expiry is intentionally an online-only fact, not a signable constant.
+The 24-byte payload plus 64-byte signature is 88 bytes; canonical unpadded Base64URL encodes it in 118 characters. The SID is a bearer license credential. It is tenant/role-bearing and does not itself prove device identity. Each SID is single-seat: first activation binds it to a camera's device key. Replacing a camera requires a new SID; there is no transfer workflow.
 
----
+Viewing uses two shared credentials:
 
-## 3. Components & Trust Boundaries
+- The camera's activated `publisher` SID obtains a short-lived, camera-scoped player ticket from Center.
+- A separate camera password is supplied by the viewer in the first WSS signaling request and checked by the camera before peer-connection or media setup.
 
-| Component | Sees raw SID? | Sees digest? | Depends on DB? | Can go down without blocking legit users? |
-|---|---|---|---|---|
-| **Device / C++ client** | Yes (has it) | Computes it | No | N/A |
-| **CenterServer** | Yes, transiently (verify + hash, never stored) | Yes | Only reads Blocklist Cache (HA) | Must itself be HA — it's the gatekeeper |
-| **Blocklist Cache** | No | Yes | It *is* the cache (replicated) | Must be HA |
-| **LicenseServer** | No | Yes | Yes — entitlement DB (system of record for status) | **Yes — this is the point of v2** |
-| **MainServer** | No | Yes | Only reads Blocklist Cache (HA) | Must be HA |
-| **Issued-SID DB** | Yes (at issuance time only) | — | N/A (it's the record store) | Yes — fully out of runtime path |
+There is no viewer SID, viewer account, camera-ref lookup, pair-grant database, or ownership/password-change API in this approved flow. Pairing is external credential delivery. Anyone with both the camera SID and password can view while the SID remains accepted; anyone with the password can try viewing a known camera but still needs a scoped ticket derived from an activated camera SID. These are shared credentials, not individual user identity or proof-of-possession.
 
-Key v2 change: **CenterServer performs its own Ed25519 verification** using the raw SID (sent over TLS from the device), rather than trusting the client's local check or a LicenseServer DB lookup. This is what makes fail-open safe — signature validity is math, not state, so it can never be "stale" and never depends on anything that can be unavailable.
+| Secret/material | Trusted holder and use | Must not be sent to |
+| --- | --- | --- |
+| SID issuer private key | Controlled issuer; signs SID payloads | Cameras, Center, MainServer, viewers, repository |
+| SID issuer public key | Center verifies SID; raw 32-byte key is embedded in provisioned camera builds | Not secret; provision through trusted build/key-management workflow |
+| Camera SID | Issuer and provisioned camera; viewer presents it to Center for activation/view flow | Logs, URLs, analytics, crash reports |
+| Center ticket private key | Signaling-server instances that issue Center tickets | Camera, browser, repository |
+| Center ticket public key | Signaling-server admission verifier(s) | Not secret; pin the expected algorithm/key ID and audience |
+| Camera password | Viewer and camera, forwarded in initial WSS request through MainServer | Center, URLs, logs, analytics, crash reports |
+| Password PHC verifier | Camera persistent storage, mode 0600 | Viewer, Center, general logs |
+| Activation/device private key | Camera persistent protected storage | Center and other devices |
+| Activation record and tenant registry | Center's configured persistence | Public endpoints except minimum necessary claims |
 
-**Transport protocols (v2):**
-- **Device → CenterServer:** `HTTPS` request/response (single round trip per SID check — device sends the SID, gets back an admission decision + MainServer address, or a rejection).
-- **Device → MainServer:** `WSS` (WebSocket over TLS) — persistent connection for the duration of the session, which is what allows MainServer to push a server-initiated disconnect the moment the 60-minute (or periodic) blocklist check fails, rather than waiting for the client to poll or reconnect.
+Never log or persist raw SID, password, ticket, or signaling request body. Center needs the raw SID transiently to verify it and derives its digest for activation and ticket claims. MainServer derives the camera SID digest from the verified ticket and overwrites any browser-supplied digest. The camera compares that trusted digest with its locally verified SID digest before password validation.
 
----
+## Activation and viewer flows
 
-## 4. Sequence Diagram — Normal Path (LicenseServer healthy)
+### Camera activation
 
-```mermaid
-sequenceDiagram
-    participant D as Device (C/C++ client)
-    participant C as CenterServer
-    participant BC as Blocklist Cache (HA, replicated)
-    participant L as LicenseServer
-    participant M as MainServer
+A provisioned camera verifies its SID locally (canonical format, signature, tenant, role, and minimum issue time), then proves device-key possession to Center for each connection attempt:
 
-    D->>D: Offline check: strlen==64, decode 48B,<br/>verify Ed25519 sig, check issued-date policy
-    D->>C: HTTPS POST /verify (raw SID)
-    C->>C: Independently re-verify Ed25519 sig<br/>+ issued-date policy
-    C->>C: digest = SHA256(SID), discard raw SID
-    C->>BC: Is digest blocked?
-    BC-->>C: Not blocked
-    C-->>D: HTTPS 200 OK, MainServer address
-    C->>L: Async: verify(digest)
-    D->>M: WSS connect (digest)
-    M->>BC: Is digest blocked?
-    BC-->>M: Not blocked
-    M-->>D: WSS accept, serve (60-min grace window starts)
+1. Camera calls `POST /v1/challenge`; Center returns a fresh 24-byte, single-use nonce valid for 30 seconds.
+2. Camera calls `POST /verify` with `{"proto":2,"sid":"…","device_pub":"…","nonce":"…","sig":"…"}`. `sig` is the device's Ed25519 proof over `"center-activate-v1" || nonce || SHA-256(SID) || main-origin`; the SID digest is SHA-256 of the exact canonical 118 ASCII SID characters.
+3. Center verifies the SID and proof, binds the first device key to the SID, checks tenant and activation policy, then returns device identity, tenant/role, exact MainServer origin, and a short-lived ticket (60 seconds by default, at most five minutes).
+4. Camera opens WSS at that exact origin and device path with the ticket. TLS/certificate, Center, or origin validation failures fail closed in Center mode; there is no fallback to a fixed URL.
 
-    L->>L: Look up digest in entitlement DB
-    alt Valid / active
-        L->>BC: (no-op, or refresh TTL)
-    else Expired / Revoked / Unknown
-        L->>BC: Publish digest to blocklist
-    end
+The camera device ID is Base64URL(SHA-256(device public key)). The SID does not contain the device ID. While a SID is assigned it is bound to that device public key; do not silently replace a damaged existing key. Under the pool model below the binding can end by an explicit release.
 
-    Note over M: At t = 60 min
-    M->>BC: Re-check digest
-    alt Blocked
-        BC-->>M: Blocked
-        M->>D: WSS close (terminate session)
-    else Still clean
-        BC-->>M: Not blocked
-        M-->>D: Continue serving
-    end
-```
+### SID pool and re-assignment (decided and implemented 2026-10-19)
 
----
+A SID is not tied to one camera for life. SIDs are issued in batches into a **pool** owned by the external pairing system. When a device is paired (outside this service) the pairing system takes one *available* SID from the pool and gives it to the device together with a fresh password. The rule is unchanged: **one SID is bound to one device at a time**. When the device is unpaired or replaced, the SID is released and returns to the pool.
 
-## 5. Sequence Diagram — LicenseServer Outage (fail-open, then catch-up)
+What changed (Center, nodes and `sidctl` are done; the pairing system itself is outside this service):
 
-```mermaid
-sequenceDiagram
-    participant D as Device (C/C++ client)
-    participant C as CenterServer
-    participant BC as Blocklist Cache (HA, replicated)
-    participant L as LicenseServer (DOWN)
-    participant Q as Retry Queue (durable)
-    participant M as MainServer
+| Area | Today | Needed |
+| --- | --- | --- |
+| Binding | The first device key binds forever; a second key is rejected with an `ALERT` | States `unbound → bound(device_id) → released`. A new key may bind only while unbound or released. A device that held the SID before is refused for it afterwards, so a lost camera cannot race back in |
+| Release | None | An authenticated Center operation `release <sid digest>`, callable only by the pairing system (token plus TLS; never by a device or player), audited. `sidctl status` shows bound, released and history |
+| Cut-off of the old device | n/a | On release the old device's live WebSocket and any ticket still valid (up to 60 s) must stop working. Add `device:<id>` lines to the blocklist file the nodes already reload; nodes check the ticket `sub` and drop matching connections |
+| Old viewers | `camera_ref = SHA-256("camera-ref-v1" \|\| SID)` is a permanent handle, and a viewer who once got the SID can still look the camera up | After re-assignment an old viewer can still resolve the SID and try passwords. Every pairing must therefore set a **new random password** (never the default); optionally derive the handle per binding later |
+| Camera firmware | SID flashed at the factory | No SID at manufacture. SID and password are delivered at pairing as a `pair` file written by the firmware; an unpaired `webrtc` idles. Unpairing (wiping `sid` and `auth/password.phc`, keeping `device.key`) is not built yet |
+| Batch flow | `sidctl batch` → factory partner → firmware | `sidctl batch` → pairing system's pool. The factory sheet is no longer needed |
+| Pool ownership | n/a | The pairing system owns available/assigned. Center owns the truth of bound/released and refuses a bind to a SID currently bound to another key (safety net) |
+| Revocation | Blocklist by digest (permanent) | Unchanged and separate from release: a blocklisted SID is dead, a released SID is reusable |
 
-    D->>C: HTTPS POST /verify (raw SID)
-    C->>C: Verify Ed25519 sig + issued-date policy
-    Note over C: Signature check needs no DB —<br/>works identically during outage
-    C->>C: digest = SHA256(SID)
-    C->>BC: Is digest blocked?
-    BC-->>C: Not blocked (cache is independently HA)
-    C-->>D: HTTPS 200 OK, MainServer address
-    C->>Q: Enqueue verify(digest) — LicenseServer unreachable
-    D->>M: WSS connect (digest)
-    M->>BC: Is digest blocked?
-    BC-->>M: Not blocked
-    M-->>D: WSS accept, serve (60-min grace window starts, as normal)
+As built:
 
-    Note over L: --- Outage window ---
-    Note over M: 60-min check still runs against<br/>Blocklist Cache only — unaffected by outage
+- `POST /v1/admin/status` and `POST /v1/admin/release` (body `{"sid_digest":"<64 hex>"}`, `Authorization: Bearer <token>` from `-admin-token-file`; no token means the routes do not exist). Status answers `unbound`, `bound`, or `released` with `bindable_at`. Release writes `device:<id> <expiry>` to the blocklist, fsynced, and only then marks the SID released; releasing twice is a no-op, an unknown digest is 404, and a blocklist that cannot be written fails the release with 503 and leaves the SID bound.
+- The activation store is still the append-only JSONL file; each line is the full latest state of one SID (`status`, `released_at`, `former`). `Bind` and `Release` are one step under the store lock, so concurrent binds cannot both win.
+- `/verify` for a released SID: a former holder gets 401 and an `ALERT` log; anyone inside the 3-second grace gets 503 (retry); after the grace another device binds. The 3-year window is checked on every bind. `/v1/view` and camera lookup treat a released SID as not found.
+- Nodes drop open connections whose device is revoked, or whose digest or tenant is blocked, on the 30-second sweep; new connections with an old ticket are refused at the ticket check.
+- `sidctl status` lists released SIDs as `released`.
+- Limits: a device that held a SID cannot bind it again, so the pairing system must hand a returning camera a different SID; the admin routes have no rate limit; and the grace and the revocation lifetime are constants.
 
-    rect rgb(255, 240, 230)
-    Note over L: LicenseServer recovers
-    Q->>L: Drain queued verify(digest) requests
-    L->>L: Evaluate true entitlement status
-    alt Any digest invalid/expired/revoked
-        L->>BC: Publish to blocklist
-        BC-->>M: Next check (periodic or 60-min) sees it blocked
-        M->>D: WSS close (terminate session)
-    else Valid
-        L->>BC: No action needed
-    end
-    end
+Decisions on expiry and reuse (2026-10-19):
+
+- **Expiry.** The 3-year window applies to **every bind**, counted from the SID's issue time: a SID can be bound (first time or again after a release) only before `issued + 3 years`. A bound SID keeps working. A SID that sits unbound in the pool past that date is dead and must not be handed out; the pairing system should drop it and order new batches ahead of time.
+- **Reuse after release needs no long quarantine.** Devices are many and switch on and off at any time, so safety cannot depend on a device noticing the release. It rests on Center rules that hold whether or not the old device is online: (1) the old device's key is refused for that SID forever (Center keeps the history), so it cannot bind again before or after the new device; (2) a new bind is refused while the SID is bound to another key; (3) viewer tickets are scoped to the new device's ID, so the old device is never addressed; (4) every pairing sets a new random password.
+- **Only a few seconds of grace.** A released SID becomes bindable **3 seconds** after the release (enforced by Center, not by the pairing system). The delay only orders the steps: the release and its `device:<id>` revocation are written and synced first, so a bind can never overtake them. It does not have to cover the old device's in-flight ticket (up to 60 s) or the node dropping its connection (up to the 30 s sweep): a ticket or connection of the old device carries the old device ID, and viewers are scoped to the new device ID, so the old device can neither be addressed nor take the new device's place. It only stays connected, unreachable, until the node drops it. A longer delay would protect only against a mistaken release, which is a product choice, not a security need.
+- **Revocation entries expire.** A released device appears in the blocklist as `device:<id> <expires-unix>` with an expiry after the ticket lifetime plus the node sweep and a margin (about two minutes). The node drops the live connection once when it reloads, and the permanent refusal lives in Center's history, so the blocklist file does not grow with every release in a large fleet.
+- **Atomic release and bind.** Release and bind are compare-and-set on the SID's record in the activation store, so two pairing requests can never both succeed for one SID.
+
+### Viewer access
+
+1. Viewer calls Center `POST /v1/view` over HTTPS with the activated camera publisher SID:
+
+   ```json
+   {"sid":"<activated camera publisher SID>"}
+   ```
+
+2. Center verifies SID, tenant, activation, and applicable block status; it derives camera identity from trusted activation data, never caller-supplied tenant or camera ID. It returns a short-lived player ticket, camera ID, ephemeral viewer device ID, and MainServer address. Ticket claims include the camera ID (`cid`), camera SID digest, tenant (`tid`), ephemeral viewer subject, issuer, audience, issue/expiry time, and unique ticket ID.
+3. Viewer connects to the returned WSS origin/path using the ticket. MainServer validates signature, configured key ID/algorithm, expiry, audience, role, and camera scope. It accepts each ticket once and limits signaling to its authorized camera.
+4. Viewer sends the initial request with the camera password:
+
+   ```json
+   {"id":"<camera_id>","type":"request","password":"<camera password>"}
+   ```
+
+   Do not send `sid_digest`. MainServer injects the digest from the verified ticket. The camera checks digest and password before creating a peer connection or sending media.
+
+The ticket is a short-lived, single-use **bearer** credential. Single-use limits later replay but does not prevent theft or a race before first use. A ticket is not cryptographically bound to the viewer device. The scoped ticket limits the request to one camera; it does not establish human identity or authorize who received credentials.
+
+## Password provisioning and rotation
+
+The streamer is configured only by `--config FOLDER`; its `auth/` subfolder holds the persistent camera credentials `device.key` and `password.phc`. The auth directory is mode 0700, the files are mode 0600, and the plaintext password is never stored. Existing credential files are loaded on startup and normal startup never overwrites them. On the first normal run with no existing auth state, the camera creates a device key and a verifier for the shared default password `5genwebrtc`; this is a known default and the owner must change it before relying on the camera for private viewing. Provisioning systems (the firmware) should therefore set the real password before the first start and not start a camera that has none. Default-password provisioning only applies to genuinely fresh state; if `device.key` exists but `password.phc` is missing or malformed, startup fails closed. The owner recovers with the setup-only `printf '%s' 'NEW' | streamer --config FOLDER --set-password`, which atomically writes the verifier and exits before SID activation, media, or network activity. This does not replace the device key.
+
+`--set-password` reads the password from stdin, so it never appears in a process listing; a value after the flag (`--set-password 'NEW'`) is also accepted and is visible in the process list while the command runs. `camera-password --file PATH` does the same for a bare file. The credential the app sends, and that the camera hashes, is the lowercase hex SHA-256 of the password the user types (64 characters); `--set-password`, `camera-password` and the default all apply that hash first. It makes the credential longer and is not extra security, because the camera checks that value. The verifier is PBKDF2-HMAC-SHA256 with a random 16-byte salt, a 32-byte tag and an iteration count stored in the verifier (`i=`, 4,000 to 1,000,000; new verifiers use 8,000, measured 380 ms on the target camera). `camera-password --benchmark` measures derivation time without accessing auth files. The camera rereads the verifier at least once per second and before each request. A changed, missing, or invalid verifier closes active viewers; new requests fail closed until a valid verifier is present. A newly salted verifier closes viewers even if the plaintext password is unchanged. Failed-attempt throttling is camera-wide, and one in-flight password derivation per camera gate is allowed.
+
+Password change authorization, owner accounts, and secure delivery to viewers belong to the external provisioning/product system. Atomic replacement and file permissions protect the mechanism; they do not prove who is authorized to change the password. Never put it in argv, environment variables, URLs, logs, analytics, or crash reports.
+
+Example trusted provisioning flow with terminal echo disabled:
+
+```sh
+IFS= read -r -s -p 'New camera password: ' pw
+printf '\n'
+printf '%s\n' "$pw" | /path/to/build/examples/streamer/camera-password --file /persistent/camera/auth/password.phc
+result=$?
+unset pw
+exit "$result"
 ```
 
-**What this achieves:** during the outage, access decisions rest entirely on (a) cryptographic proof of legitimate issuance, done independently by CenterServer, and (b) the Blocklist Cache, which is a separate HA tier and does not share LicenseServer's failure domain. Nothing that was already known-bad before the outage gets back in. Anything that becomes invalid *during* the outage is caught as soon as the retry queue drains after recovery — bounded by outage duration plus one drain cycle.
+The utility accepts 1–256 password bytes (one final LF/CRLF is stripped). Substitute the actual build executable and persistent camera path. Use a secret manager/protected provisioning channel for unattended provisioning.
 
----
+## Build, configure, and run
 
-## 6. Component Responsibilities (Detailed)
+### Camera build
 
-### 6.1 Device (C/C++ client)
-- Enforces `strlen(SID) == 64` before touching it.
-- Decodes to a fixed 48-byte stack buffer (no heap allocation).
-- Performs local Ed25519 verification + issued-date-not-before-X policy check as a first-pass UX gate (fail fast, no network round trip for obviously bad input).
-- This local check is **advisory only** — never trusted as the security boundary, since it runs on hardware the user controls.
-- Sends the raw SID to CenterServer as an `HTTPS` request for the authoritative check, and reads the admission decision + MainServer address from the response.
-- Opens a `WSS` (WebSocket-over-TLS) connection to the returned MainServer address to actually use the service. WSS is chosen over plain HTTPS here because the session is long-lived and MainServer needs to be able to push a disconnect to the client at any time (e.g. at the 60-minute check), not just respond to client-initiated requests.
+The camera must be built with the trusted raw SID public key and explicit minimum issue timestamp. The raw key is 32 bytes represented as 64 hex characters; it is not a fingerprint, PEM text, or private key. For an x86 PC build, set `SID_PUBLIC_KEY_HEX` to the verified raw public-key hex from the controlled key-provisioning workflow, and set `SID_MIN_ISSUED_UNIX` to the policy timestamp:
 
-### 6.2 CenterServer
-- Exposes an `HTTPS` endpoint the device calls with the raw SID; the response is a single request/response cycle (admission decision + MainServer address, or a rejection code) — no persistent connection needed here, unlike the MainServer leg.
-- **Independently** re-verifies the Ed25519 signature and issued-date policy — does not trust the device's result.
-- Computes `digest = SHA256(SID)` immediately; the raw SID is never persisted, logged, or forwarded past this point.
-- Checks the Blocklist Cache (not LicenseServer directly) for the digest.
-- If clean → returns a MainServer address to the device, and fires an **async** `verify(digest)` event to LicenseServer (fire-and-forget with durable retry queue on failure).
-- If LicenseServer is unreachable, the verify event goes into a durable retry queue rather than blocking the allow decision.
-
-### 6.3 Blocklist Cache
-- Replicated, independently-available key-value store (e.g. Redis Cluster) keyed by digest.
-- Written to only by LicenseServer (publishing revocations/expirations).
-- Read by CenterServer and MainServer directly — neither ever queries LicenseServer's DB live in the request path.
-- This is the component whose uptime everything else's fail-open behavior depends on — it should be held to a higher SLA than LicenseServer itself.
-
-### 6.4 LicenseServer
-- System of record for entitlement status (active / expired / revoked) per digest.
-- Consumes the async verify-request stream (direct + drained retry queue after any outage).
-- Publishes changes to the Blocklist Cache; does not serve read requests in the hot path of access decisions.
-- Can be unavailable without blocking new legitimate sessions — its only failure mode is delayed *detection* of newly-invalid SIDs, not incorrect admission of provably-forged ones.
-
-### 6.5 MainServer
-- Accepts the device's connection as a `WSS` (WebSocket-over-TLS) session — persistent for the lifetime of use, and the channel through which a server-initiated kick (session termination) is delivered instantly at the 60-minute check or on a later blocklist hit.
-- Trusts CenterServer's initial admission decision.
-- Reads the Blocklist Cache directly (not through CenterServer or LicenseServer) both at connection time and again at the 60-minute mark.
-- Terminates any active session whose digest appears in the Blocklist Cache.
-
-### 6.6 Issued-SID Database
-- Out of the runtime verification/decision path entirely, as confirmed.
-- Populated at issuance time by the Issuing Authority (private-key holder).
-- Used for audit, support lookups, reporting, and key-rotation bookkeeping — not consulted by CenterServer, LicenseServer, or MainServer during normal operation.
-
----
-
-## 7. CenterServer Decision Logic (Pseudocode)
-
-```text
-on receive(raw_sid) from device over TLS:
-    if len(raw_sid) != 64: reject(MALFORMED); exit
-
-    payload, signature = base64url_decode(raw_sid)   # 16B, 32B
-    if not ed25519_verify(payload, signature, EMBEDDED_PUBLIC_KEY):
-        reject(INVALID_SIGNATURE); exit
-
-    if payload.issued_timestamp < MIN_ACCEPTED_ISSUED_DATE:
-        reject(REVOKED_KEY_EPOCH); exit
-
-    digest = sha256(raw_sid)
-    raw_sid = null   # discard; never persisted or logged past this point
-
-    if blocklist_cache.contains(digest):
-        reject(BLOCKED); exit
-
-    # Admission granted — independent of LicenseServer availability
-    respond(OK, main_server_address)
-
-    # Best-effort, non-blocking
-    try:
-        license_server.async_verify(digest)
-    except Unreachable:
-        retry_queue.enqueue(digest)
+```sh
+SID_PUBLIC_KEY_HEX="<64-hex-characters>"
+SID_MIN_ISSUED_UNIX="<minimum-unix-seconds>"
+cmake -S libdatachannel_c14 -B build-sid-x86 \
+  -DNO_TESTS=ON -DBUILD_SHARED_LIBS=OFF \
+  -DSID_PUBLIC_KEY_HEX="$SID_PUBLIC_KEY_HEX" \
+  -DSID_MIN_ISSUED_UNIX="$SID_MIN_ISSUED_UNIX"
+cmake --build build-sid-x86 --target streamer camera_password_tool
 ```
 
-## 8. MainServer 60-Minute Check (Pseudocode)
+The camera has one run-time option, `--config FOLDER` (it also accepts `-h`, `-V` and `--set-password`). The folder holds `webrtc.ini` (all settings, `key=value`), `sid` (the SID text, mode 0600, written from `pair`) and `auth/` (`device.key`, `password.phc`). A missing folder or `webrtc.ini` is created with defaults; the keys are `nickname` (optional, default `CAMERA`), `host`, `port`, `audio`, `video`, `chunksize`, `mp4`, `talkback-port`, `talkback-chunksize`, `timeout`, `entropy-bits`, `verbose`, `ca-file`, `reqIP`, `reqPort`. The streamer carries its defaults; with no `sid` it idles instead of exiting, and pairing is a `pair` file (`<sid>\n<password>\n`, mode 0600) that the firmware writes and `webrtc` consumes at start. Exit status **78** means a bad config folder or a malformed `webrtc.ini`. In the supported MbedTLS camera builds (`x86.cmake` and `anykav330.cmake`), the binary includes only the 1939-byte ISRG Root X1 PEM and uses it by default for Center HTTPS and MainServer WSS; `ca-file` is an optional PEM trust-bundle override, and an invalid override fails startup. `host` and `port` (default `webrtc.5gen.care`, 443) select Center and MainServer: the camera derives `https://HOST:PORT/verify`, uses `/v1/challenge` on that same host, and the exact WSS root `wss://HOST:PORT/`. There are no separate center-URL or main-origin settings. The camera clock must be suitable for TLS validation. Do not delete or replace an activated `device.key` unless the SID is also released (see the SID pool section). The camera build always requires `SID_PUBLIC_KEY_HEX` and `SID_MIN_ISSUED_UNIX`; there is no unprovisioned build.
 
-```text
-on connection(digest):
-    if blocklist_cache.contains(digest):
-        deny(); exit
-    serve()
-    schedule_check(digest, delay = 60min)
+Representative run:
 
-on scheduled_check(digest):
-    if blocklist_cache.contains(digest):
-        terminate_session(digest)
-    else:
-        schedule_check(digest, delay = 60min)   # keep re-checking periodically
+```sh
+./streamer --config /persistent/camera
 ```
 
----
+The `nickname` setting supplies display metadata only. It does not change the key-derived device ID or ticket identity. The WSS registration carries `type=register` and `nickname`; an authenticated camera may also carry its SID, which the server validates against the digest in the verified ticket and retains in memory only for development discovery. The SID is not persisted or logged.
 
-## 9. Security Properties Preserved / Achieved in v2
+### Signaling-server build and service
 
-| Property | Mechanism |
-|---|---|
-| Offline authenticity, unforgeable without private key | Ed25519 signature, verified independently by both device and CenterServer |
-| No default-allow of unregistered/forged SIDs | CenterServer performs real signature verification itself, not just a blocklist absence check |
-| Zero-knowledge downstream of CenterServer | Raw SID touched only transiently by CenterServer; digest-only from that point on |
-| Service decoupling maintained | MainServer and CenterServer never call LicenseServer's DB directly — only the replicated Blocklist Cache |
-| Global kick on invalidation | Blocklist Cache is read by every MainServer/CenterServer instance, everywhere |
-| **Fail-open on LicenseServer outage** | Admission depends only on crypto + Blocklist Cache, neither of which shares LicenseServer's failure domain |
-| **Fail-closed catch-up after recovery** | Durable retry queue drains on recovery; any newly-invalid digest is published to Blocklist Cache and enforced at the next 60-min (or periodic) check |
-| Issued-SID DB stays out of trust path | Confirmed: used for audit/bookkeeping only, never queried during access decisions |
+Build from the Go module directory. This produces the one server binary used for Center APIs, WSS signaling, and player hosting:
 
-## 10. Accepted Trade-off (explicit sign-off needed)
-
-A SID that becomes invalid (revoked/refunded/banned) **for the first time during a LicenseServer outage** will continue to work until the retry queue drains after recovery. This window is bounded by outage duration + one drain cycle, and only affects revocations *originating* during the outage — it does not affect any SID already known-bad beforehand, and it does not allow any SID that fails the Ed25519 check. This is the intended behavior per the availability requirement; flag here if the exposure window needs an additional bound (e.g. a hard cap independent of outage length).
-
----
-
-## 11. Open Items for Review
-
-- [ ] Confirm TLS/mTLS is mandatory on all hops: device↔CenterServer (`HTTPS`), device↔MainServer (`WSS`), CenterServer↔LicenseServer, CenterServer/MainServer↔Blocklist Cache.
-- [ ] Decide WSS reconnect/backoff policy for the device (e.g. transient network drop mid-session) — should a reconnect require a fresh CenterServer round trip, or can MainServer accept a reconnect with the same digest within a short window without re-admission?
-- [ ] Confirm Blocklist Cache SLA target (should exceed LicenseServer's, since everything's fail-open behavior depends on it).
-- [ ] Decide concurrent-session policy per digest (single-session enforcement vs. allowed sharing) — not yet addressed by this design.
-- [ ] Decide retry-queue durability guarantees (at-least-once redelivery, dedup on digest, max backlog age).
-- [ ] Confirm error codes returned to device stay generic (don't leak malformed vs. unknown vs. revoked distinctions).
-- [ ] Confirm `MIN_ACCEPTED_ISSUED_DATE` is a hardcoded per-build constant, not derived from device clock.
-- [ ] Confirm Redis deployment mode (Cluster vs. managed HA service) and AOF persistence are both enabled before go-live — without persistence, a Redis restart silently reopens every previously-revoked SID.
-- [ ] Decide whitelist-cache TTL relative to LicenseServer's own re-verification cadence, so a stale whitelist entry can't outlive a revocation for longer than intended.
-- [ ] Confirm MainServer's in-memory `liveConns` map strategy (sharding scheme, eviction on disconnect) is sized for target concurrent-connection count.
-
----
-
-## 12. Transport Choice: HTTPS/WSS vs. Raw TLS Socket
-
-Note: HTTPS and WSS are already built on TLS — the real alternative under consideration is dropping HTTP/WebSocket framing in favor of a custom binary protocol directly over a TLS socket.
-
-| | HTTPS / WSS (current design) | Raw TLS socket + custom protocol |
-|---|---|---|
-| **Pros** | Standard L7 load balancers, API gateways, WAFs, CDNs understand it natively (path routing, rate limiting, DDoS protection) | Lower per-message overhead — no HTTP headers, no WS frame overhead |
-| | Debuggable with curl / browser devtools / standard APM & tracing tools | Full control over binary framing — can match the fixed 48-byte SID structures exactly, no base64/JSON tax |
-| | Mature client libraries (libcurl, WS libs) — less custom-parser attack surface, which matters given the client is C/C++ | Firewall-agnostic on any chosen port |
-| | WSS is the only way a browser-based client (future dashboard/admin tool) gets a persistent socket | No forced HTTP semantics (status codes, verbs) if the protocol isn't genuinely request/response-shaped |
-| | Blends in on restrictive corporate networks that only allow HTTP(S)-looking traffic on 443; some DPI/proxies flag or throttle non-HTTP TLS on 443 | |
-| **Cons** | Small per-message framing overhead (HTTP headers, WS frames) — usually negligible at this scale | Loses L7 infra entirely — falls back to plain L4/TCP load balancing: no path routing, no built-in rate limiting/WAF, health checks reduce to "is the port open" |
-| | | Custom protocol = custom bugs — hand-rolled message framing/parsing in C/C++ on the client is exactly the surface that produces buffer-overflow/parsing CVEs |
-| | | No standard tooling — debugging/observability must be built in-house |
-| | | Forecloses any browser-based client permanently |
-
-**Recommendation:** keep HTTPS (CenterServer) and WSS (MainServer). For CenterServer's single request/response pattern, HTTPS overhead is negligible and the tooling/infra benefits are large. For MainServer, WSS already provides the persistent, server-push-capable channel the 60-minute kick needs. Only reconsider raw TLS if a measured, specific latency ceiling is provably caused by HTTP/WS framing — a narrow case, and the usual fix there is a leaner binary payload *inside* WSS rather than abandoning WSS.
-
----
-
-## 13. MainServer Implementation: Go
-
-Go is a strong fit for MainServer specifically, given its job is holding a large number of persistent, low-activity connections and reacting to external events (revocations, 60-minute timers).
-
-- **Concurrency:** goroutines make holding tens of thousands of concurrent WSS connections cheap — one goroutine per connection is a normal, idiomatic pattern at this scale.
-- **WebSocket library:** `nhooyr.io/websocket` (a.k.a. `coder/websocket`) — modern, context-aware, smaller API surface. `gorilla/websocket` is the older, still-stable alternative with a larger existing ecosystem if that matters for hiring/familiarity.
-- **Redis client:** `redis/go-redis` — mature, supports Cluster mode and pub/sub.
-- **Timers:** `context.WithDeadline` / `time.AfterFunc` map directly onto "schedule the 60-minute check per connection."
-
-**Concrete upgrade this enables:** rather than MainServer only *polling* the Blocklist Cache at the 60-minute mark, have it **subscribe to a Redis pub/sub channel** (e.g. `blocklist-events`) that LicenseServer publishes to on every revocation, and keep an in-memory `map[digest]*websocket.Conn` (sharded, or `sync.Map`) of currently-live sessions. A revocation then triggers an **immediate** `WSS close` on any matching live connection, rather than waiting for the next scheduled check. This tightens the "kicked from anywhere" guarantee from "within 60 minutes" to "within seconds," at low implementation cost in Go.
-
-```text
-# MainServer (Go), pseudocode
-
-var liveConns = NewShardedMap[digest, *websocket.Conn]()
-
-func onConnect(digest string, conn *websocket.Conn):
-    if blocklistCache.Contains(digest):
-        conn.Close(reason: "blocked")
-        return
-    liveConns.Store(digest, conn)
-    scheduleCheck(digest, delay: 60*time.Minute)
-
-func onScheduledCheck(digest string):
-    if blocklistCache.Contains(digest):
-        kick(digest)
-    else:
-        scheduleCheck(digest, delay: 60*time.Minute)
-
-func onBlocklistEvent(digest string):   # from Redis pub/sub subscriber goroutine
-    kick(digest)
-
-func kick(digest string):
-    if conn, ok := liveConns.Load(digest); ok:
-        conn.Close(reason: "revoked")
-        liveConns.Delete(digest)
+```sh
+cd server/src/go
+go build -o sidctl ./cmd/sidctl
+go build -o signaling-server ./src
 ```
 
-Main scaling caveat: watch GC pressure past ~100k+ concurrent connections — pre-allocate read/write buffers per connection and avoid per-message heap allocations on the hot path.
+Run an ordinary signaling-server instance with Center APIs on the same HTTPS/WSS listener at 8443. Use the exact public MainServer root in `-main-address`. If explicitly setting `-ticket-public-key`, `-ticket-kid`, or `-ticket-aud`, each must agree with the Center signing configuration; the audience must exactly match the configured MainServer root. Paths shown here are deployment placeholders; protect all private files and persistent state with restrictive ownership and permissions.
 
----
-
-## 14. Blocklist Cache (Redis) & Optional Whitelist Cache
-
-### 14.1 Redis recommendations
-
-- Run as managed HA (ElastiCache, Memorystore, Redis Enterprise) or self-run Redis Cluster with replicas and automatic failover. This cache's uptime is now what the fail-open guarantee depends on — its SLA target should exceed LicenseServer's, not trail it.
-- Enable **AOF persistence**. Without it, a Redis restart silently forgets every revocation, meaning previously-blocked SIDs would work again until LicenseServer fully re-syncs — a real security regression, not just a performance blip.
-- Key shape: `blocklist:{digest}` → `{reason, timestamp}`. Use a TTL only for temporary suspensions; permanent revocations should have no TTL.
-- Use an explicit pub/sub channel (`blocklist-events`) that LicenseServer publishes to, rather than Redis keyspace notifications — simpler to reason about and avoids cluster-wide keyspace-notification overhead.
-
-### 14.2 Should a Whitelist Cache be added?
-
-Two separate motivations worth distinguishing:
-
-- **As a security fix — not needed.** That gap was already closed when CenterServer began independently verifying the Ed25519 signature itself. The signature check *is* the whitelist, computed rather than looked up, and it holds even when every cache/DB is down.
-- **As a performance optimization — yes, worthwhile.** Currently every admitted connection triggers an async `verify(digest)` call to LicenseServer, even for a device that reconnects daily. A `whitelist:{digest}` entry (confirmed-active, short TTL matching the check cadence) lets CenterServer skip the LicenseServer round-trip entirely on a cache hit, meaningfully reducing LicenseServer load for repeat traffic.
-
-**Three-state cache logic:**
-
-```text
-on CenterServer admission check(digest):
-    if blocklist_cache.contains(digest):
-        reject(BLOCKED); exit
-
-    if whitelist_cache.contains(digest):
-        admit()  # skip LicenseServer round trip entirely
-        return
-
-    # unknown — fail-safe path, same as today
-    admit()  # signature already verified independently by CenterServer
-    license_server.async_verify(digest)  # result populates whitelist or blocklist
-
-on LicenseServer verify_result(digest, status):
-    if status == active:
-        whitelist_cache.set(digest, ttl = CHECK_INTERVAL)
-        blocklist_cache.delete(digest)  # in case of a prior stale block
-    else:
-        blocklist_cache.set(digest, reason = status)  # no TTL if permanent
-        whitelist_cache.delete(digest)
+```sh
+./signaling-server -root ../.. -port 8443 -https -center \
+  -sid-public-key /secure/sid-issuer.pub.pem \
+  -min-issued <minimum-issued-RFC3339> \
+  -center-private-key /secure/center-ticket.key.pem -kid center-2026-01 \
+  -main-address wss://webrtc.5gen.care:8443/ \
+  -tenants-file /etc/webrtc/tenants.json \
+  -activation-store /var/lib/webrtc/activations.jsonl \
+  -ticket-public-key /secure/center-ticket.pub.pem \
+  -ticket-kid center-2026-01 \
+  -ticket-aud wss://webrtc.5gen.care:8443/ \
+  -blocklist-file /etc/webrtc/sid-blocklist.txt
 ```
 
-**Trade-off:** this adds a third cache state to reason about (`blocked` / `whitelisted` / `unknown`) and a second write on every status change (evict from whitelist *and* add to blocklist on revocation, or the reverse on reinstatement). A partial write during that two-step update degrades to `unknown`, which falls through to the signature-only admission path above — i.e. it fails safe, not open further, so the added complexity doesn't weaken any existing guarantee. Recommendation: add it, but treat it explicitly as a caching/load-reduction layer — LicenseServer's DB remains the actual source of truth either way.
+The load balancer must preserve the HTTPS/WSS routes, forward the correct host/proto information, and target only healthy instances. If TLS terminates at a proxy, `-trust-proxy-tls` is an alternative to `-https` only when the listener is reachable exclusively from that trusted proxy and it sets `X-Forwarded-Proto: https`. Do not expose a plain HTTP trusted-proxy listener directly to clients. With `-https`, the server reads the combined TLS certificate and private key from `<root>/cert.pem`.
+
+`POST /v1/challenge`, `/verify`, `/v1/view`, ticket-admitted WSS, and the player are routes on this same listener. `/verify` activation and `/v1/view` viewing are distinct operations. The Center instance must have access to the SID public key, Center ticket private key, tenant registry, activation store, and blocklist; admission verifiers need the matching Center ticket public key, key ID, audience, and blocklist configuration. Keep Center ticket private-key distribution limited to trusted ticket-issuing instances. Never enable `-demo-tenant` in production: it intentionally allows unauthenticated development players.
+
+The development player can list connected cameras from one explicitly configured tenant with `-discovery-tenant test01`. This read-only `/api/devices` option requires ticket admission and returns only that tenant's camera metadata (internal device ID, display nickname, tenant and signaling path, connection time, type, and latency). For admitted development cameras only, the response may also include the camera's 118-character SID to let the player fill the selected camera's SID field; the response uses `Cache-Control: no-store` and never returns passwords or tickets. Device `id` remains internal for routing and camera-scope checks, and user-facing labels use the nickname or a friendly `Camera N` fallback. This development endpoint makes included SIDs discoverable to anyone who can reach it; the camera password remains required for viewing. The option does not enable anonymous WSS or change ticket routing, camera scope, or authorization. Keep it on the development instance; production does not set it.
+
+In the demo player, select a camera card, enter its camera-local password, and press **Play**. The card's SID fills the editable Camera SID field when discovery provides one; Play obtains a fresh `/v1/view` ticket and then connects over authenticated WSS. If an older admitted camera's discovery record has no SID, the user must paste that camera's SID; the player still checks the returned camera scope against the selected card. Passwords remain user-entered and are never stored as defaults. On legacy production servers where health reports ticket admission disabled, Play without an SID continues to use the legacy WSS request flow.
+
+## Issuance, key rotation, development, and rollback
+
+Use `sidctl` for issuance and offline verification from `server/src/go`. Generate the SID issuer key pair once in a controlled environment, keep the private key offline/restricted, and distribute only the public key through the camera build and Center configuration. Generate a separate Center ticket key pair; the Center private key signs admission tickets and the public key is used by ticket verifiers. Issue a distinct random-nonce SID for each camera:
+
+```sh
+cd server/src/go
+go build -o sidctl ./cmd/sidctl
+./sidctl keygen --private /secure/sid-issuer.key.pem --public /secure/sid-issuer.pub.pem
+./sidctl keygen --private /secure/center-ticket.key.pem --public /secure/center-ticket.pub.pem
+./sidctl issue --private-key /secure/sid-issuer.key.pem --audit /secure/issued.jsonl \
+  --issued-at <issued-at-RFC3339> --tenant acme01 --role publisher > /secure/camera0.sid
+./sidctl batch --private-key /secure/sid-issuer.key.pem --audit /secure/issued.jsonl \
+  --tenant acme01 --role publisher --count 50000 --out /secure/acme01-001
+./sidctl verify --public-key /secure/sid-issuer.pub.pem \
+  --min-issued <minimum-issued-RFC3339> --sid-file /secure/camera0.sid
+```
+
+The single-issue command writes a raw SID to the selected output file; the batch export contains CSV/XLSX data with raw SIDs plus a digest-only manifest. Protect delivery artifacts as credentials. The private JSONL audit stores digests and issuance metadata, not raw SIDs. Batch issuance appends and syncs audit entries before creating export files. If a later export write fails, audit entries remain for allocated SIDs even though partial output files are removed; treat them as issued and do not assume the operation left no record. `sidctl` does not overwrite existing export paths.
+
+By default, an SID must be activated within **three years** of issue time; a registered tenant may configure a different activation window. Once activated, an SID does not expire under the current policy. Revocation is a separate online/future entitlement concern; do not infer expiry or current entitlement from the signature alone. Raw SID delivery files are secrets and must be protected and removed after provisioning as operationally appropriate.
+
+The SID and Center ticket keys are independent. Never use the SID issuer key to sign tickets. Current SID v2 has no embedded key ID or automatic key rotation; rotating issuer keys requires coordinated public-key provisioning and an explicit migration plan. Rotating the Center ticket key requires all ticket verifiers to trust the replacement key/key ID before issuers begin signing with it. Retain rollback-compatible verifier configuration during the transition and keep old private keys restricted.
+
+For development, use non-production keys, tenants, activation data, and a local TLS trust setup. Exercise camera activation, ticket scope, wrong-password rejection, password rotation disconnect, and tenant/camera isolation before deployment. Do not use dev/demo admission on a production listener. Confirm persistent activation and password files survive restart and preserve restrictive permissions.
+
+For a production rollout, build a versioned binary, stage config and keys with the target release, then replace one signaling-server instance at a time behind health checks. Confirm Center HTTP routes, WSS admission, player assets, and health on the new instance before draining the next. Roll back the binary and matching configuration together if health, ticket verification, activation persistence, or camera reconnect fails. Preserve activation records and device/password files across binary rollback; restore them from the deployment backup if a migration changed their format. Do not roll back issuer keys or delete activation state as a way to recover service. These are operational recommendations; no automatic migration or rollback mechanism is claimed here.
+
+## Capacity planning and deferred fleet work
+
+A prior planning estimate used **~24 signaling nodes** at 4 vCPU/8 GB for 1.0M cameras plus 30% concurrent viewers, based on a planning density of 60,000 connections/node (stop assignments around 80,000; 100,000 hard ceiling). Scenarios were 20 nodes for cameras-only and ~51 nodes for two simultaneous viewers per camera. These are estimates, not measured capacity; reconnect storms, TLS handshakes, memory, descriptor limits, geography, and real media-session mix must be measured before procurement. The one-process client map means a camera and its viewers must currently reach the same signaling process.
+
+The current approved path is one MainServer address per ticket. Ordered multi-node assignment, registry-backed camera-to-node routing, cross-node signaling, load/latency scoring, multi-region failover, Center rate limiting, globally replicated revocation, and shared ephemeral TURN are separate future work. TURN is not required for initial signaling; any production TURN design must separately specify transport policy, ephemeral credentials, bandwidth sizing, and regional failure behavior. Fleet estimates and options are retained here only as planning context; they are not implemented guarantees.
+
+### Future entitlement and revocation target
+
+LicenseServer is a separate future service and entitlement system of record; it is not the Center handler or another role of the current signaling-server binary. The target design is for Center to verify SID cryptography and activation policy, then submit SID digests for online entitlement evaluation without putting LicenseServer's database in the signaling hot path. If LicenseServer is unavailable, the intended availability policy is to allow a cryptographically valid, otherwise admissible SID and queue its digest check durably. After recovery, queued checks are drained and invalid, expired, or revoked digests are published to a highly available replicated Redis blocklist. If the blocklist itself cannot be checked, protected admission must fail closed.
+
+MainServer admission checks the blocklist at connect time. The production revocation target is to recheck active sessions at least every **60 minutes** and terminate sessions whose digest has been blocked; a shorter notification path may later improve revocation latency. A durable retry queue, LicenseServer, HA Redis deployment, global replication, and periodic active-session enforcement are future design targets, not capabilities of the current local blocklist implementation. This future service design does not imply a separate Center binary or port.
+
+## Verified implementation scope and limits
+
+Go race tests, vet, builds, and shared-listener HTTPS/WSS integration passed. Camera authentication tests and ARM cross-builds also passed; ARM tests were compiled but not executed. The PC build dependency was repaired by exporting the committed usrsctp source into a temporary build and installing its x86 library/header, preserving the dirty submodule. The original ARM build remains in `libdatachannel_c14/build.arm-preserved-20261013-134621`.
+
+### Camera CLI verification (2026-10-13)
+
+The revised camera CLI was built for x86 with the existing SID trust key/cutoff and `NO_TESTS=ON`. Direct camera-password/device-key tests passed, including concurrent creation and unsafe-file rejection. Isolated tests of the compiled streamer verified first-run `5genwebrtc`, private file permissions, unchanged files on restart, custom password setup before first startup, password rotation preserving the device key, missing/malformed established verifiers failing closed, FIFO/symlink rejection, and password byte limits. An independent Argon2 library verified the emitted PHC files.
+
+A temporary local TLS signaling server and compiled camera completed same-port HTTPS activation and WSS admission using only `-d`/`-p` for the address. The server received the camera nickname while the 43-character key-derived ID matched its activation record. The full Go race suite and focused nickname registration test passed. The server nickname changes were subsequently deployed to the VPS from commit `979fa74`, as recorded below. The camera CLI binary/config now runs under PM2 on the PC, with its existing device key and current password preserved during migration. Physical ARM validation remains pending.
+
+## Current verified development deployment (2026-10-14)
+
+The dev-only release `9a0a800` is online on the isolated HTTPS/WSS listener at 8443. Deployment, automated checks, and the final live camera/viewer probe are verified.
+
+| Item | Verified location/configuration |
+| --- | --- |
+| Source commit/release | `9a0a800` / `release-9a0a800-9a39d1d0` |
+| Remote binary | `/home/admin/webrtc-dev-sid/signaling-server`; SHA-256 `a10fb436ef52573ed2eec958f10b9849d530d6260dcf441012138866980ca7a7` |
+| Remote player | `/home/admin/webrtc-dev-sid/player/ws.html`; SHA-256 `0b8d6618200d2914bf8f4838eee5c8f9920c74b7825dd9e03a7da6e00495f015` |
+| Dev process | PM2 `webrtc_dev`, PID 537677, online on HTTPS/WSS port 8443, version 2.1.1 |
+| PC camera | PM2 `webrtc_camera`, PID 2460215; source `1b0af67e`, tree matches commit `5a2bd02c`; runtime SHA-256 `501301e51750870555e606fb998df9b826b5418225ce32cb351e4869089b18c6` (unchanged) |
+| Rollback | `/home/admin/webrtc-dev-sid/backups/release-9a0a800-9a39d1d0/` |
+
+The final TLS-verified probe passed public health (`ok`, version 2.1.1), public player hash parity, discovery of one `Front door` camera with a 118-character SID, `/v1/view`, WSS admission, viewer nickname-registration rejection, wrong-password rejection, correct-password camera offer (1692 SDP bytes), and consumed-ticket replay rejection. The camera reconnected after two Center retries without a restart or PID change. Final dev PID 537677 ran the expected binary SHA-256; production PID 430487/restarts 3 and activation-store SHA-256 `24a825a74ae04a16abdae32a4065f290c45f89bc0a5cee857a1280332e8bc58e` remained unchanged. Root verified Go tests, admission race tests, `go vet`, build, and JavaScript syntax.
+
+The recovery branch `codex/pre-dev-redeploy-20261014` remains at `9a0a800`. The final amend on `main` contains deployment documentation only; compiled application source remains `9a0a800`, so no rebuild or process restart is needed. Keep `origin/main..HEAD` at one commit. Root will update the remote release-manifest commit mapping to the amended HEAD. The previous release's browser and camera validation below remains historical evidence only.
+
+## Previous verified development deployment (2026-10-14; historical)
+
+The previous dev release was `70d5820` (`release-70d5820-af0a0bd2`), with binary SHA-256 `52f8478c7dda94699706f428f794f3508edc703831ffb7b9478a3337500d8294`, player SHA-256 `0b8d6618200d2914bf8f4838eee5c8f9920c74b7825dd9e03a7da6e00495f015`, and PM2 dev PID 536018. Its rollback files are at `/home/admin/webrtc-dev-sid/backups/release-70d5820-af0a0bd2/`.
+
+That release's discovery returned one `Front door` card. Its 118-character registered SID matched the digest in the authenticated camera ticket; the response used `Cache-Control: no-store`, and the SID value was not recorded. A browser test selected the card, showed a wrong-password error, then connected with the current password and rendered advancing 640x360 video. The TLS-verified probe passed `/v1/view`, WSS admission, wrong-password rejection, current-password offer generation (1691 SDP bytes), and consumed-ticket replay rejection. The camera SID, device key, and password verifier were unchanged. These results apply to release `70d5820`, not the current release.
+
+## Historical development deployment (2026-10-13)
+
+This section preserves earlier release-specific server deployment and PC/browser validation evidence. Its process IDs, hashes, and no-SID discovery behavior describe the 2026-10-13 releases, not the current runtime.
+
+| Item | Verified location/configuration |
+| --- | --- |
+| Remote binary | `/home/admin/webrtc-dev-sid/signaling-server` |
+| Process/listener | PM2 `webrtc_dev`, HTTPS and WSS on 8443, version 2.1.1 |
+| Public test URL | `https://webrtc.5gen.care:8443/` |
+| Remote config | `/home/admin/webrtc-dev-sid/pm2_start.json` (dev-only app) |
+| Rollback backup | `/home/admin/webrtc-dev-sid/backups/release-979fa74-3def9a5b/` (binary, player, prior configuration and manifest) |
+| Binary SHA-256 | `8360c18b36697cab8a4ada202477f1f0fcbb6a8e1d473523791e535b19028ed7` (staged and running executable matched) |
+| Deployed source commit | `979fa74` |
+| Player | Source `979fa74`; served SHA-256 `64c7b3973c9c5db424ddb11aecf329bb6e03c6f64c05c6a5231660659d2279a8` |
+| PC camera | PM2 `webrtc_camera`, compiled x86-64 `libdatachannel_c14/build/examples/streamer/streamer`, version 2.1.1; runtime SHA-256 `ddfbf0399b94c84e9310d7c10007f27b10eb06f89dc204c439aa7134efead6d2` |
+| Private camera runtime | `libdatachannel_c14/.runtime/camera/` (private, gitignored SID/auth/recordings/PID/rollback directory); original test inputs/media PID files remain under `/tmp/webrtc-oneport-NDJJcA/` |
+
+Repository PM2 files: `server/pm2_start.json` keeps the production app configuration intact and defines the compiled dev app; `libdatachannel_c14/pm2_start.json` defines the new camera CLI using PC paths under `.runtime/camera/`, with nickname `Front door` and talkback disabled. The existing SID, device key, and current verifier were migrated byte-for-byte into mode-0600 files under private mode-0700 directories. PM2 `webrtc_camera` (PID 1940520 at verification, zero restarts) replaced manual PID 1783059 while retaining the existing synthetic video/audio feeder processes. The dev server remained online during this camera startup.
+
+Historical dev picker verification for release `979fa74`: `-discovery-tenant test01` was enabled on `webrtc_dev`; that release's public device list returned exactly the online camera `Front door` without SID, digest, password, or ticket fields. The browser displayed its card, and clicking it selected the matching key-derived device ID. Full Go race tests, vet, build and JavaScript syntax checks passed; anonymous WSS and camera-scope restrictions remained enforced. Screenshot proof: `/tmp/webrtc-dev-release/camera-picker.png`. Production configuration and process were unchanged. The no-SID result describes that earlier release behavior; current discovery may include an authenticated SID as described above.
+
+Post-deployment verification: PM2 `webrtc_dev` online (PID 531937 at verification), local TLS health and public HTTPS health `ok`/2.1.1, running executable and served player matched the release hashes. Production PID 430487 and restart count 3 remained unchanged. Activation-store byte count was unchanged. The PC camera connected successfully under PM2; a TLS-verified live probe passed `/v1/view`, WSS admission, viewer nickname-registration rejection, wrong-password rejection, a correct-password camera offer (1,691 SDP bytes with the newly started PM2 camera), and consumed-ticket replay rejection (401).
+
+The deployment uses an isolated test tenant and SID; it does not reuse a real camera's SID. The issuer private key remains local to its issuer. The ticket-signing key was generated on the VPS and remains there; this update retains it. The existing production process on 443 was not restarted. The dev player defaults its HTTP, Center, and WSS host/port to its page origin, so loading the 8443 page does not silently select production 443.
+
+Earlier PC/browser validation on this date: camera activation; HTTPS `/v1/view`; TLS-verified ticket-admitted WSS; missing-password rejection (`Invalid request`); wrong-password rejection (`Unauthorized`); correct-password camera offer; consumed-ticket replay rejection (401); decoded 640x360 synthetic H.264 video and received 8 kHz PCMA audio. Password rotation during active playback stopped video/audio, rejected the old password, and allowed the new password to resume playback without changing SID or device identity.
+
+Synthetic feeds use local UDP inputs 8553 (H.264, single encoder thread/slice) and 8552 (PCMA). The camera is supervised by PM2 `webrtc_camera`; `.runtime/camera/camera.pid` records its PID at verification. Original `streamer.pid` was updated to this PM2 PID, while `video.pid` and `audio.pid` still identify the unchanged feeder processes. Verification used host-to-host LAN media; it does not establish TURN/WAN behavior, microphone/talkback, physical-camera behavior, power-loss durability, ARM memory/latency, production capacity, or cross-instance activation/replay consistency. The activation store and replay cache remain process-local; fleet consistency requires additional work before multiple independent Center instances share a load balancer.
+
+Other limits: Center rate limiting and production fleet routing are deferred; ticket bearer theft before first use remains possible; external systems own password distribution and change authorization; camera password checking is shared-password authorization, not user identity; a locally configured blocklist is not global revocation. Do not infer expiration or global revocation from signature validation alone.

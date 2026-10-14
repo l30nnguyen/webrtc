@@ -140,3 +140,14 @@ vite.config.ts.timestamp-*
 
 venv
 cfg/turn.conf
+
+# SID material: issuer/Center keys, issuance audits, batch sheets and raw SIDs
+cfg/sid/
+*.sid
+*.priv
+src/go/sidctl
+src/go/center
+src/go/signaling-server
+**/sid-batches/
+.DS_Store
+design/._*

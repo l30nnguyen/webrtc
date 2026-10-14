@@ -17,12 +17,16 @@ cd src/go
 go mod download
 ```
 
+## SID licensing and Center
+
+The authoritative SID format, issuance and key management, camera activation and viewing, Center configuration, and password handling are documented in [SID licensing architecture](../../design/sid_licensing_architecture_v2.md). Center APIs run on the ordinary `signaling-server` binary and its configured HTTPS/WSS listener; there is no standalone Center executable.
+
 ## Usage
 
-### Build binary
+### Build MainServer
 
 ```bash
-go build -o signaling-server src/signaling-server.go
+go build -o signaling-server ./src
 ```
 
 ### Start the server
@@ -42,11 +46,17 @@ go build -o signaling-server src/signaling-server.go
 | `-port` | 8000 | Listen port |
 | `-root` | "" | Root directory for config, downloads, and cert.pem |
 | `-https` | false | Enable HTTPS (uses cert.pem from root directory) |
+| `-ticket-public-key` | disabled | Center PKIX Ed25519 public-key PEM; enables ticket admission for every client |
+| `-ticket-kid` | disabled | Required key ID pinned in Center-issued JWT tickets |
+| `-ticket-aud` | disabled | Exact WSS root URL audience, such as `wss://signal.example.com:8000/` |
+| `-blocklist-file` | disabled | Required blocklist (SID digests, `tenant:NAME` lines, and `device:ID EXPIRY` lines that Center writes on release); can be empty. Nodes also drop open connections that become blocked, on a 30 s sweep |
+| `-admin-token-file` | disabled | File with the pairing system's bearer token (32+ bytes, mode 0600). With `-center` it enables `POST /v1/admin/status` and `POST /v1/admin/release` (body `{"sid_digest":"<hex>"}`); without it those routes return 404 |
+| `-demo-tenant` | disabled | DEV ONLY: unauthenticated `Player*` clients join this tenant |
 
 ### Run without building
 
 ```bash
-go run src/signaling-server.go -root ../.. -port 8000 -https
+go run ./src -root ../.. -port 8000 -https
 ```
 
 ## API Endpoints
@@ -54,7 +64,7 @@ go run src/signaling-server.go -root ../.. -port 8000 -https
 | Endpoint | Description |
 |----------|-------------|
 | `WS /{client_id}` | WebSocket signaling endpoint |
-| `GET /api/devices` | List connected devices (query: `?type=producer`) |
+| `GET /api/devices` | List connected devices (query: `?type=producer`); with tenancy it lists only the demo tenant and is hidden if there is none |
 | `GET /api/health` | Health check with client count |
 | `GET /` | WebRTC Player (ws.html) |
 | `GET /downloads/{filename}` | Download files from downloads folder |

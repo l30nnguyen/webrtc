@@ -2,6 +2,8 @@
 
 Python WebSocket signaling server for WebRTC peer connections with HTTP REST API.
 
+For the current SID licensing, camera viewing, Center deployment, and credential contract, see [SID licensing architecture](design/sid_licensing_architecture_v2.md).
+
 ## Capacity Estimation
 
 **Hardware:** EC2 t3.micro (1GB RAM) / t3.small (2GB RAM)
