@@ -29,7 +29,9 @@
         "-activation-store",
         "/home/admin/webrtc/cfg/sid/activations.jsonl",
         "-admin-token-file",
-        "/home/admin/webrtc/cfg/sid/admin.token"
+        "/home/admin/webrtc/cfg/sid/admin.token",
+        "-discovery-tenant",
+        "test01"
       ],
       "exec_mode": "fork",
       "autorestart": true,

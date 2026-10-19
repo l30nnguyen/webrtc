@@ -1110,8 +1110,11 @@
                 const res  = await fetch(`${requestOrigin}/api/devices?type=producer`,
                                          { signal: AbortSignal.timeout(3000) });
                 if (!isCurrentRequest()) return;
+                // Camera cards come from the server's public discovery list, which only
+                // exists in the dev/demo setup (-discovery-tenant). In release mode the
+                // server answers 404 and the cards are unavailable.
                 if (res.status === 404) {
-                    grid.innerHTML = '<div class="no-devices">No cameras are available to select.</div>';
+                    grid.innerHTML = '<div class="no-devices">Camera cards are unavailable in release mode.</div>';
                     return;
                 }
                 if (!res.ok) throw new Error('device list request failed');
