@@ -15,6 +15,7 @@ import (
 	"log"
 	"net"
 	"net/http"
+	"net/netip"
 	"net/url"
 	"os"
 	"strings"
@@ -88,8 +89,11 @@ type Server struct {
 	// "Player*" web-demo clients join that one tenant. Development only.
 	demoTenant      string
 	discoveryTenant string
-	center          http.Handler
-	trustProxyTLS   bool
+	// playerAllow, when nonempty, limits the player page and the device list
+	// to these client addresses; everyone else gets 404.
+	playerAllow   []netip.Prefix
+	center        http.Handler
+	trustProxyTLS bool
 }
 
 func NewServer(playerPath string, rootDir string) *Server {
@@ -118,6 +122,51 @@ func (s *Server) SetDemoTenant(tenant string) { s.demoTenant = tenant }
 // SetDiscoveryTenant exposes camera-only metadata for one tenant through the
 // read-only device list. It does not affect admission or message routing.
 func (s *Server) SetDiscoveryTenant(tenant string) { s.discoveryTenant = tenant }
+
+// SetPlayerAllow limits the player page and /api/devices to clients whose
+// address is in one of prefixes. An empty list leaves them open.
+func (s *Server) SetPlayerAllow(prefixes []netip.Prefix) { s.playerAllow = prefixes }
+
+// playerAllowed reports whether r may load the player page and device list.
+// The listener terminates TLS itself, so RemoteAddr is the real client.
+func (s *Server) playerAllowed(r *http.Request) bool {
+	if len(s.playerAllow) == 0 {
+		return true
+	}
+	addrPort, err := netip.ParseAddrPort(r.RemoteAddr)
+	if err != nil {
+		return false
+	}
+	addr := addrPort.Addr().Unmap()
+	for _, prefix := range s.playerAllow {
+		if prefix.Contains(addr) {
+			return true
+		}
+	}
+	return false
+}
+
+// parsePlayerAllow reads a comma-separated list of IP addresses and CIDRs.
+func parsePlayerAllow(text string) ([]netip.Prefix, error) {
+	var prefixes []netip.Prefix
+	for _, item := range strings.Split(text, ",") {
+		item = strings.TrimSpace(item)
+		if item == "" {
+			continue
+		}
+		if prefix, err := netip.ParsePrefix(item); err == nil {
+			prefixes = append(prefixes, prefix.Masked())
+			continue
+		}
+		addr, err := netip.ParseAddr(item)
+		if err != nil {
+			return nil, fmt.Errorf("-player-allow: %q is not an IP address or CIDR", item)
+		}
+		addr = addr.Unmap()
+		prefixes = append(prefixes, netip.PrefixFrom(addr, addr.BitLen()))
+	}
+	return prefixes, nil
+}
 
 // SetTrustProxyTLS requires requests to arrive over TLS or carry the exact
 // HTTPS marker set by the explicitly trusted TLS-terminating proxy.
@@ -161,9 +210,17 @@ func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	switch {
-	case r.URL.Path == "/":
+	case r.URL.Path == "/" || (s.discoveryTenant != "" && r.URL.Path == "/demo/"+s.discoveryTenant):
+		if !s.playerAllowed(r) {
+			http.NotFound(w, r)
+			return
+		}
 		http.ServeFile(w, r, s.playerPath)
 	case r.URL.Path == "/api/devices":
+		if !s.playerAllowed(r) {
+			http.NotFound(w, r)
+			return
+		}
 		s.handleDevices(w, r)
 	case r.URL.Path == "/api/health":
 		s.handleHealth(w, r)
@@ -846,7 +903,8 @@ func main() {
 	ticketLifetime := flag.Duration("ticket-lifetime", admission.DefaultTicketLifetime, "Center ticket lifetime (max 5m)")
 	viewOrigin := flag.String("view-origin", "", "optional exact HTTPS browser origin allowed to call POST /v1/view")
 	demoTenant := flag.String("demo-tenant", "", "DEV ONLY: with ticket admission, let unauthenticated Player* clients join this tenant")
-	discoveryTenant := flag.String("discovery-tenant", "", "DEV ONLY: expose camera-only /api/devices metadata for one admitted tenant")
+	discoveryTenant := flag.String("discovery-tenant", "", "DEV ONLY: expose camera-only /api/devices metadata for one admitted tenant; also serves the player at /demo/TENANT")
+	playerAllowText := flag.String("player-allow", "", "comma-separated IPs/CIDRs allowed to load the player and /api/devices (default: everyone)")
 	flag.Parse()
 	if *demoTenant != "" && !sid.ValidTenant(*demoTenant) {
 		log.Fatal("-demo-tenant must be 6-8 characters of [a-z0-9]")
@@ -884,6 +942,14 @@ func main() {
 	}); err != nil {
 		log.Fatal(err)
 	}
+	playerAllow, err := parsePlayerAllow(*playerAllowText)
+	if err != nil {
+		log.Fatal(err)
+	}
+	if len(playerAllow) > 0 {
+		srv.SetPlayerAllow(playerAllow)
+		log.Printf("Player and device list limited to %s", *playerAllowText)
+	}
 	go srv.sweepInactiveClients()
 
 	addr := fmt.Sprintf(":%d", *port)
@@ -904,13 +970,13 @@ func main() {
 			MinVersion:   tls.VersionTLS12,
 		}
 		log.Printf("Listening on wss://0.0.0.0%s", addr)
-		log.Printf("  GET https://0.0.0.0%s/         — WebRTC Player", addr)
+		log.Printf("  GET https://0.0.0.0%s/         — Matrix Player", addr)
 		log.Printf("  GET https://0.0.0.0%s/api/devices  — list online devices", addr)
 		log.Printf("  GET https://0.0.0.0%s/api/health   — health check", addr)
 		log.Fatal(httpServer.ListenAndServeTLS("", ""))
 	} else {
 		log.Printf("Listening on ws://0.0.0.0%s", addr)
-		log.Printf("  GET http://0.0.0.0%s/         — WebRTC Player", addr)
+		log.Printf("  GET http://0.0.0.0%s/         — Matrix Player", addr)
 		log.Printf("  GET http://0.0.0.0%s/api/devices  — list online devices", addr)
 		log.Printf("  GET http://0.0.0.0%s/api/health   — health check", addr)
 		log.Fatal(httpServer.ListenAndServe())

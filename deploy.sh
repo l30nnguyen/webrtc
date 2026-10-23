@@ -1,21 +1,94 @@
 #!/bin/bash
+# Build a release package (release/make_release.sh) and deploy it.
+#
+#   dev:  the dev VPS; installs the package's binary and player into
+#         /home/admin/webrtc-dev-sid and restarts only PM2 webrtc_dev (8443),
+#         keeping its runtime arguments.
+#   prod: the matrix.5gen.care VPS; runs the package's setup.sh upgrade
+#         (systemd matrix.service, config and data kept).
+#
+# Usage: ./deploy.sh dev|prod
+set -euo pipefail
 
-# Compile Go server to root folder
-echo "Building Go server..."
-cd src/go
-go build -o ../../signaling-server src/signaling-server.go
-cd ../..
+TARGET="${1:-}"
+ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+case "$TARGET" in
+    dev)
+        HOST="${DEPLOY_HOST:-admin@ec2-3-95-228-203.compute-1.amazonaws.com}"
+        KEY="${DEPLOY_KEY:-$ROOT/../webrtc_instance.pem}"
+        ;;
+    prod)
+        HOST="${DEPLOY_HOST:-ubuntu@ec2-34-228-78-198.compute-1.amazonaws.com}"
+        KEY="${DEPLOY_KEY:-$ROOT/../matrix_prod.pem}"
+        ;;
+    *) echo "Usage: $0 dev|prod" >&2; exit 1 ;;
+esac
+SSH=(ssh -i "$KEY" -o ConnectTimeout=15)
+SCP=(scp -i "$KEY" -o ConnectTimeout=15)
 
-if [ $? -ne 0 ]; then
-    echo "Build failed!"
-    exit 1
+if [[ "$TARGET" == prod ]]; then
+    read -r -p "Deploy $(git -C "$ROOT" rev-parse --short HEAD) to PRODUCTION (matrix.5gen.care)? Type 'prod' to continue: " answer
+    [[ "$answer" == prod ]] || { echo "Aborted."; exit 1; }
 fi
 
-echo "Build successful!"
+# make_release.sh refuses uncommitted changes and stops on a build failure.
+"$ROOT/release/make_release.sh"
+VERSION="$(tr -d '[:space:]' < "$ROOT/cfg/version")"
+NAME="matrix-server-$VERSION-$(git -C "$ROOT" rev-parse --short HEAD)"
+TARBALL="$ROOT/dist/$NAME.tar.gz"
 
-# Start/restart with PM2
-echo "Starting PM2..."
-pm2 start pm2_start.json --only webrtc_prod --update-env
+STAMP="$(date -u +%Y%m%dT%H%M%SZ)"
+echo "Uploading $NAME to $TARGET..."
+"${SSH[@]}" "$HOST" "mkdir -p ~/releases"
+"${SCP[@]}" "$TARBALL" "$TARBALL.sha256" "$HOST:releases/"
 
-echo "Deployment complete!"
-#sudo setcap 'cap_net_bind_service=+ep' signaling-server
+if [[ "$TARGET" == prod ]]; then
+    "${SSH[@]}" "$HOST" bash -s -- "$NAME" <<'EOF'
+set -euo pipefail
+NAME=$1
+cd ~/releases
+sha256sum -c "$NAME.tar.gz.sha256"
+rm -rf "$NAME" && tar xzf "$NAME.tar.gz"
+sudo "./$NAME/setup.sh" upgrade
+EOF
+    curl -sf --max-time 10 https://matrix.5gen.care/api/health && echo
+    echo "Deployment of $NAME to prod complete!"
+    exit 0
+fi
+
+DEST=/home/admin/webrtc-dev-sid
+APP=webrtc_dev
+PORT=8443
+BACKUP="$DEST/backups/release-${NAME#matrix-server-}-$STAMP"
+"${SSH[@]}" "$HOST" bash -s -- "$NAME" "$DEST" "$APP" "$PORT" "$BACKUP" <<'EOF'
+set -euo pipefail
+NAME=$1 DEST=$2 APP=$3 PORT=$4 BACKUP=$5
+cd ~/releases
+sha256sum -c "$NAME.tar.gz.sha256"
+rm -rf "$NAME" && tar xzf "$NAME.tar.gz"
+PKG=~/releases/$NAME
+
+mkdir -p "$BACKUP"
+cp -p "$DEST/signaling-server" "$DEST/player/ws.html" "$BACKUP/"
+[[ -f "$DEST/release.json" ]] && cp -p "$DEST/release.json" "$BACKUP/"
+
+install -m 755 "$PKG/bin/signaling-server" "$DEST/signaling-server.new"
+mv "$DEST/signaling-server.new" "$DEST/signaling-server"
+install -m 644 "$PKG/player/ws.html" "$DEST/player/ws.html"
+. "$PKG/RELEASE"
+cat > "$DEST/release.json" <<JSON
+{"package": "$NAME", "commit": "$commit", "go_version": "$go", "binary_sha256": "$binary_sha256", "deployed_at": "$(date -u +%Y-%m-%dT%H:%M:%SZ)", "backup": "$BACKUP"}
+JSON
+
+pm2 restart "$APP" >/dev/null
+sleep 3
+if ! curl -skf --max-time 10 "https://localhost:$PORT/api/health"; then
+    echo >&2
+    echo "Health check failed. Roll back with:" >&2
+    echo "  cp -p $BACKUP/signaling-server $DEST/ && cp -p $BACKUP/ws.html $DEST/player/ && pm2 restart $APP" >&2
+    exit 1
+fi
+echo
+echo "Backup: $BACKUP"
+EOF
+echo "Deployment of $NAME to dev complete!"

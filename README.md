@@ -136,6 +136,26 @@ pm2 start pm2_start.json
 
 The default configuration uses the Go server.
 
+## Deploying to the VPS
+
+Run `deploy.sh` from your machine with an explicit target. Both targets build
+one release package with `release/make_release.sh`
+(`dist/matrix-server-<version>-<commit>.tar.gz`, see
+[release/README.md](release/README.md)) and deploy that same package:
+
+```bash
+./deploy.sh dev    # dev VPS: PM2 webrtc_dev, /home/admin/webrtc-dev-sid, port 8443
+./deploy.sh prod   # matrix.5gen.care VPS: setup.sh upgrade (systemd matrix.service); asks you to type "prod"
+```
+
+- The build refuses uncommitted changes in `src/go`, `player/ws.html`, `cfg/version` or `release/`, uses the toolchain pinned in `src/go/go.mod`, and stops on a build failure.
+- The package is uploaded to `~/releases/` on the VPS and its checksum is verified before anything changes.
+- **dev** installs the package's binary and player, backs up the old ones to `backups/release-<version>-<commit>-<time>/`, writes `release.json`, and restarts only `webrtc_dev` with the arguments already registered in PM2 (`pm2_start.json` is not reapplied).
+- **prod** runs the package's `setup.sh upgrade`, which keeps `/etc/matrix/matrix.conf`, keys and data, backs up to `/opt/matrix/backups/<time>/`, and restarts `matrix.service`.
+- Both end with a health check and print how to roll back if it fails. Override the host or key with `DEPLOY_HOST` and `DEPLOY_KEY`.
+
+The old `webrtc_prod` on the dev VPS is not a `deploy.sh` target.
+
 ## TLS certificate renewal
 
 `renewcert.sh` checks and renews `webrtc.5gen.care` through nginx's HTTP-01

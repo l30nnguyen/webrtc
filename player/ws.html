@@ -5,7 +5,7 @@
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <link rel="icon" href="data:,">
-    <title>WebRTC Stream Viewer</title>
+    <title>Matrix Stream Viewer</title>
     <script src="https://webrtc.github.io/adapter/adapter-latest.js"></script>
     <style>
         * {
@@ -91,6 +91,23 @@
             font-weight: 600;
             color: #fff;
             background: #718096;
+        }
+        #lens2Status {
+            font-size: 13px;
+            color: #4a5568;
+        }
+        #lens2Media {
+            display: none;
+        }
+        #lens2Media .lens-label {
+            position: absolute;
+            top: 8px;
+            left: 8px;
+            padding: 2px 8px;
+            border-radius: 6px;
+            font-size: 12px;
+            color: #fff;
+            background: rgba(0, 0, 0, 0.5);
         }
         #streamBadge[data-mode="live"] { background: #38a169; }
         #streamBadge[data-mode="recording"], #streamBadge[data-mode="recording_ended"] { background: #e53e3e; }
@@ -363,7 +380,7 @@
 <body>
     <div class="container">
         <div class="card">
-            <h1>🎥 IPCAM WebRTC Viewer Demo <span id="viewerVersion"></span></h1>
+            <h1>🎥 IPCAM Matrix Viewer Demo <span id="viewerVersion"></span></h1>
 
             <!-- Server config row -->
             <div class="input-group" style="margin-bottom:10px">
@@ -410,6 +427,16 @@
                         <option value="deblock+sharpen selected">Deblock+Sharpen</option>
                     </select>
                 </div>
+            </div>
+
+            <!-- Second lens: shown only when the camera offers one. -->
+            <div class="input-group" id="lens2Panel" aria-label="Second lens" hidden>
+                <button class="btn-primary" id="lens2Toggle" disabled>Start lens 2</button>
+                <span id="lens2Status" role="status" aria-live="polite"></span>
+            </div>
+            <div class="video-container" id="lens2Media">
+                <video id="video2" autoplay playsinline muted></video>
+                <span class="lens-label">Lens 2</span>
             </div>
 
             <div class="input-group" aria-label="Camera talkback">
@@ -531,6 +558,117 @@
         document.getElementById('centerUrl').value = window.location.origin.startsWith('https://')
             ? window.location.origin
             : `https://${window.location.host}`;
+
+        // Second lens. When the camera has one, its video track is always part of
+        // the connection; frames flow only between "start" and "stop" commands on
+        // the data channel. Lens 0 (the main feed) is always streaming.
+        class LensController {
+            constructor(update) {
+                this.update = update;
+                this.sequence = 0;
+                this.reset();
+            }
+            reset() {
+                this.peer = null;
+                this.channel = null;
+                this.connected = false;
+                this.available = false;
+                this.active = false;
+                this.pendingId = null;
+                this.message = '';
+                this.publish();
+            }
+            publish() {
+                this.update({
+                    available: this.available,
+                    active: this.active,
+                    busy: this.pendingId !== null,
+                    ready: this.connected && this.channel?.readyState === 'open',
+                    message: this.message
+                });
+            }
+            configure(peer) {
+                this.reset();
+                this.peer = peer;
+            }
+            connection(peer) {
+                if (this.peer !== peer) return;
+                this.connected = ['connected', 'completed'].includes(peer.iceConnectionState);
+                if (!this.connected) {
+                    this.pendingId = null;
+                    this.active = false;
+                    this.message = this.available ? 'Connection lost' : '';
+                }
+                this.publish();
+            }
+            setChannel(peer, channel) {
+                if (this.peer !== peer) return;
+                this.channel = channel;
+                this.publish();
+            }
+            request(action) {
+                if (!this.available || !this.connected || this.channel?.readyState !== 'open') {
+                    this.message = 'Lens 2 is unavailable';
+                    this.publish();
+                    return null;
+                }
+                if (this.pendingId) return null;
+                const requestId = 'lens-' + (++this.sequence) + '-' + Date.now();
+                try {
+                    this.channel.send(JSON.stringify({ type: 'live', lens: 1, action, requestId }));
+                } catch (_) {
+                    this.message = 'Unable to send the lens 2 request';
+                    this.publish();
+                    return null;
+                }
+                this.pendingId = requestId;
+                this.message = action === 'start' ? 'Starting lens 2' : 'Stopping lens 2';
+                this.publish();
+                return requestId;
+            }
+            start() { return this.request('start'); }
+            stop() { return this.request('stop'); }
+            toggle() { return this.active ? this.stop() : this.start(); }
+            // Called for every decoded lens 2 video frame.
+            videoFrame() {
+                if (this.active && this.message === 'Waiting for lens 2 video') {
+                    this.message = '';
+                    this.publish();
+                }
+            }
+            messageFrom(peer, channel, text) {
+                let message;
+                try { message = JSON.parse(text); } catch (_) { return false; }
+                if (!message || typeof message !== 'object' || Array.isArray(message)) return false;
+                if (message.type !== 'lens_state' && message.type !== 'live') return false;
+                if (peer !== this.peer || channel !== this.channel) return true;
+                if (message.type === 'lens_state') {
+                    const lens = Array.isArray(message.lenses)
+                        ? message.lenses.find(item => item && item.lens === 1) : null;
+                    this.available = !!lens && lens.available === true;
+                    const active = this.available && lens.active === true;
+                    if (active && !this.active) this.message = 'Waiting for lens 2 video';
+                    if (!active) this.message = this.pendingId ? this.message : '';
+                    this.active = active;
+                    this.publish();
+                    return true;
+                }
+                if (typeof message.requestId !== 'string' || message.requestId !== this.pendingId) return true;
+                this.pendingId = null;
+                if (message.action === 'started') {
+                    this.active = true;
+                    this.message = 'Waiting for lens 2 video';
+                } else if (message.action === 'stopped') {
+                    this.active = false;
+                    this.message = '';
+                } else {
+                    this.message = typeof message.message === 'string' && message.message
+                        ? message.message : 'Lens 2 request failed';
+                }
+                this.publish();
+                return true;
+            }
+        }
 
         // PTT controller owns only one PeerConnection generation. No capture is
         // requested until the user explicitly enables the microphone.
@@ -1015,6 +1153,24 @@
         document.getElementById('recordingOnEnd').addEventListener('change', event => recording.setOnEnd(event.target.value));
         document.getElementById('recordingPlay').addEventListener('click', () => recording.play());
         document.getElementById('recordingStop').addEventListener('click', () => recording.stop());
+
+        const lens = new LensController(state => {
+            document.getElementById('lens2Panel').hidden = !state.available;
+            const toggle = document.getElementById('lens2Toggle');
+            toggle.textContent = state.active ? 'Stop lens 2' : 'Start lens 2';
+            toggle.disabled = !state.available || !state.ready || state.busy;
+            document.getElementById('lens2Status').textContent = state.message || (state.active ? 'Lens 2 live' : 'Lens 2 off');
+            document.getElementById('lens2Media').style.display = state.available && state.active ? 'block' : 'none';
+        });
+        document.getElementById('lens2Toggle').addEventListener('click', () => lens.toggle());
+        // Registered once: the same <video> element is reused across connections.
+        const video2El = document.getElementById('video2');
+        if ('requestVideoFrameCallback' in HTMLVideoElement.prototype) {
+            const onFrame = () => { lens.videoFrame(); video2El.requestVideoFrameCallback(onFrame); };
+            video2El.requestVideoFrameCallback(onFrame);
+        } else {
+            video2El.addEventListener('timeupdate', () => lens.videoFrame());
+        }
         const talkButton = document.getElementById('talk');
         let talkPointer = null;
         talkButton.addEventListener('pointerdown', event => {
@@ -1034,7 +1190,7 @@
         });
         window.addEventListener('blur', releaseTalk);
         document.addEventListener('visibilitychange', () => { if (document.hidden) releaseTalk(); });
-        window.addEventListener('pagehide', () => { talkback.reset(); recording.reset(); });
+        window.addEventListener('pagehide', () => { talkback.reset(); recording.reset(); lens.reset(); });
 
         
         function resetDiscoverySelection() {
@@ -1243,7 +1399,14 @@
             const className = type === 'error' ? 'log-error' :
                 type === 'success' ? 'log-success' :
                     type === 'warn' ? 'log-warn' : '';
-            dataChannelLog.innerHTML += `<div class="log-entry ${className}"><span class="log-time">[${time}]</span> ${message}</div>`;
+            // Messages can carry camera text, so they are inserted as text, never HTML.
+            const entry = document.createElement('div');
+            entry.className = 'log-entry ' + className;
+            const timeEl = document.createElement('span');
+            timeEl.className = 'log-time';
+            timeEl.textContent = '[' + time + ']';
+            entry.append(timeEl, ' ' + message);
+            dataChannelLog.appendChild(entry);
             if (_autoScroll) dataChannelLog.scrollTop = dataChannelLog.scrollHeight;
         }
 
@@ -1307,6 +1470,7 @@
             pc.addEventListener('iceconnectionstatechange', () => {
                 talkback.connection(pc);
                 recording.connection(pc);
+                lens.connection(pc);
                 iceConnectionLog.textContent = pc.iceConnectionState;
                 log(`ICE Connection: ${pc.iceConnectionState}`, 'info');
 
@@ -1534,12 +1698,21 @@
             // Audio → visible <audio> (unmuted, plays sound)
             const videoStream = new MediaStream();
             const audioStream = new MediaStream();
+            const video2Stream = new MediaStream();
+            let videoTracks = 0;
 
             pc.ontrack = (evt) => {
                 log(`✅ Track received: ${evt.track.kind}`, 'success');
                 document.getElementById('media').style.display = 'block';
 
-                if (evt.track.kind === 'video') {
+                // The camera names the lens 2 stream "stream2"; without a stream id the
+                // second video m-line is lens 2.
+                const streamId = evt.streams && evt.streams[0] ? evt.streams[0].id : '';
+                if (evt.track.kind === 'video' && (streamId === 'stream2' || (streamId !== 'stream1' && videoTracks++ > 0))) {
+                    video2Stream.addTrack(evt.track);
+                    video2El.srcObject = video2Stream;
+                    video2El.play().catch(e => console.warn('Lens 2 play blocked:', e));
+                } else if (evt.track.kind === 'video') {
                     videoStream.addTrack(evt.track);
                     videoEl.srcObject = videoStream;
                     videoEl.play().catch(e => console.warn('Video play blocked:', e));
@@ -1559,6 +1732,7 @@
                 dc.onopen = () => {
                     talkback.setChannel(pc, channel);
                     recording.setChannel(pc, channel);
+                    lens.setChannel(pc, channel);
                     dcStatusLog.textContent = 'Open';
                     log('📡 Data channel opened', 'success');
                     document.getElementById('dc-command-input').disabled = false;
@@ -1573,6 +1747,7 @@
 
                     if (talkback.messageFrom(pc, channel, evt.data)) return;
                     if (recording.messageFrom(pc, channel, evt.data)) return;
+                    if (lens.messageFrom(pc, channel, evt.data)) return;
                     if (!dc) {
                         return;
                     }
@@ -1591,6 +1766,7 @@
                 dc.onclose = () => {
                     if (talkback.channel === channel) talkback.reset();
                     if (recording.channel === channel) recording.reset();
+                    if (lens.channel === channel) lens.reset();
                     clearTimeout(dcTimeout);
                     dcTimeout = null;
                     dcStatusLog.textContent = 'Closed';
@@ -1637,6 +1813,7 @@
         async function handleOffer(offer) {
             talkback.reset();
             recording.reset();
+            lens.reset();
             if (pc) pc.close();
             const peer = createPeerConnection(offer);
             pc = peer;
@@ -1646,6 +1823,8 @@
             talkback.connection(peer);
             recording.configure(peer);
             recording.connection(peer);
+            lens.configure(peer);
+            lens.connection(peer);
             log('✅ Remote description set', 'success');
             await sendAnswer(peer);
         }
@@ -1819,6 +1998,7 @@
         function stop() {
             talkback.reset();
             recording.reset();
+            lens.reset();
             document.getElementById('stop').style.display = 'none';
             document.getElementById('media').style.display = 'none';
             document.getElementById('start').style.display = 'inline-block';
