@@ -1,12 +1,7 @@
 package main
 
 import (
-	"bytes"
-	"context"
-	"encoding/json"
-	"fmt"
 	"log"
-	"net/http"
 	"os"
 	"os/signal"
 	"syscall"
@@ -100,7 +95,13 @@ func (s *Server) reloadFleet(path string) error {
 	if err != nil {
 		return err
 	}
-	return s.fleet.Apply(config)
+	if err := s.fleet.Apply(config); err != nil {
+		return err
+	}
+	if s.hub != nil {
+		s.hub.SetConfig(config)
+	}
+	return nil
 }
 
 // saveStatsLoop writes the counters to path every minute.
@@ -112,46 +113,4 @@ func (s *Server) saveStatsLoop(path string) {
 			log.Printf("stats: cannot save %s: %v", path, err)
 		}
 	}
-}
-
-// reportLoop sends this node's report to Center every fleet.ReportInterval.
-func (s *Server) reportLoop(centerURL, address, token string) {
-	client := &http.Client{Timeout: 10 * time.Second}
-	failing := false
-	for {
-		err := s.reportOnce(client, centerURL, address, token)
-		switch {
-		case err != nil && !failing:
-			log.Printf("fleet: report to Center failed: %v", err)
-			failing = true
-		case err == nil && failing:
-			log.Printf("fleet: reporting to Center again")
-			failing = false
-		}
-		time.Sleep(fleet.ReportInterval)
-	}
-}
-
-func (s *Server) reportOnce(client *http.Client, centerURL, address, token string) error {
-	body, err := json.Marshal(s.LocalReport(address))
-	if err != nil {
-		return err
-	}
-	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
-	defer cancel()
-	request, err := http.NewRequestWithContext(ctx, http.MethodPost, centerURL+"v1/node/report", bytes.NewReader(body))
-	if err != nil {
-		return err
-	}
-	request.Header.Set("Content-Type", "application/json")
-	request.Header.Set("Authorization", "Bearer "+token)
-	response, err := client.Do(request)
-	if err != nil {
-		return err
-	}
-	defer response.Body.Close()
-	if response.StatusCode != http.StatusOK {
-		return fmt.Errorf("Center answered %d", response.StatusCode)
-	}
-	return nil
 }

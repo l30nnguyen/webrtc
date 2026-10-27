@@ -1,8 +1,8 @@
 package center
 
 import (
-	"crypto/sha256"
-	"encoding/hex"
+	"crypto/ed25519"
+	"encoding/base64"
 	"encoding/json"
 	"net/http"
 	"strings"
@@ -150,33 +150,37 @@ func TestProto3ProofOnlyForTheNodeCenterChose(t *testing.T) {
 const remoteNode = "wss://sg1.example.test:443/"
 
 func fleetEnv(t *testing.T, local *fleet.Report, adminToken string) *env {
-	sum := sha256.Sum256([]byte("node-token-0123456789abcdef0123456789"))
-	return newEnv(t, func(c *Config) {
-		registry, err := fleet.New([]fleet.Node{
-			{Address: mainAddress, Capacity: 1},
-			{Address: remoteNode, Countries: []string{"VN"}, Capacity: 100, TokenSHA256: hex.EncodeToString(sum[:])},
-		}, mainAddress, func() fleet.Report { return *local }, nil)
-		if err != nil {
-			t.Fatal(err)
-		}
+	key := ed25519.NewKeyFromSeed(make([]byte, ed25519.SeedSize)).Public().(ed25519.PublicKey)
+	registry, err := fleet.New([]fleet.Node{
+		{Address: mainAddress, Capacity: 1},
+		{Address: remoteNode, Countries: []string{"VN"}, Capacity: 100, PublicKey: base64.RawURLEncoding.EncodeToString(key)},
+	}, mainAddress, func() fleet.Report { return *local }, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	e := newEnv(t, func(c *Config) {
 		c.Fleet = registry
 		c.AdminToken = []byte(adminToken)
 	})
+	e.fleet = registry
+	return e
 }
 
-func (e *env) nodeReport(token string, report fleet.Report) int {
-	return e.do(http.MethodPost, "/v1/node/report", report, map[string]string{"Authorization": "Bearer " + token}).Code
+// linkNode stands in for a node's link: it logs the node in with its state.
+func (e *env) linkNode(report fleet.Report) {
+	e.t.Helper()
+	if _, err := e.fleet.Linked(report, 0); err != nil {
+		e.t.Fatal(err)
+	}
 }
 
 func TestFleetAssignsByLoadAndViewersFollowPresence(t *testing.T) {
 	local := &fleet.Report{Address: mainAddress}
 	e := fleetEnv(t, local, strings.Repeat("a", 32))
-	if code := e.nodeReport("wrong-token-0123456789abcdef0123456789", fleet.Report{Address: remoteNode}); code != http.StatusUnauthorized {
-		t.Fatalf("report with a wrong token = %d", code)
+	if code := e.do(http.MethodPost, "/v1/node/report", fleet.Report{Address: remoteNode}, nil).Code; code != http.StatusNotFound {
+		t.Fatalf("the HTTP node report is gone, got %d", code)
 	}
-	if code := e.nodeReport("node-token-0123456789abcdef0123456789", fleet.Report{Address: remoteNode}); code != http.StatusOK {
-		t.Fatalf("node report = %d", code)
-	}
+	e.linkNode(fleet.Report{Address: remoteNode})
 
 	// The Center node has capacity 1: the first camera goes there, the next to sg1.
 	_, first := e.challenge3()
@@ -210,7 +214,7 @@ func TestStatsAddsUpTheFleet(t *testing.T) {
 	local := &fleet.Report{Address: mainAddress, Stats: stats.Days{today: {Requests: 2, Camera: stats.Outcomes{Connected: 1}}}}
 	token := strings.Repeat("a", 32)
 	e := fleetEnv(t, local, token)
-	e.nodeReport("node-token-0123456789abcdef0123456789", fleet.Report{Address: remoteNode,
+	e.linkNode(fleet.Report{Address: remoteNode,
 		Stats: stats.Days{today: {Requests: 3, Player: stats.Outcomes{Failed: 1, Errors: map[string]int{"no_path": 1}}}}})
 
 	// Statistics are not served on the public port, even with the admin token.

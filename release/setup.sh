@@ -22,6 +22,8 @@
 #   sudo matrix-fleet check new.json | apply new.json | rollback [VERSION]
 # /opt/matrix/cfg/geoip.csv (DB-IP IP-to-Country Lite CSV) adds the country
 # choice. A phase 2 cfg/sid/nodes.json is moved to config.json on upgrade.
+# Other nodes link to Center on LINK_LISTEN=host:port in /etc/matrix/matrix.conf
+# (the private address and port, e.g. 10.10.0.2:8444; firewall it to the nodes).
 #
 # Upgrade an installed server to this package (config, keys and data are kept;
 # edit /etc/matrix/matrix.conf first to change a setting, e.g. ASSIGN_ADDRESS=
@@ -105,6 +107,8 @@ write_unit() {
     # control server nodes; cfg/geoip.csv adds the region (country) choice.
     [[ -f "$FLEET_CONFIG" ]] && discovery+=" -config-file $FLEET_CONFIG"
     [[ -f "$FLEET_CONFIG" && -f "$APP_DIR/cfg/geoip.csv" ]] && discovery+=" -geoip-file $APP_DIR/cfg/geoip.csv"
+    # Nodes link to LINK_LISTEN (host:port, the private address; see README).
+    [[ -f "$FLEET_CONFIG" && -n "${LINK_LISTEN:-}" ]] && discovery+=" -link-listen $LINK_LISTEN"
     discovery+=" -stats-file $DATA_DIR/stats.json -admin-socket /run/matrix/admin.sock"
     cat > "$UNIT" <<EOF
 [Unit]

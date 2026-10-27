@@ -20,6 +20,7 @@ import (
 
 	"signaling-server/internal/activation"
 	"signaling-server/internal/admission"
+	"signaling-server/internal/fleet"
 	"signaling-server/internal/sid"
 )
 
@@ -40,6 +41,7 @@ type env struct {
 	logs           *logCapture
 	configure      func(*Config)
 	tenants        StaticTenants
+	fleet          *fleet.Registry // set by fleetEnv
 	storeInterface Activations
 }
 

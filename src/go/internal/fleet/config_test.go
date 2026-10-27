@@ -11,8 +11,8 @@ func routedConfig(routes map[string]string) Config {
 	return Config{
 		Nodes: []Node{
 			{Name: "us00", Address: self, Region: "US", Capacity: 10},
-			{Name: "de00", Address: europe, Region: "DE", Capacity: 10, TokenSHA256: tokenHash("de-token")},
-			{Name: "sg00", Address: asia, Region: "SG", Countries: []string{"VN"}, Capacity: 10, TokenSHA256: tokenHash("sg1-token")},
+			{Name: "de00", Address: europe, Region: "DE", Capacity: 10, PublicKey: testKey(3)},
+			{Name: "sg00", Address: asia, Region: "SG", Countries: []string{"VN"}, Capacity: 10, PublicKey: testKey(1)},
 		},
 		Routes: routes,
 	}
@@ -23,11 +23,8 @@ func TestRoutesPickTheRegion(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	for _, node := range []struct{ address, token string }{{europe, "de-token"}, {asia, "sg1-token"}} {
-		if err := r.Accept(node.token, Report{Address: node.address}); err != nil {
-			t.Fatal(err)
-		}
-	}
+	linked(t, r, Report{Address: europe})
+	linked(t, r, Report{Address: asia})
 	cases := map[string]string{
 		"IT": europe, // routes, lower-case key normalized
 		"VN": europe, // routes win over the node's own country list
@@ -46,9 +43,7 @@ func TestNodeCountriesStillWorkWithoutARoute(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if err := r.Accept("sg1-token", Report{Address: asia}); err != nil {
-		t.Fatal(err)
-	}
+	linked(t, r, Report{Address: asia})
 	if got := r.Assign("", "VN"); got != asia {
 		t.Fatalf("VN = %s", got)
 	}
@@ -70,12 +65,8 @@ func TestApplyKeepsReportedStateAndMovesOnlyNewConnections(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if err := r.Accept("sg1-token", Report{Address: asia, Cameras: []string{camA}}); err != nil {
-		t.Fatal(err)
-	}
-	if err := r.Accept("de-token", Report{Address: europe}); err != nil {
-		t.Fatal(err)
-	}
+	linked(t, r, Report{Address: asia, Cameras: []string{camA}})
+	linked(t, r, Report{Address: europe})
 	next := routedConfig(map[string]string{"IT": "DE"})
 	next.Version = 2
 	if err := r.Apply(next); err != nil {
@@ -128,7 +119,7 @@ func TestValidate(t *testing.T) {
 		"route to no region":   func(c *Config) { c.Routes = map[string]string{"IT": "GER"} },
 		"duplicate name":       func(c *Config) { c.Nodes[1].Name = "us00" },
 		"bad name":             func(c *Config) { c.Nodes[1].Name = "EU 00" },
-		"missing token":        func(c *Config) { c.Nodes[1].TokenSHA256 = "" },
+		"bad public key":       func(c *Config) { c.Nodes[1].PublicKey = "AAAA" },
 		"bad node country":     func(c *Config) { c.Nodes[2].Countries = []string{"Viet"} },
 		"duplicate address":    func(c *Config) { c.Nodes[2].Address = europe },
 		"address with path":    func(c *Config) { c.Nodes[1].Address = "wss://de1.example.test/x" },
@@ -187,9 +178,7 @@ func TestMovesCountsCamerasANewConfigPlacesElsewhere(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if err := r.Accept("sg1-token", Report{Address: asia, Cameras: []string{camA, camB}}); err != nil {
-		t.Fatal(err)
-	}
+	linked(t, r, Report{Address: asia, Cameras: []string{camA, camB}})
 	r.Placed(camA, "it") // Italian camera on the SG node
 	r.Placed(camB, "VN") // Vietnamese camera on the SG node (node country list)
 	r.Placed(camC, "US") // camC on the Center node
@@ -207,5 +196,18 @@ func TestMovesCountsCamerasANewConfigPlacesElsewhere(t *testing.T) {
 	}
 	if _, _, _, err := r.Moves(routedConfig(map[string]string{"IT": "XX"})); err == nil {
 		t.Fatal("invalid config counted")
+	}
+}
+
+func TestWarnings(t *testing.T) {
+	c := routedConfig(nil)
+	c.Nodes[1].PublicKey = ""
+	c.Nodes[2].TokenSHA256 = strings.Repeat("ab", 32)
+	got := strings.Join(c.Warnings(self), "\n")
+	if !strings.Contains(got, europe+" has no public_key") || !strings.Contains(got, "token_sha256 is no longer used") {
+		t.Fatalf("warnings:\n%s", got)
+	}
+	if len(routedConfig(nil).Warnings(self)) != 0 {
+		t.Fatal("warnings for a clean config")
 	}
 }

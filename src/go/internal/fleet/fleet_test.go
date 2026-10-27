@@ -1,8 +1,9 @@
 package fleet
 
 import (
-	"crypto/sha256"
-	"encoding/hex"
+	"bytes"
+	"crypto/ed25519"
+	"encoding/base64"
 	"net/netip"
 	"strings"
 	"testing"
@@ -18,9 +19,20 @@ const (
 var camA = strings.Repeat("A", 43)
 var camB = strings.Repeat("B", 43)
 
-func tokenHash(token string) string {
-	sum := sha256.Sum256([]byte(token))
-	return hex.EncodeToString(sum[:])
+// testKey is a node's link public key, as config.json carries it.
+func testKey(seed byte) string {
+	key := ed25519.NewKeyFromSeed(bytes.Repeat([]byte{seed}, ed25519.SeedSize))
+	return base64.RawURLEncoding.EncodeToString(key.Public().(ed25519.PublicKey))
+}
+
+// linked logs a node in with its full state and returns the link.
+func linked(t *testing.T, r *Registry, report Report) uint64 {
+	t.Helper()
+	link, err := r.Linked(report, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return link
 }
 
 type clock struct{ t time.Time }
@@ -32,8 +44,8 @@ func testRegistry(t *testing.T, local *Report) (*Registry, *clock) {
 	c := &clock{time.Date(2026, 10, 26, 10, 0, 0, 0, time.UTC)}
 	r, err := New([]Node{
 		{Address: self, Region: "us", Countries: []string{"us"}, Capacity: 10},
-		{Address: asia, Region: "sg", Countries: []string{"VN", "SG"}, Capacity: 10, TokenSHA256: tokenHash("sg1-token")},
-		{Address: asia2, Region: "sg", Countries: []string{"VN"}, Capacity: 10, TokenSHA256: tokenHash("sg2-token")},
+		{Address: asia, Region: "sg", Countries: []string{"VN", "SG"}, Capacity: 10, PublicKey: testKey(1)},
+		{Address: asia2, Region: "sg", Countries: []string{"VN"}, Capacity: 10, PublicKey: testKey(2)},
 	}, self, func() Report { return *local }, c.now)
 	if err != nil {
 		t.Fatal(err)
@@ -43,18 +55,14 @@ func testRegistry(t *testing.T, local *Report) (*Registry, *clock) {
 
 func TestAssignByCountryLoadAndHealth(t *testing.T) {
 	local := &Report{Address: self}
-	r, c := testRegistry(t, local)
+	r, _ := testRegistry(t, local)
 
-	// Remote nodes have not reported yet: everyone goes to the Center node.
+	// Remote nodes have not linked yet: everyone goes to the Center node.
 	if got := r.Assign("", "VN"); got != self {
 		t.Fatalf("before any report = %s", got)
 	}
-	if err := r.Accept("sg1-token", Report{Address: asia, Cameras: []string{camA}}); err != nil {
-		t.Fatal(err)
-	}
-	if err := r.Accept("sg2-token", Report{Address: asia2}); err != nil {
-		t.Fatal(err)
-	}
+	sg1 := linked(t, r, Report{Address: asia, Cameras: []string{camA}})
+	linked(t, r, Report{Address: asia2})
 	// Vietnam prefers the regional nodes; sg2 is empty, so it wins.
 	if got := r.Assign("", "VN"); got != asia2 {
 		t.Fatalf("VN = %s", got)
@@ -67,11 +75,8 @@ func TestAssignByCountryLoadAndHealth(t *testing.T) {
 	if got := r.Assign("", ""); got != self {
 		t.Fatalf("no country = %s", got)
 	}
-	// sg1 stops reporting: it is skipped and its cameras count as offline.
-	c.t = c.t.Add(StaleAfter + time.Second)
-	if err := r.Accept("sg2-token", Report{Address: asia2}); err != nil {
-		t.Fatal(err)
-	}
+	// sg1's link ends: it is skipped and its cameras count as offline.
+	r.Unlinked(asia, sg1)
 	if got := r.Assign(camA, "SG"); got == asia {
 		t.Fatal("assigned to a stale node")
 	}
@@ -83,7 +88,7 @@ func TestAssignByCountryLoadAndHealth(t *testing.T) {
 func TestFullNodesAreSkipped(t *testing.T) {
 	local := &Report{Address: self}
 	r, _ := testRegistry(t, local)
-	_ = r.Accept("sg2-token", Report{Address: asia2})
+	linked(t, r, Report{Address: asia2})
 	for i := 0; i < 10; i++ { // capacity 10, counted through pending assignments
 		if got := r.Assign("", "US"); got != self {
 			t.Fatalf("assignment %d = %s", i, got)
@@ -94,15 +99,61 @@ func TestFullNodesAreSkipped(t *testing.T) {
 	}
 }
 
-func TestReportsNeedTheNodeToken(t *testing.T) {
+func TestOnlyListedNodesLink(t *testing.T) {
 	local := &Report{Address: self}
 	r, _ := testRegistry(t, local)
-	for _, tc := range []struct{ token, address string }{
-		{"sg2-token", asia}, {"", asia}, {"x", "wss://unknown.example.test/"}, {"", self},
-	} {
-		if err := r.Accept(tc.token, Report{Address: tc.address}); err != ErrUnauthorized {
-			t.Fatalf("report %+v accepted: %v", tc, err)
+	for _, address := range []string{"wss://unknown.example.test/", self} {
+		if _, err := r.Linked(Report{Address: address}, 0); err != ErrUnknownNode {
+			t.Fatalf("link from %s: %v", address, err)
 		}
+	}
+	if _, ok := r.LinkKey(self); ok {
+		t.Fatal("the Center node has a link key")
+	}
+	if key, ok := r.LinkKey(asia); !ok || base64.RawURLEncoding.EncodeToString(key) != testKey(1) {
+		t.Fatal("sg1 key not found")
+	}
+}
+
+func TestStaleLinkCallsAreIgnored(t *testing.T) {
+	local := &Report{Address: self}
+	r, _ := testRegistry(t, local)
+	old := linked(t, r, Report{Address: asia})
+	current := linked(t, r, Report{Address: asia}) // reconnected
+	r.Camera(asia, old, camA, true)
+	if _, online := r.Locate(camA); online {
+		t.Fatal("a replaced link added a camera")
+	}
+	r.Unlinked(asia, old)
+	if !r.Current(asia, current) {
+		t.Fatal("the old link's end dropped the new link")
+	}
+	r.Camera(asia, current, camA, true)
+	if node, online := r.Locate(camA); !online || node != asia {
+		t.Fatal("camera event on the live link lost")
+	}
+	r.ConfigAck(asia, current, 4)
+	for _, status := range r.Status() {
+		if status.Address == asia && (status.ConfigVersion != 4 || status.Cameras != 1 || !status.Healthy) {
+			t.Fatalf("status %+v", status)
+		}
+	}
+}
+
+func TestANewKeyDropsTheLink(t *testing.T) {
+	local := &Report{Address: self}
+	r, _ := testRegistry(t, local)
+	link := linked(t, r, Report{Address: asia, Cameras: []string{camA}})
+	config := r.Config()
+	config.Nodes[1].PublicKey = testKey(9)
+	if err := r.Apply(config); err != nil {
+		t.Fatal(err)
+	}
+	if r.Current(asia, link) {
+		t.Fatal("link survived a key change")
+	}
+	if _, online := r.Locate(camA); online {
+		t.Fatal("cameras of a dropped link still located")
 	}
 }
 
@@ -112,11 +163,11 @@ func TestLocateFollowsReportsAndTheCenterNode(t *testing.T) {
 	if node, online := r.Locate(camB); !online || node != self {
 		t.Fatalf("camera on the Center node = %s %v", node, online)
 	}
-	_ = r.Accept("sg1-token", Report{Address: asia, Cameras: []string{camA}})
+	sg1 := linked(t, r, Report{Address: asia, Cameras: []string{camA}})
 	if node, online := r.Locate(camA); !online || node != asia {
 		t.Fatalf("camera on sg1 = %s %v", node, online)
 	}
-	_ = r.Accept("sg1-token", Report{Address: asia}) // camA left sg1
+	r.Camera(asia, sg1, camA, false) // camA left sg1
 	if _, online := r.Locate(camA); online {
 		t.Fatal("camera that left is still located")
 	}
@@ -125,7 +176,8 @@ func TestLocateFollowsReportsAndTheCenterNode(t *testing.T) {
 func TestNodesFileValidation(t *testing.T) {
 	for name, nodes := range map[string][]Node{
 		"bad address": {{Address: "https://x.example.test/"}},
-		"no token":    {{Address: asia}},
+		"bad key":     {{Address: asia, PublicKey: "short"}},
+		"self key":    {{Address: self, PublicKey: testKey(1)}},
 		"twice":       {{Address: self}, {Address: self}},
 	} {
 		if _, err := New(nodes, self, nil, nil); err == nil {

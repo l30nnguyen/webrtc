@@ -61,7 +61,7 @@ listed with the country routes in `/opt/matrix/cfg/config.json`:
   "nodes": [
     {"name": "us00", "address": "wss://matrix.5gen.care:443/", "region": "US"},
     {"name": "eu00", "address": "wss://matrix-eu00.5gen.care:443/", "region": "DE", "capacity": 60000,
-     "token_sha256": "<sha256 hex of that node's report token>"}
+     "public_key": "<the node's link key, from matrix_cc fleet keygen>"}
   ],
   "routes": {"IT": "DE", "DE": "DE", "*": "US"}
 }
@@ -85,14 +85,31 @@ sudo matrix-fleet rollback [VERSION]    # re-apply the previous (or a given) ver
   changes nothing. Cameras already connected stay where they are; the change
   applies to new connections.
 
-Every other node runs with the same `-kid` and Center public key and reports to
-Center every 15 s: `-report-to https://matrix.5gen.care/ -node-token-file FILE`
-(the token, 32+ bytes, mode 0600). Center sends each camera to the node it is
-already on (if that is still in its region), else to the least loaded healthy
-node of its region, and sends viewers to the node the camera is on. For the
-country choice, put the DB-IP "IP to Country Lite" CSV (CC BY 4.0,
-https://db-ip.com) at `/opt/matrix/cfg/geoip.csv`; `matrix-fleet check` then
-also warns about countries no IP range carries.
+Every other node runs with the same `-kid` and Center public key
+(`-ticket-public-key`) and keeps a link open to Center's private link port:
+
+1. On Center, set `LINK_LISTEN=<private ip>:8444` in `/etc/matrix/matrix.conf`
+   and run `sudo ./setup.sh upgrade`. Allow that port only from the nodes
+   (DigitalOcean: Cloud Firewall rule from the tag `matrix-node`).
+2. On the node, create its key: `matrix_cc fleet keygen /path/node.key`
+   (mode 0600, never copied elsewhere). Put the printed `public_key` in the
+   node's entry and `matrix-fleet apply` it on Center.
+3. Run the node with `-link-to wss://<Center private ip>:8444/
+   -link-server-name matrix.5gen.care -node-key /path/node.key` (and
+   `-node-address` if its `-ticket-aud` is not its address in config.json).
+
+The node logs in with its key, sends its camera list, then each camera that
+comes or goes and its counters every minute. Center pushes every applied
+configuration to the nodes, signed with the Center key; a node keeps the last
+one in `cfg/node-config.json` and keeps serving if Center is down. Removing a
+node from config.json or changing its key drops its link at once.
+`matrix-fleet status` shows the configuration version each node runs.
+
+Center sends each camera to the node it is already on (if that is still in its
+region), else to the least loaded linked node of its region, and sends viewers
+to the node the camera is on. For the country choice, put the DB-IP "IP to
+Country Lite" CSV (CC BY 4.0, https://db-ip.com) at `/opt/matrix/cfg/geoip.csv`;
+`matrix-fleet check` then also warns about countries no IP range carries.
 
 Status and viewing counters (per UTC day, 31 days, kept in
 `cfg/sid/stats.json`) for the whole fleet come from the server over its local

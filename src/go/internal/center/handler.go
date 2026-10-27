@@ -30,9 +30,6 @@ import (
 
 const MaxRequestBytes = 4096
 
-// MaxNodeReportBytes bounds a node's report (its camera list and counters).
-const MaxNodeReportBytes = 16 << 20
-
 // Activations is the binding store Center needs; *activation.Store implements it.
 type Activations interface {
 	Get(digest string) (activation.Record, bool)
@@ -218,8 +215,6 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		h.handleAdminStatus(w, r)
 	case "/v1/admin/release":
 		h.handleAdminRelease(w, r)
-	case "/v1/node/report":
-		h.handleNodeReport(w, r)
 	default:
 		writeJSON(w, http.StatusNotFound, map[string]string{"error": "not found"})
 	}
@@ -784,39 +779,6 @@ func (h *Handler) handleAdminRelease(w http.ResponseWriter, r *http.Request) {
 		"released": true, "changed": changed,
 		"bindable_at": now.Add(activation.ReleaseGrace).Unix(),
 	})
-}
-
-// handleNodeReport takes a node's periodic report: its cameras and counters.
-func (h *Handler) handleNodeReport(w http.ResponseWriter, r *http.Request) {
-	if h.config.Fleet == nil {
-		writeJSON(w, http.StatusNotFound, map[string]string{"error": "not found"})
-		return
-	}
-	if !requirePOST(w, r) {
-		return
-	}
-	header := r.Header.Get("Authorization")
-	token := strings.TrimPrefix(header, "Bearer ")
-	if token == header || token == "" {
-		writeJSON(w, http.StatusUnauthorized, map[string]string{"error": "unauthorized"})
-		return
-	}
-	var report fleet.Report
-	decoder := json.NewDecoder(http.MaxBytesReader(w, r.Body, MaxNodeReportBytes))
-	if decoder.Decode(&report) != nil {
-		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "invalid request"})
-		return
-	}
-	if err := h.config.Fleet.Accept(token, report); err != nil {
-		if errors.Is(err, fleet.ErrUnauthorized) {
-			h.config.Logf("center: refused a report for node %q", report.Address)
-			writeJSON(w, http.StatusUnauthorized, map[string]string{"error": "unauthorized"})
-		} else {
-			writeJSON(w, http.StatusBadRequest, map[string]string{"error": "invalid request"})
-		}
-		return
-	}
-	writeJSON(w, http.StatusOK, map[string]any{"ok": true, "interval_s": int(fleet.ReportInterval.Seconds())})
 }
 
 // NodeStats is one node in a StatsReport.

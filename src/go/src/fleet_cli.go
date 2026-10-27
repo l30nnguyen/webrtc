@@ -3,7 +3,12 @@ package main
 import (
 	"bytes"
 	"context"
+	"crypto/ed25519"
+	"crypto/rand"
+	"crypto/x509"
+	"encoding/base64"
 	"encoding/json"
+	"encoding/pem"
 	"errors"
 	"flag"
 	"fmt"
@@ -34,6 +39,9 @@ const fleetUsage = `usage: matrix_cc fleet [options] COMMAND
                      the history folder and replace it; then reload the server
   rollback [VERSION] re-apply an earlier version (default: the one before the
                      active one) as a new version
+  keygen FILE        on a node: create its link key (-node-key) and print the
+                     public_key line for config.json
+  pubkey FILE        print the public_key of an existing link key
 
 options:
 `
@@ -74,6 +82,10 @@ func fleetCommand(args []string, stdout, stderr io.Writer) int {
 			}
 		}
 		err = c.stats(days)
+	case len(rest) == 2 && rest[0] == "keygen":
+		err = c.keygen(rest[1])
+	case len(rest) == 2 && rest[0] == "pubkey":
+		err = c.pubkey(rest[1])
 	case len(rest) == 2 && rest[0] == "check":
 		err = c.check(rest[1])
 	case len(rest) == 2 && rest[0] == "apply":
@@ -139,6 +151,9 @@ func (c fleetCLI) candidate(path string) (next, active fleet.Config, changed boo
 	}
 	next.Normalize()
 	fmt.Fprintf(c.out, "%s is valid: %d node(s), %d route(s).\n", path, len(next.Nodes), len(next.Routes))
+	for _, warning := range next.Warnings(c.self) {
+		fmt.Fprintln(c.out, "Warning:", warning)
+	}
 	c.warn(next)
 	diff := fleet.Diff(active, next)
 	if len(diff) == 0 {
@@ -406,7 +421,7 @@ func (c fleetCLI) status() error {
 		fmt.Fprintln(c.out, "No fleet configuration: this server serves its own cameras only.")
 	}
 	table := tabwriter.NewWriter(c.out, 0, 0, 2, ' ', 0)
-	fmt.Fprintln(table, "NODE\tADDRESS\tREGION\tSTATE\tCAMERAS\tCLIENTS\tLOAD\tLAST REPORT")
+	fmt.Fprintln(table, "NODE\tADDRESS\tREGION\tSTATE\tCAMERAS\tCLIENTS\tLOAD\tCONFIG\tLAST REPORT")
 	for _, n := range status.Nodes {
 		state := "DOWN"
 		if n.Healthy {
@@ -416,8 +431,15 @@ func (c fleetCLI) status() error {
 		if n.Capacity > 0 {
 			load = fmt.Sprintf("%.1f%%", 100*float64(n.Cameras)/float64(n.Capacity))
 		}
-		fmt.Fprintf(table, "%s\t%s\t%s\t%s\t%d\t%d\t%s\t%s\n", dash(n.Name), n.Address, dash(n.Region), state,
-			n.Cameras, n.Clients, load, dash(n.LastSeen))
+		config := "-"
+		if n.Healthy {
+			config = fmt.Sprintf("v%d", n.ConfigVersion)
+			if status.Fleet && n.ConfigVersion != status.ConfigVersion {
+				config += " (old)"
+			}
+		}
+		fmt.Fprintf(table, "%s\t%s\t%s\t%s\t%d\t%d\t%s\t%s\t%s\n", dash(n.Name), n.Address, dash(n.Region), state,
+			n.Cameras, n.Clients, load, config, dash(n.LastSeen))
 	}
 	return table.Flush()
 }
@@ -521,4 +543,39 @@ func countList(counts map[string]int) string {
 		parts[i] = fmt.Sprintf("%s %d", k, counts[k])
 	}
 	return strings.Join(parts, ", ")
+}
+
+// keygen creates a node's link key; the file must not exist yet.
+func (c fleetCLI) keygen(path string) error {
+	public, private, err := ed25519.GenerateKey(rand.Reader)
+	if err != nil {
+		return err
+	}
+	der, err := x509.MarshalPKCS8PrivateKey(private)
+	if err != nil {
+		return err
+	}
+	f, err := os.OpenFile(path, os.O_WRONLY|os.O_CREATE|os.O_EXCL, 0o600)
+	if err != nil {
+		return err
+	}
+	if err := pem.Encode(f, &pem.Block{Type: "PRIVATE KEY", Bytes: der}); err != nil {
+		f.Close()
+		return err
+	}
+	if err := f.Close(); err != nil {
+		return err
+	}
+	fmt.Fprintf(c.out, "Created %s (keep it on this node only). Add to this node's entry in Center's config.json:\n", path)
+	fmt.Fprintf(c.out, "  \"public_key\": \"%s\"\n", base64.RawURLEncoding.EncodeToString(public))
+	return nil
+}
+
+func (c fleetCLI) pubkey(path string) error {
+	key, err := readNodeKey(path)
+	if err != nil {
+		return err
+	}
+	fmt.Fprintf(c.out, "\"public_key\": \"%s\"\n", base64.RawURLEncoding.EncodeToString(key.Public().(ed25519.PublicKey)))
+	return nil
 }

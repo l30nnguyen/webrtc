@@ -96,9 +96,13 @@ type Server struct {
 	playerAllow   []netip.Prefix
 	center        http.Handler
 	trustProxyTLS bool
-	stats         *stats.Counters // nil: counters off
-	fleet         *fleet.Registry // Center with a fleet configuration
-	centerAPI     *center.Handler // Center: statistics for the admin socket
+	stats         *stats.Counters    // nil: counters off
+	fleet         *fleet.Registry    // Center with a fleet configuration
+	centerAPI     *center.Handler    // Center: statistics for the admin socket
+	centerKey     ed25519.PrivateKey // Center: signs tickets and pushed configurations
+	ticketKey     ed25519.PublicKey  // Center's public key: verifies tickets and pushed configurations
+	hub           *linkHub           // Center: node links
+	nodeLink      *nodeLink          // node: link to Center
 }
 
 func NewServer(playerPath string, rootDir string) *Server {
@@ -238,8 +242,7 @@ func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 
 func isCenterPath(path string) bool {
 	switch path {
-	case "/verify", "/v1/challenge", "/v1/resolve", "/v1/view", "/v1/demo/resolve", "/v1/admin/status", "/v1/admin/release",
-		"/v1/node/report":
+	case "/verify", "/v1/challenge", "/v1/resolve", "/v1/view", "/v1/demo/resolve", "/v1/admin/status", "/v1/admin/release":
 		return true
 	default:
 		return false
@@ -342,6 +345,9 @@ func (s *Server) handleWebSocket(w http.ResponseWriter, r *http.Request) {
 	}
 	s.clients[key] = c
 	s.mu.Unlock()
+	if s.nodeLink != nil && c.Role == admission.RoleCamera && admission.ValidDeviceID(c.ID) {
+		s.nodeLink.cameraChanged(c.ID, true)
+	}
 
 	log.Printf("Client %s connected tenant=%q role=%s", clientID, tenant, role)
 
@@ -352,10 +358,15 @@ func (s *Server) handleWebSocket(w http.ResponseWriter, r *http.Request) {
 func (s *Server) readPump(c *Client) {
 	defer func() {
 		s.mu.Lock()
+		removed := false
 		if key := clientKey(c.Tenant, c.ID); s.clients[key] == c {
 			delete(s.clients, key)
+			removed = true
 		}
 		s.mu.Unlock()
+		if removed && s.nodeLink != nil && c.Role == admission.RoleCamera && admission.ValidDeviceID(c.ID) {
+			s.nodeLink.cameraChanged(c.ID, false)
+		}
 		c.Conn.Close()
 		c.Close()
 		log.Printf("Client %s disconnected", c.ID)
@@ -851,6 +862,7 @@ func configureServer(srv *Server, opts serverOptions) error {
 		}
 		srv.SetCenterHandler(handler)
 		srv.centerAPI = handler
+		srv.centerKey, srv.ticketKey = centerPrivate, centerPublic
 		srv.SetAdmission(admission.Validator{
 			Tickets:   admission.TicketVerifier{PublicKey: centerPublic, KeyID: opts.centerKID, Audience: opts.mainAddress},
 			Blocklist: blocklist, Replay: &admission.ReplayCache{},
@@ -875,6 +887,7 @@ func configureServer(srv *Server, opts serverOptions) error {
 			if err := blocklist.Validate(); err != nil {
 				return fmt.Errorf("blocklist configuration is invalid: %w", err)
 			}
+			srv.ticketKey = publicKey
 			srv.SetAdmission(admission.Validator{Tickets: admission.TicketVerifier{PublicKey: publicKey, KeyID: opts.ticketKID, Audience: opts.ticketAudience}, Blocklist: blocklist, Replay: &admission.ReplayCache{}})
 		}
 	}
@@ -959,9 +972,14 @@ func main() {
 	nodesPath := flag.String("nodes-file", "", "alias for -config-file (phase 2 name)")
 	geoipPath := flag.String("geoip-file", "", "with -config-file: CSV of first_ip,last_ip,country (DB-IP IP-to-Country Lite) for region choice")
 	statsPath := flag.String("stats-file", "", "file to keep viewing counters in across restarts (saved every minute)")
-	reportTo := flag.String("report-to", "", "Center URL (https://host[:port]/) this node reports its cameras and counters to")
-	nodeAddress := flag.String("node-address", "", "with -report-to: this node's exact WSS root as listed in Center's nodes file (default: -main-address or -ticket-aud)")
-	nodeTokenPath := flag.String("node-token-file", "", "with -report-to: file holding this node's report token")
+	linkListen := flag.String("link-listen", "", "with -config-file and -https: host:port of the private port control nodes link to (for example 10.10.0.2:8444)")
+	linkName := flag.String("link-name", "", "with -link-listen: Center host name the nodes check its certificate for and sign at login (default: the -main-address host)")
+	linkTo := flag.String("link-to", "", "node: Center's link root, wss://host:port/ (its -link-listen port); this node then reports its cameras and counters and takes Center's configuration")
+	linkServerName := flag.String("link-server-name", "", "with -link-to: Center host name for the certificate check and login, when -link-to names an IP (default: the -link-to host)")
+	linkCA := flag.String("link-ca", "", "with -link-to: PEM file of the CA that signed Center's certificate (default: the system roots)")
+	nodeKeyPath := flag.String("node-key", "", "with -link-to: this node's link key (PKCS#8 Ed25519 PEM, mode 0600; create with: matrix_cc fleet keygen FILE)")
+	nodeAddress := flag.String("node-address", "", "with -link-to: this node's exact WSS root as listed in Center's config.json (default: -main-address or -ticket-aud)")
+	nodeConfigPath := flag.String("node-config-file", "", "with -link-to: where to keep the configuration Center pushed (default: ROOT/cfg/node-config.json)")
 	adminSocket := flag.String("admin-socket", "", "Unix socket (created mode 0600) for matrix-fleet: status, statistics, configuration reload")
 	playerAllowText := flag.String("player-allow", "", "comma-separated IPs/CIDRs allowed to load the player and /api/devices (default: everyone)")
 	flag.Parse()
@@ -1025,27 +1043,13 @@ func main() {
 		}
 		go srv.serveAdmin(listener, *configPath)
 	}
-	if *reportTo != "" {
-		centerURL, err := url.Parse(*reportTo)
-		if err != nil || centerURL.Scheme != "https" || centerURL.Host == "" || centerURL.Path != "/" || centerURL.RawQuery != "" {
-			log.Fatal("-report-to must be https://host[:port]/")
-		}
-		address := *nodeAddress
-		if address == "" {
-			address = *mainAddress
-		}
-		if address == "" {
-			address = *ticketAudience
-		}
-		if admission.ValidateAudience(address) != nil {
-			log.Fatal("-node-address must be an exact wss://host[:port]/ URL")
-		}
-		token, err := readSecretFile(*nodeTokenPath)
+	if *linkTo != "" {
+		nl, err := setupNodeLink(srv, root, *linkTo, *linkServerName, *linkCA, *nodeKeyPath, *nodeAddress, *mainAddress, *ticketAudience, *nodeConfigPath)
 		if err != nil {
-			log.Fatalf("-node-token-file: %v", err)
+			log.Fatal(err)
 		}
-		log.Printf("Reporting to Center %s as node %s", *reportTo, address)
-		go srv.reportLoop(*reportTo, address, string(token))
+		srv.nodeLink = nl
+		go nl.run()
 	}
 	playerAllow, err := parsePlayerAllow(*playerAllowText)
 	if err != nil {
@@ -1074,12 +1078,20 @@ func main() {
 			Certificates: []tls.Certificate{cert},
 			MinVersion:   tls.VersionTLS12,
 		}
+		if *linkListen != "" {
+			if err := srv.startLinkListener(*linkListen, *linkName, *mainAddress, httpServer.TLSConfig); err != nil {
+				log.Fatalf("-link-listen: %v", err)
+			}
+		}
 		log.Printf("Listening on wss://0.0.0.0%s", addr)
 		log.Printf("  GET https://0.0.0.0%s/         — Matrix Player", addr)
 		log.Printf("  GET https://0.0.0.0%s/api/devices  — list online devices", addr)
 		log.Printf("  GET https://0.0.0.0%s/api/health   — health check", addr)
 		log.Fatal(httpServer.ListenAndServeTLS("", ""))
 	} else {
+		if *linkListen != "" {
+			log.Fatal("-link-listen requires -https")
+		}
 		log.Printf("Listening on ws://0.0.0.0%s", addr)
 		log.Printf("  GET http://0.0.0.0%s/         — Matrix Player", addr)
 		log.Printf("  GET http://0.0.0.0%s/api/devices  — list online devices", addr)

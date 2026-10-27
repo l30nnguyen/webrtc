@@ -2,8 +2,6 @@ package fleet
 
 import (
 	"bytes"
-	"crypto/sha256"
-	"encoding/hex"
 	"encoding/json"
 	"fmt"
 	"os"
@@ -109,9 +107,12 @@ func (c Config) Validate(self string) error {
 				return fmt.Errorf("node %s: country %q must be a two-letter ISO 3166 code", n.Address, code)
 			}
 		}
-		if n.Address != self {
-			if raw, err := hex.DecodeString(n.TokenSHA256); err != nil || len(raw) != sha256.Size {
-				return fmt.Errorf("node %s needs token_sha256 (64 hex characters)", n.Address)
+		if n.PublicKey != "" {
+			if n.Address == self {
+				return fmt.Errorf("node %s is this Center's own node and takes no public_key", n.Address)
+			}
+			if _, ok := n.LinkKey(); !ok {
+				return fmt.Errorf("node %s: public_key must be a raw Ed25519 key in base64url (43 characters)", n.Address)
 			}
 		}
 		if n.Region != "" {
@@ -145,6 +146,20 @@ func validCountry(s string) bool {
 	return len(s) == 2 && s[0] >= 'A' && s[0] <= 'Z' && s[1] >= 'A' && s[1] <= 'Z'
 }
 
+// Warnings lists what is valid but probably not intended.
+func (c Config) Warnings(self string) []string {
+	var warnings []string
+	for _, n := range c.Nodes {
+		if n.Address != self && n.PublicKey == "" {
+			warnings = append(warnings, fmt.Sprintf("node %s has no public_key: it cannot connect, so it gets no cameras", n.Address))
+		}
+		if n.TokenSHA256 != "" {
+			warnings = append(warnings, fmt.Sprintf("node %s: token_sha256 is no longer used (nodes log in with public_key)", n.Address))
+		}
+	}
+	return warnings
+}
+
 // Diff describes what changes from old to new, one line per change.
 func Diff(old, new Config) []string {
 	old.Normalize()
@@ -161,10 +176,10 @@ func Diff(old, new Config) []string {
 		switch {
 		case !ok:
 			lines = append(lines, "+ node "+describeNode(n))
-		case describeNode(before) != describeNode(n) || before.TokenSHA256 != n.TokenSHA256:
+		case describeNode(before) != describeNode(n) || before.PublicKey != n.PublicKey:
 			lines = append(lines, "~ node "+describeNode(before)+"  =>  "+describeNode(n))
-			if before.TokenSHA256 != n.TokenSHA256 {
-				lines = append(lines, "~ node "+n.Address+": new report token")
+			if before.PublicKey != n.PublicKey {
+				lines = append(lines, "~ node "+n.Address+": new public key (its link logs in again)")
 			}
 		}
 	}

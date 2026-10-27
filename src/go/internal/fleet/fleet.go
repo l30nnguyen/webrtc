@@ -2,16 +2,16 @@
 // alive, how loaded they are, which cameras are online on each, and which node
 // a camera should be sent to.
 //
-// Nodes report to Center every ReportInterval with the full list of cameras
-// connected to them and their counters. A node that has not reported for
-// StaleAfter is treated as down: no new cameras go to it and its cameras count
-// as offline. The node that runs Center itself is read in-process.
+// Each node keeps a link open to Center (see package link): after logging in
+// with its key it sends the full list of its cameras, then every camera that
+// comes or goes, and its counters every minute. A node without a link is down:
+// no new cameras go to it and its cameras count as offline. The node that runs
+// Center itself is read in-process.
 package fleet
 
 import (
-	"crypto/sha256"
-	"crypto/subtle"
-	"encoding/hex"
+	"crypto/ed25519"
+	"encoding/base64"
 	"errors"
 	"strings"
 	"sync"
@@ -22,13 +22,9 @@ import (
 )
 
 const (
-	// ReportInterval is how often a node reports to Center.
-	ReportInterval = 15 * time.Second
-	// StaleAfter is how long Center trusts a node's last report.
-	StaleAfter = 3*ReportInterval + 5*time.Second
 	// pendingWindow is how long an assignment counts toward a node's load
-	// before the camera shows up in that node's report.
-	pendingWindow = 2 * ReportInterval
+	// before the camera shows up on that node.
+	pendingWindow = 30 * time.Second
 	// DefaultCapacity is the camera count a node is filled to when its entry
 	// names none (the planning density in the design document).
 	DefaultCapacity = 60000
@@ -47,9 +43,21 @@ type Node struct {
 	// the configuration's routes say otherwise.
 	Countries []string `json:"countries,omitempty"`
 	Capacity  int      `json:"capacity,omitempty"`
-	// TokenSHA256 is the hex SHA-256 of the token the node reports with.
-	// The node that runs Center has none.
+	// PublicKey is the node's link key (raw Ed25519, base64url). The node
+	// that runs Center has none; a node without one cannot connect.
+	PublicKey string `json:"public_key,omitempty"`
+	// TokenSHA256 belonged to the phase 2 HTTP report. It is accepted so old
+	// files still load, and ignored.
 	TokenSHA256 string `json:"token_sha256,omitempty"`
+}
+
+// LinkKey decodes the node's public key; ok is false when it has none.
+func (n Node) LinkKey() (key ed25519.PublicKey, ok bool) {
+	raw, err := base64.RawURLEncoding.DecodeString(n.PublicKey)
+	if err != nil || len(raw) != ed25519.PublicKeySize {
+		return nil, false
+	}
+	return ed25519.PublicKey(raw), true
 }
 
 // Report is what a node sends to Center.
@@ -66,6 +74,8 @@ type Local func() Report
 type nodeState struct {
 	Node
 	local    bool
+	link     uint64 // generation of the current link, 0 when none
+	acked    int    // configuration version the node runs
 	lastSeen time.Time
 	cameras  map[string]struct{}
 	clients  int
@@ -82,14 +92,16 @@ type Registry struct {
 	country  map[string]string     // camera device ID -> country of its last activation
 	routes   map[string]string
 	version  int
+	config   Config // the active configuration, as applied
+	links    uint64 // last link generation handed out
 	self     string
 	local    Local
 	now      func() time.Time
 }
 
-// ErrUnauthorized is returned for a report from an unknown node or with a
-// wrong token.
-var ErrUnauthorized = errors.New("unknown node or wrong token")
+// ErrUnknownNode is returned for a link from an address that is not a node
+// of the configuration (or is the Center's own node).
+var ErrUnknownNode = errors.New("not a node of this fleet")
 
 // Load reads a configuration file. selfAddress is the node running Center; it
 // is added with default settings when the file does not list it.
@@ -139,6 +151,8 @@ func (r *Registry) Apply(config Config) error {
 		state := r.byAddr[n.Address]
 		if state == nil {
 			state = &nodeState{cameras: map[string]struct{}{}}
+		} else if state.PublicKey != n.PublicKey {
+			r.unlinkLocked(state) // a new key must log in again
 		}
 		state.Node, state.local = n, self
 		nodes = append(nodes, state)
@@ -153,13 +167,20 @@ func (r *Registry) Apply(config Config) error {
 		nodes = append([]*nodeState{state}, nodes...)
 		byAddr[r.self] = state
 	}
-	for id, n := range r.location {
+	for _, n := range r.nodes {
 		if byAddr[n.Address] != n {
-			delete(r.location, id)
+			r.unlinkLocked(n)
 		}
 	}
-	r.nodes, r.byAddr, r.routes, r.version = nodes, byAddr, config.Routes, config.Version
+	r.nodes, r.byAddr, r.routes, r.version, r.config = nodes, byAddr, config.Routes, config.Version, config
 	return nil
+}
+
+// Config returns the active configuration.
+func (r *Registry) Config() Config {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	return r.config
 }
 
 // Version is the version of the active configuration.
@@ -169,24 +190,107 @@ func (r *Registry) Version() int {
 	return r.version
 }
 
-// Accept stores a node's report after checking its token.
-func (r *Registry) Accept(token string, report Report) error {
+// LinkKey returns the key the node at address logs in with.
+func (r *Registry) LinkKey(address string) (ed25519.PublicKey, bool) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	n := r.byAddr[address]
+	if n == nil || n.local {
+		return nil, false
+	}
+	return n.LinkKey()
+}
+
+// Linked records a node that logged in, with its full state. It returns the
+// link's generation, which the other link calls carry: a call from a link
+// that has since been replaced or dropped is ignored.
+func (r *Registry) Linked(report Report, configVersion int) (uint64, error) {
+	if len(report.Cameras) > MaxReportCameras {
+		return 0, errors.New("too many cameras")
+	}
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	n := r.byAddr[report.Address]
 	if n == nil || n.local {
-		return ErrUnauthorized
+		return 0, ErrUnknownNode
 	}
-	want, _ := hex.DecodeString(n.TokenSHA256)
-	got := sha256.Sum256([]byte(token))
-	if subtle.ConstantTimeCompare(want, got[:]) != 1 {
-		return ErrUnauthorized
-	}
-	if len(report.Cameras) > MaxReportCameras {
-		return errors.New("report lists too many cameras")
-	}
+	r.links++
+	n.link = r.links
+	n.acked = configVersion
 	r.applyLocked(n, report)
-	return nil
+	return n.link, nil
+}
+
+// Current reports whether link is still the node's live link.
+func (r *Registry) Current(address string, link uint64) bool {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	n := r.byAddr[address]
+	return n != nil && link != 0 && n.link == link
+}
+
+// Camera records a camera coming online on, or leaving, a linked node.
+func (r *Registry) Camera(address string, link uint64, device string, online bool) {
+	if !admission.ValidDeviceID(device) {
+		return
+	}
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	n := r.byAddr[address]
+	if n == nil || n.link != link || link == 0 {
+		return
+	}
+	n.lastSeen = r.now()
+	if online {
+		if len(n.cameras) >= MaxReportCameras {
+			return
+		}
+		n.cameras[device] = struct{}{}
+		r.location[device] = n
+		return
+	}
+	delete(n.cameras, device)
+	if r.location[device] == n {
+		delete(r.location, device)
+	}
+}
+
+// NodeStats records a linked node's client count and counters.
+func (r *Registry) NodeStats(address string, link uint64, clients int, days stats.Days) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	if n := r.byAddr[address]; n != nil && n.link == link && link != 0 {
+		n.clients, n.stats, n.lastSeen = clients, days, r.now()
+	}
+}
+
+// ConfigAck records the configuration version a linked node runs.
+func (r *Registry) ConfigAck(address string, link uint64, version int) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	if n := r.byAddr[address]; n != nil && n.link == link && link != 0 {
+		n.acked = version
+	}
+}
+
+// Unlinked records that a node's link ended: the node is down and its
+// cameras count as offline.
+func (r *Registry) Unlinked(address string, link uint64) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	if n := r.byAddr[address]; n != nil && n.link == link && link != 0 {
+		r.unlinkLocked(n)
+	}
+}
+
+func (r *Registry) unlinkLocked(n *nodeState) {
+	n.link = 0
+	for id := range n.cameras {
+		if r.location[id] == n {
+			delete(r.location, id)
+		}
+	}
+	n.cameras = map[string]struct{}{}
 }
 
 func (r *Registry) applyLocked(n *nodeState, report Report) {
@@ -221,7 +325,7 @@ func (r *Registry) refreshLocalLocked() {
 }
 
 func (r *Registry) healthyLocked(n *nodeState, now time.Time) bool {
-	return n.local || (!n.lastSeen.IsZero() && now.Sub(n.lastSeen) <= StaleAfter)
+	return n.local || n.link != 0
 }
 
 // loadLocked is the node's fill ratio, counting recent assignments that have
@@ -405,15 +509,18 @@ func (r *Registry) Known(address string) bool {
 
 // NodeStatus is one node in the fleet overview.
 type NodeStatus struct {
-	Name     string     `json:"name,omitempty"`
-	Address  string     `json:"address"`
-	Region   string     `json:"region,omitempty"`
-	Healthy  bool       `json:"healthy"`
-	LastSeen string     `json:"last_seen,omitempty"`
-	Cameras  int        `json:"cameras"`
-	Clients  int        `json:"clients"`
-	Capacity int        `json:"capacity"`
-	Stats    stats.Days `json:"-"`
+	Name     string `json:"name,omitempty"`
+	Address  string `json:"address"`
+	Region   string `json:"region,omitempty"`
+	Healthy  bool   `json:"healthy"`
+	LastSeen string `json:"last_seen,omitempty"`
+	Cameras  int    `json:"cameras"`
+	Clients  int    `json:"clients"`
+	Capacity int    `json:"capacity"`
+	// ConfigVersion is the configuration version the node runs (the
+	// Center's own node always runs the active one).
+	ConfigVersion int        `json:"config_version"`
+	Stats         stats.Days `json:"-"`
 }
 
 // Status returns every node with its state and counters.
@@ -425,7 +532,10 @@ func (r *Registry) Status() []NodeStatus {
 	out := make([]NodeStatus, 0, len(r.nodes))
 	for _, n := range r.nodes {
 		status := NodeStatus{Name: n.Name, Address: n.Address, Region: n.Region, Healthy: r.healthyLocked(n, now),
-			Cameras: len(n.cameras), Clients: n.clients, Capacity: n.Capacity, Stats: stats.Days{}}
+			Cameras: len(n.cameras), Clients: n.clients, Capacity: n.Capacity, ConfigVersion: n.acked, Stats: stats.Days{}}
+		if n.local {
+			status.ConfigVersion = r.version
+		}
 		if !n.lastSeen.IsZero() {
 			status.LastSeen = n.lastSeen.UTC().Format(time.RFC3339)
 		}
