@@ -30,6 +30,7 @@ import (
 	"signaling-server/internal/admission"
 	"signaling-server/internal/center"
 	"signaling-server/internal/fleet"
+	"signaling-server/internal/relay"
 	"signaling-server/internal/sid"
 	"signaling-server/internal/stats"
 )
@@ -105,7 +106,8 @@ type Server struct {
 	hub           *linkHub           // Center: node links
 	nodeLink      *nodeLink          // node: link to Center
 	limits        *publicLimits      // per-source limits on the public port; nil: off
-	selfAddress   string             // this node\'s WSS root as listed in the fleet configuration
+	selfAddress   string             // this node's WSS root as listed in the fleet configuration
+	relayMonitor  *relay.Monitor     // measures the relays of this node's region
 }
 
 func NewServer(playerPath string, rootDir string) *Server {
@@ -1087,6 +1089,10 @@ func main() {
 	if len(playerAllow) > 0 {
 		srv.SetPlayerAllow(playerAllow)
 		log.Printf("Player and device list limited to %s", *playerAllowText)
+	}
+	if srv.fleet != nil || srv.nodeLink != nil {
+		srv.relayMonitor = &relay.Monitor{}
+		go srv.measureRelays()
 	}
 	limits, err := parseLimits(*rateAPI, *rateWeb, *rateConnect, *connsPerSource, *rateExempt)
 	if err != nil {

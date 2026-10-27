@@ -441,6 +441,32 @@ func (c fleetCLI) status() error {
 		fmt.Fprintf(table, "%s\t%s\t%s\t%s\t%d\t%d\t%s\t%s\t%s\n", dash(n.Name), n.Address, dash(n.Region), state,
 			n.Cameras, n.Clients, load, config, dash(n.LastSeen))
 	}
+	if err := table.Flush(); err != nil || len(status.Relays) == 0 {
+		return err
+	}
+	fmt.Fprintln(c.out)
+	table = tabwriter.NewWriter(c.out, 0, 0, 2, ' ', 0)
+	fmt.Fprintln(table, "RELAY\tREGION\tSTATE\tMBPS\tLOAD\tALLOCATIONS\tMEASURED BY\tAT")
+	for _, r := range status.Relays {
+		state, mbps, load, allocations := "not measured", "-", "-", "-"
+		if r.At != "" {
+			state = "DOWN"
+			if r.Healthy {
+				state = "up"
+			}
+			if r.Error != "" && r.Healthy {
+				state = "up (" + r.Error + ")"
+			}
+			if r.Measured {
+				mbps = fmt.Sprintf("%.1f/%d", r.Mbps, r.CapacityMbps)
+				load = fmt.Sprintf("%.0f%%", 100*r.Mbps/float64(max(r.CapacityMbps, 1)))
+			}
+			if r.Allocations > 0 {
+				allocations = fmt.Sprint(r.Allocations)
+			}
+		}
+		fmt.Fprintf(table, "%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\n", r.Name, r.Region, state, mbps, load, allocations, dash(r.MeasuredBy), dash(r.At))
+	}
 	return table.Flush()
 }
 

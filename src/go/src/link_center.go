@@ -181,6 +181,7 @@ func (h *linkHub) serve(conn *websocket.Conn, address, peer string) {
 	}
 	h.links[address] = l
 	h.mu.Unlock()
+	h.registry.NodeStats(address, gen, hello.Clients, hello.Stats, hello.Relays)
 	log.Printf("link: node %s connected from %s (%d cameras, config version %d)", address, peer, len(hello.Cameras), hello.Version)
 
 	if message := h.config.Load(); message != nil {
@@ -238,7 +239,7 @@ func (h *linkHub) readLoop(l *centerLink) {
 		case "camera":
 			h.registry.Camera(l.address, l.gen, m.ID, m.Online)
 		case "stats":
-			h.registry.NodeStats(l.address, l.gen, m.Clients, m.Stats)
+			h.registry.NodeStats(l.address, l.gen, m.Clients, m.Stats, m.Relays)
 		case "ack":
 			h.registry.ConfigAck(l.address, l.gen, m.Version)
 			log.Printf("link: node %s runs configuration version %d", l.address, m.Version)

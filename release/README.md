@@ -126,29 +126,39 @@ sudo matrix-fleet -json stats 7 # the same as JSON
 
 With `relays` in config.json, each viewing session gets the relay of the
 camera's region (the region of the node it is on) plus one from another region
-as a backup, with a user name and password minted for that session and valid
-for 24 hours; nothing long-lived reaches cameras or viewers.
+as a backup.
 
 ```json
 "relays": [
-  {"name": "turn-eu00", "region": "DE", "host": "turn-eu00.5gen.care", "port": 3478,
-   "capacity_mbps": 800, "metrics": "http://10.10.0.5:9641/metrics"}
+  {"name": "turn-vn00", "region": "VN", "host": "webrtc.5gen.care", "port": 3478,
+   "capacity_mbps": 800, "metrics": "http://10.20.0.5:9100/metrics"}
 ]
 ```
 
-Each relay runs coturn with a shared secret:
+Every server that hands a relay out keeps its credentials in
+`/opt/matrix/cfg/relay-secrets.json` (owner `matrix`, mode 0600;
+`sudo ./setup.sh relay-secrets FILE`), read on each viewing request:
 
-```
-use-auth-secret
-static-auth-secret=<secret>
-realm=5gen.care
-```
+- **violet** (what we run) has fixed credentials only:
+  `{"turn-vn00": {"username": "matrix", "password": "<the --credentials password>"}}`.
+  The same pair goes to every session, as with `cfg/turn.conf`; change it in
+  violet's config and in this file together to rotate it.
+- **coturn** with `use-auth-secret` and `static-auth-secret=<secret>`:
+  `{"turn-eu00": "<secret>"}`. Each session then gets its own user name and
+  password, valid 24 hours.
 
-Every server that hands the relay out keeps the same secret in
-`/opt/matrix/cfg/relay-secrets.json` (`{"turn-eu00": "<secret>"}`, owner
-`matrix`, mode 0600; `sudo ./setup.sh relay-secrets FILE`). It is read on each
-viewing request. A relay without a secret on a server is not handed out by
-that server; with none at all the server keeps using `cfg/turn.conf`.
+A relay without credentials on a server is not handed out by that server;
+with none at all the server keeps using `cfg/turn.conf`.
+
+**Health and load.** Each node checks the relays of its own region every 15 s
+by asking the relay port itself (a STUN request; no credentials needed) and, if
+`metrics` is set, reads bandwidth from it. Violet has no metrics endpoint: run
+Prometheus node_exporter on the relay host (port 9100, reachable from the
+region's node only) and point `metrics` at it; bandwidth is the busier
+direction of the host's network counters, against `capacity_mbps`. Sessions go
+to the least loaded healthy relay; a relay that does not answer, or is full,
+gets none. Relays of other regions are picked by capacity. `matrix-fleet
+status` lists every relay with its state and load.
 
 ## Limits on the public port
 

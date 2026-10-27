@@ -199,7 +199,8 @@ func (n *nodeLink) connectOnce() error {
 	n.resync.Store(false)
 	report := n.srv.LocalReport(n.address)
 	_, version := n.Config()
-	if err := write(link.Message{Type: "hello", Cameras: report.Cameras, Clients: report.Clients, Stats: report.Stats, Version: version}); err != nil {
+	if err := write(link.Message{Type: "hello", Cameras: report.Cameras, Clients: report.Clients, Stats: report.Stats,
+		Relays: n.srv.relayStatuses(), Version: version}); err != nil {
 		return err
 	}
 	n.connected.Store(true)
@@ -253,7 +254,7 @@ func (n *nodeLink) sendLoop(conn *websocket.Conn, write func(link.Message) error
 			}
 		case <-ticker.C:
 			report := n.srv.LocalReport(n.address)
-			if write(link.Message{Type: "stats", Clients: report.Clients, Stats: report.Stats}) != nil {
+			if write(link.Message{Type: "stats", Clients: report.Clients, Stats: report.Stats, Relays: n.srv.relayStatuses()}) != nil {
 				conn.Close()
 				return
 			}

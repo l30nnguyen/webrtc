@@ -8,8 +8,9 @@
 //     node verified Center's certificate for. Center checks it against the
 //     node's public key in config.json.
 //  2. The node sends {"type":"hello"}: its full camera list, client count,
-//     counters and the configuration version it runs. Then {"type":"camera"}
-//     as cameras come and go, and {"type":"stats"} every StatsInterval.
+//     counters, its measurements of its region's relays and the configuration
+//     version it runs. Then {"type":"camera"} as cameras come and go, and
+//     {"type":"stats"} (counters and relays) every StatsInterval.
 //  3. Center pushes {"type":"config"}: the configuration signed with the
 //     Center ticket key over ConfigMessage(version, config). The node accepts
 //     only a valid signature and a version newer than its own, then answers
@@ -26,6 +27,7 @@ import (
 	"strconv"
 	"time"
 
+	"signaling-server/internal/fleet"
 	"signaling-server/internal/stats"
 )
 
@@ -65,8 +67,9 @@ type Message struct {
 	// hello
 	Cameras []string `json:"cameras,omitempty"`
 	// hello, stats
-	Clients int        `json:"clients,omitempty"`
-	Stats   stats.Days `json:"stats,omitempty"`
+	Clients int                 `json:"clients,omitempty"`
+	Stats   stats.Days          `json:"stats,omitempty"`
+	Relays  []fleet.RelayStatus `json:"relays,omitempty"`
 	// hello, config, ack, config_error
 	Version int `json:"version,omitempty"`
 	// camera

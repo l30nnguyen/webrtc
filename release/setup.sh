@@ -13,8 +13,9 @@
 # Set or replace the TURN servers handed to cameras (JSON list of
 # {"host", "port", "username", "password"}; read on every connection, no restart):
 #   sudo ./setup.sh turn /path/to/turn.conf
-# With relays in config.json, install this server's shared secrets of those
-# relays instead ({"turn-eu00": "<secret>"}; minted per session, see README):
+# With relays in config.json, install this server's credentials for those
+# relays instead: {"turn-vn00": {"username": "u", "password": "p"}} for violet,
+# or {"turn-eu00": "<shared secret>"} for coturn (minted per session; README):
 #   sudo ./setup.sh relay-secrets /path/to/relay-secrets.json
 #
 # Fleet: sudo matrix-fleet status | stats [DAYS] (installed in /usr/local/bin;
@@ -183,8 +184,8 @@ install_turn() {
 install_relay_secrets() {
     local file=$1
     [[ -f "$file" ]] || die "missing $file"
-    python3 -c 'import json, sys; s = json.load(open(sys.argv[1])); assert isinstance(s, dict) and s and all(isinstance(v, str) and len(v) >= 16 for v in s.values())' "$file" ||
-        die "$file must be a JSON object of relay name to secret (16+ characters)"
+    python3 -c 'import json, sys; s = json.load(open(sys.argv[1])); assert isinstance(s, dict) and s and all((isinstance(v, str) and len(v) >= 16) or (isinstance(v, dict) and v.get("username") and v.get("password")) for v in s.values())' "$file" ||
+        die "$file must map each relay name to a shared secret (16+ characters) or {\"username\", \"password\"}"
     install -o "$SERVICE_USER" -g "$SERVICE_USER" -m 600 "$file" "$APP_DIR/cfg/relay-secrets.json"
     echo "Installed the secrets of $(python3 -c 'import json, sys; print(", ".join(sorted(json.load(open(sys.argv[1])))))' "$file")"
 }

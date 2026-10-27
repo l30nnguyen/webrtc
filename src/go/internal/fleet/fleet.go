@@ -68,6 +68,23 @@ type Report struct {
 	Stats   stats.Days `json:"stats,omitempty"`
 }
 
+// RelayStatus is one relay's last measurement by a node of its region.
+type RelayStatus struct {
+	Name         string  `json:"name"`
+	Region       string  `json:"region"`
+	Healthy      bool    `json:"healthy"`
+	Mbps         float64 `json:"mbps"`
+	Measured     bool    `json:"measured"` // Mbps comes from metrics
+	Allocations  int     `json:"allocations"`
+	CapacityMbps int     `json:"capacity_mbps"`
+	At           string  `json:"at"` // RFC 3339, UTC
+	Error        string  `json:"error,omitempty"`
+	MeasuredBy   string  `json:"measured_by,omitempty"`
+}
+
+// MaxRelayStatuses bounds the relay measurements one node reports.
+const MaxRelayStatuses = 256
+
 // Local reads the node that runs Center.
 type Local func() Report
 
@@ -80,6 +97,7 @@ type nodeState struct {
 	cameras  map[string]struct{}
 	clients  int
 	stats    stats.Days
+	relays   []RelayStatus
 	pending  []time.Time
 }
 
@@ -255,13 +273,53 @@ func (r *Registry) Camera(address string, link uint64, device string, online boo
 	}
 }
 
-// NodeStats records a linked node's client count and counters.
-func (r *Registry) NodeStats(address string, link uint64, clients int, days stats.Days) {
+// NodeStats records a linked node's client count, counters and relay
+// measurements.
+func (r *Registry) NodeStats(address string, link uint64, clients int, days stats.Days, relays []RelayStatus) {
+	if len(relays) > MaxRelayStatuses {
+		relays = relays[:MaxRelayStatuses]
+	}
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	if n := r.byAddr[address]; n != nil && n.link == link && link != 0 {
-		n.clients, n.stats, n.lastSeen = clients, days, r.now()
+		n.clients, n.stats, n.relays, n.lastSeen = clients, days, relays, r.now()
 	}
+}
+
+// Relays merges the relay measurements of the linked nodes with local (the
+// Center node's own), keeping the latest one per relay listed in the active
+// configuration. Relays nobody measured are listed without a measurement.
+func (r *Registry) Relays(local []RelayStatus) []RelayStatus {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	latest := map[string]RelayStatus{}
+	consider := func(status RelayStatus, by string) {
+		if status.MeasuredBy == "" {
+			status.MeasuredBy = by
+		}
+		if old, ok := latest[status.Name]; !ok || status.At > old.At {
+			latest[status.Name] = status
+		}
+	}
+	for _, status := range local {
+		consider(status, r.self)
+	}
+	for _, n := range r.nodes {
+		if n.link != 0 {
+			for _, status := range n.relays {
+				consider(status, n.Address)
+			}
+		}
+	}
+	out := make([]RelayStatus, 0, len(r.config.Relays))
+	for _, relay := range r.config.Relays {
+		status, ok := latest[relay.Name]
+		if !ok {
+			status = RelayStatus{Name: relay.Name, Region: relay.Region, CapacityMbps: relay.CapacityMbps}
+		}
+		out = append(out, status)
+	}
+	return out
 }
 
 // ConfigAck records the configuration version a linked node runs.

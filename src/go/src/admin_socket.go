@@ -28,9 +28,10 @@ import (
 
 // FleetStatus is the answer of GET /v1/status.
 type FleetStatus struct {
-	ConfigVersion int                `json:"config_version"`
-	Fleet         bool               `json:"fleet"`
-	Nodes         []fleet.NodeStatus `json:"nodes"`
+	ConfigVersion int                 `json:"config_version"`
+	Fleet         bool                `json:"fleet"`
+	Nodes         []fleet.NodeStatus  `json:"nodes"`
+	Relays        []fleet.RelayStatus `json:"relays,omitempty"`
 }
 
 // MovesResult is the answer of POST /v1/moves.
@@ -142,7 +143,7 @@ func only(method string, next http.HandlerFunc) http.HandlerFunc {
 
 func (s *Server) fleetStatus() FleetStatus {
 	if s.fleet != nil {
-		return FleetStatus{ConfigVersion: s.fleet.Version(), Fleet: true, Nodes: s.fleet.Status()}
+		return FleetStatus{ConfigVersion: s.fleet.Version(), Fleet: true, Nodes: s.fleet.Status(), Relays: s.fleet.Relays(s.relayStatuses())}
 	}
 	report := s.LocalReport("")
 	return FleetStatus{Nodes: []fleet.NodeStatus{{Address: "(this server)", Healthy: true,

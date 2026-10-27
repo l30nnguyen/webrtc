@@ -199,3 +199,29 @@ func TestCountryRanges(t *testing.T) {
 		}
 	}
 }
+
+func TestRelaysMergeTheLatestMeasurement(t *testing.T) {
+	local := &Report{Address: self}
+	r, _ := testRegistry(t, local)
+	config := r.Config()
+	config.Relays = []Relay{{Name: "sg-relay", Region: "sg", Host: "relay.example.test"}, {Name: "us-relay", Region: "us", Host: "us.example.test"}}
+	if err := r.Apply(config); err != nil {
+		t.Fatal(err)
+	}
+	link1 := linked(t, r, Report{Address: asia})
+	link2 := linked(t, r, Report{Address: asia2})
+	r.NodeStats(asia, link1, 0, nil, []RelayStatus{{Name: "sg-relay", Healthy: false, At: "2026-10-27T00:00:00Z"}})
+	r.NodeStats(asia2, link2, 0, nil, []RelayStatus{{Name: "sg-relay", Healthy: true, Mbps: 5, At: "2026-10-27T00:00:15Z"}})
+	got := r.Relays(nil)
+	if len(got) != 2 || got[0].Name != "sg-relay" || !got[0].Healthy || got[0].MeasuredBy != asia2 {
+		t.Fatalf("relays %+v", got)
+	}
+	if got[1].Name != "us-relay" || got[1].At != "" {
+		t.Fatalf("unmeasured relay %+v", got[1])
+	}
+	// A node that goes down no longer counts.
+	r.Unlinked(asia2, link2)
+	if got := r.Relays(nil); got[0].MeasuredBy != asia || got[0].Healthy {
+		t.Fatalf("after unlink %+v", got[0])
+	}
+}

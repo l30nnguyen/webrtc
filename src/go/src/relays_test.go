@@ -79,3 +79,14 @@ func TestRelaysWithoutSecretsFallBackToTurnConf(t *testing.T) {
 		t.Fatalf("partial secrets: %v", servers)
 	}
 }
+
+func TestRelaysWithFixedCredentials(t *testing.T) {
+	srv := relayServer(t, `{"turn-de":{"username":"matrix","password":"violet-pass"}}`)
+	servers := srv.relaysFor("camera1")
+	if len(servers) != 1 || servers[0]["username"] != "matrix" || servers[0]["password"] != "violet-pass" {
+		t.Fatalf("servers %v", servers)
+	}
+	if got := relayServer(t, `{"turn-de":{"username":"matrix"}}`).relaysFor("camera1"); got[0]["host"] != "old.example.test" {
+		t.Fatalf("incomplete fixed credentials accepted: %v", got)
+	}
+}
