@@ -4,10 +4,12 @@
 #   dev:  the dev VPS; installs the package's binary (as matrix_cc) and player
 #         into /home/admin/webrtc-dev-sid and restarts only PM2 webrtc_dev
 #         (8443), keeping its runtime arguments.
-#   prod: the matrix.5gen.care VPS; runs the package's setup.sh upgrade
-#         (systemd matrix.service, config and data kept).
+#   prod: the Control Center matrix.5gen.care (DigitalOcean, vps.sh prod_us);
+#         runs the package's setup.sh upgrade (systemd matrix.service, config
+#         and data kept).
+#   sg:   the control node matrix-sg00.5gen.care (vps.sh prod_sg); same.
 #
-# Usage: ./deploy.sh dev|prod
+# Usage: ./deploy.sh dev|prod|sg
 #   ALLOW_DIRTY=1 deploys uncommitted changes as a -dirty test package.
 set -euo pipefail
 
@@ -19,16 +21,22 @@ case "$TARGET" in
         KEY="${DEPLOY_KEY:-$ROOT/../webrtc_instance.pem}"
         ;;
     prod)
-        HOST="${DEPLOY_HOST:-ubuntu@ec2-34-228-78-198.compute-1.amazonaws.com}"
-        KEY="${DEPLOY_KEY:-$ROOT/../matrix_prod.pem}"
+        HOST="${DEPLOY_HOST:-root@138.197.12.238}"
+        KEY="${DEPLOY_KEY:-$ROOT/../prod_do.pem}"
+        CHECK=https://matrix.5gen.care/api/health
         ;;
-    *) echo "Usage: $0 dev|prod" >&2; exit 1 ;;
+    sg)
+        HOST="${DEPLOY_HOST:-root@152.42.232.159}"
+        KEY="${DEPLOY_KEY:-$ROOT/../prod_do.pem}"
+        CHECK=https://matrix-sg00.5gen.care/api/health
+        ;;
+    *) echo "Usage: $0 dev|prod|sg" >&2; exit 1 ;;
 esac
 SSH=(ssh -i "$KEY" -o ConnectTimeout=15)
 SCP=(scp -i "$KEY" -o ConnectTimeout=15)
 
-if [[ "$TARGET" == prod ]]; then
-    read -r -p "Deploy $(git -C "$ROOT" rev-parse --short HEAD) to PRODUCTION (matrix.5gen.care)? Type 'prod' to continue: " answer
+if [[ "$TARGET" != dev ]]; then
+    read -r -p "Deploy $(git -C "$ROOT" rev-parse --short HEAD) to PRODUCTION ($TARGET, ${CHECK%/api/health})? Type 'prod' to continue: " answer
     [[ "$answer" == prod ]] || { echo "Aborted."; exit 1; }
 fi
 
@@ -43,7 +51,7 @@ echo "Uploading $NAME to $TARGET..."
 "${SSH[@]}" "$HOST" "mkdir -p ~/releases"
 "${SCP[@]}" "$TARBALL" "$TARBALL.sha256" "$HOST:releases/"
 
-if [[ "$TARGET" == prod ]]; then
+if [[ "$TARGET" != dev ]]; then
     "${SSH[@]}" "$HOST" bash -s -- "$NAME" <<'EOF'
 set -euo pipefail
 NAME=$1
@@ -52,8 +60,8 @@ sha256sum -c "$NAME.tar.gz.sha256"
 rm -rf "$NAME" && tar xzf "$NAME.tar.gz"
 sudo "./$NAME/setup.sh" upgrade
 EOF
-    curl -sf --max-time 10 https://matrix.5gen.care/api/health && echo
-    echo "Deployment of $NAME to prod complete!"
+    curl -sf --max-time 10 "$CHECK" && echo
+    echo "Deployment of $NAME to $TARGET complete!"
     exit 0
 fi
 
