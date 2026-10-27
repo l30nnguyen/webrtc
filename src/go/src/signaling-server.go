@@ -70,6 +70,7 @@ type Client struct {
 	closeOnce     sync.Once
 	pingMu        sync.Mutex
 	pingTime      time.Time
+	release       func() // frees the connection's per-source slot
 }
 
 func (c *Client) Close() {
@@ -103,6 +104,7 @@ type Server struct {
 	ticketKey     ed25519.PublicKey  // Center's public key: verifies tickets and pushed configurations
 	hub           *linkHub           // Center: node links
 	nodeLink      *nodeLink          // node: link to Center
+	limits        *publicLimits      // per-source limits on the public port; nil: off
 }
 
 func NewServer(playerPath string, rootDir string) *Server {
@@ -214,6 +216,9 @@ func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 	}
+	if !s.allowRequest(w, r) {
+		return
+	}
 	if s.center != nil && isCenterPath(r.URL.Path) {
 		s.center.ServeHTTP(w, r)
 		return
@@ -294,8 +299,20 @@ func (s *Server) handleWebSocket(w http.ResponseWriter, r *http.Request) {
 		r.URL.RawQuery = ""
 	}
 
+	source, limited := s.limitSource(r)
+	if limited && !s.limits.conns.Acquire(source) {
+		s.countStat((*stats.Counters).RateLimited)
+		tooMany(w)
+		return
+	}
+	release := func() {
+		if limited {
+			s.limits.conns.Release(source)
+		}
+	}
 	conn, err := s.upgrader.Upgrade(w, r, nil)
 	if err != nil {
+		release()
 		log.Printf("WebSocket upgrade failed: %v", err)
 		return
 	}
@@ -305,6 +322,7 @@ func (s *Server) handleWebSocket(w http.ResponseWriter, r *http.Request) {
 			websocket.FormatCloseMessage(websocket.ClosePolicyViolation, "ticket already used"),
 			time.Now().Add(time.Second))
 		conn.Close()
+		release()
 		return
 	}
 
@@ -329,8 +347,9 @@ func (s *Server) handleWebSocket(w http.ResponseWriter, r *http.Request) {
 			Path:        r.URL.Path,
 			Type:        deviceType,
 		},
-		Send: make(chan []byte, 256),
-		done: make(chan struct{}),
+		Send:    make(chan []byte, 256),
+		done:    make(chan struct{}),
+		release: release,
 	}
 	c.touch()
 
@@ -369,6 +388,9 @@ func (s *Server) readPump(c *Client) {
 		}
 		c.Conn.Close()
 		c.Close()
+		if c.release != nil {
+			c.release()
+		}
 		log.Printf("Client %s disconnected", c.ID)
 	}()
 
@@ -980,6 +1002,11 @@ func main() {
 	nodeKeyPath := flag.String("node-key", "", "with -link-to: this node's link key (PKCS#8 Ed25519 PEM, mode 0600; create with: matrix_cc fleet keygen FILE)")
 	nodeAddress := flag.String("node-address", "", "with -link-to: this node's exact WSS root as listed in Center's config.json (default: -main-address or -ticket-aud)")
 	nodeConfigPath := flag.String("node-config-file", "", "with -link-to: where to keep the configuration Center pushed (default: ROOT/cfg/node-config.json)")
+	rateAPI := flag.Float64("rate-api", 20, "per source address: Center calls (activation, viewer tickets) a second, burst 10x; 0: no limit")
+	rateConnect := flag.Float64("rate-connect", 300, "per source address: new camera/viewer connections a minute (also the burst); 0: no limit")
+	rateWeb := flag.Float64("rate-web", 50, "per source address: other requests (player, downloads, health) a second, burst 4x; 0: no limit")
+	connsPerSource := flag.Int("conns-per-source", 1000, "per source address: open camera/viewer connections; 0: no limit")
+	rateExempt := flag.String("rate-exempt", "", "comma-separated IPs/CIDRs the -rate-* and -conns-per-source limits skip (for example a TLS proxy in front)")
 	adminSocket := flag.String("admin-socket", "", "Unix socket (created mode 0600) for matrix-fleet: status, statistics, configuration reload")
 	playerAllowText := flag.String("player-allow", "", "comma-separated IPs/CIDRs allowed to load the player and /api/devices (default: everyone)")
 	flag.Parse()
@@ -1059,6 +1086,11 @@ func main() {
 		srv.SetPlayerAllow(playerAllow)
 		log.Printf("Player and device list limited to %s", *playerAllowText)
 	}
+	limits, err := parseLimits(*rateAPI, *rateWeb, *rateConnect, *connsPerSource, *rateExempt)
+	if err != nil {
+		log.Fatal(err)
+	}
+	srv.limits = limits
 	go srv.sweepInactiveClients()
 
 	addr := fmt.Sprintf(":%d", *port)

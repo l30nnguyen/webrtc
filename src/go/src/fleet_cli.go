@@ -469,7 +469,8 @@ func (c fleetCLI) stats(days int) error {
 	fmt.Fprintf(c.out, "Last %d day(s) (UTC), whole fleet\n\n", report.Days)
 	fmt.Fprintf(c.out, "Viewing requests        %d\n", t.Requests)
 	fmt.Fprintf(c.out, "Camera was offline      %d\n", t.CameraOffline)
-	fmt.Fprintf(c.out, "Refused at the ticket   %d\n\n", t.AdmissionRejected)
+	fmt.Fprintf(c.out, "Refused at the ticket   %d\n", t.AdmissionRejected)
+	fmt.Fprintf(c.out, "Refused, too many       %d\n\n", t.RateLimited)
 
 	table := tabwriter.NewWriter(c.out, 0, 0, 2, ' ', 0)
 	fmt.Fprintln(table, "REPORTED BY\tCONNECTED\tFAILED\tLAN\tDIRECT\tRELAY\tRELAY READY/OFFERED\tAVG SETUP")

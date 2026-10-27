@@ -132,9 +132,11 @@ type Day struct {
 	// CameraOffline counts viewer requests for a camera that was not connected.
 	CameraOffline int `json:"camera_offline"`
 	// AdmissionRejected counts connections refused for a missing or bad ticket.
-	AdmissionRejected int      `json:"admission_rejected"`
-	Camera            Outcomes `json:"camera"`
-	Player            Outcomes `json:"player"`
+	AdmissionRejected int `json:"admission_rejected"`
+	// RateLimited counts requests refused because their source sent too many.
+	RateLimited int      `json:"rate_limited,omitempty"`
+	Camera      Outcomes `json:"camera"`
+	Player      Outcomes `json:"player"`
 }
 
 // Add adds other's counters into d.
@@ -142,6 +144,7 @@ func (d *Day) Add(other Day) {
 	d.Requests += other.Requests
 	d.CameraOffline += other.CameraOffline
 	d.AdmissionRejected += other.AdmissionRejected
+	d.RateLimited += other.RateLimited
 	d.Camera.add(other.Camera)
 	d.Player.add(other.Player)
 }
@@ -191,6 +194,9 @@ func (c *Counters) CameraOffline() { c.update(func(d *Day) { d.CameraOffline++ }
 
 // AdmissionRejected counts a connection refused at the ticket check.
 func (c *Counters) AdmissionRejected() { c.update(func(d *Day) { d.AdmissionRejected++ }) }
+
+// RateLimited counts a request refused by a rate limit.
+func (c *Counters) RateLimited() { c.update(func(d *Day) { d.RateLimited++ }) }
 
 // Record counts a normalized report.
 func (c *Counters) Record(r Report) {

@@ -122,6 +122,17 @@ sudo matrix-fleet stats 7       # requests, connected/failed by path, errors, pe
 sudo matrix-fleet -json stats 7 # the same as JSON
 ```
 
+## Limits on the public port
+
+The server limits each source address (IPv6: each /64) by default: 20 Center
+calls a second (burst 200), 300 new camera/viewer connections a minute, 50
+other requests a second (burst 200) and 1000 open connections. Over a limit it
+answers 429 and counts it as "Refused, too many" in `matrix-fleet stats`.
+DigitalOcean filters network floods for free; these limits cover request
+floods. Change them with `-rate-api`, `-rate-connect`, `-rate-web`,
+`-conns-per-source` (0 turns one off) and skip trusted addresses with
+`-rate-exempt`.
+
 ## Upgrade
 
 ```bash
