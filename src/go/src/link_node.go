@@ -37,7 +37,7 @@ type nodeLink struct {
 
 	events    chan link.Message // camera online/offline, sent in order
 	resync    atomic.Bool       // events were dropped: reconnect to resend all
-	connected atomic.Bool       // logged in and sent the camera list
+	connected atomic.Bool       // Center welcomed this link
 
 	mu      sync.Mutex
 	version int
@@ -203,8 +203,6 @@ func (n *nodeLink) connectOnce() error {
 		Relays: n.srv.relayStatuses(), Version: version}); err != nil {
 		return err
 	}
-	n.connected.Store(true)
-	log.Printf("link: connected to Center %s as %s", n.serverName, n.address)
 
 	done := make(chan struct{})
 	defer close(done)
@@ -221,6 +219,12 @@ func (n *nodeLink) connectOnce() error {
 			return err
 		}
 		conn.SetReadDeadline(time.Now().Add(link.ReadTimeout))
+		if m.Type == "welcome" {
+			// Center accepted the login and the camera list.
+			n.connected.Store(true)
+			log.Printf("link: connected to Center %s as %s", n.serverName, n.address)
+			continue
+		}
 		if m.Type != "config" {
 			continue
 		}

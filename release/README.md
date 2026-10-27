@@ -91,12 +91,27 @@ Every other node runs with the same `-kid` and Center public key
 1. On Center, set `LINK_LISTEN=<private ip>:8444` in `/etc/matrix/matrix.conf`
    and run `sudo ./setup.sh upgrade`. Allow that port only from the nodes
    (DigitalOcean: Cloud Firewall rule from the tag `matrix-node`).
-2. On the node, create its key: `matrix_cc fleet keygen /path/node.key`
-   (mode 0600, never copied elsewhere). Put the printed `public_key` in the
-   node's entry and `matrix-fleet apply` it on Center.
-3. Run the node with `-link-to wss://<Center private ip>:8444/
-   -link-server-name matrix.5gen.care -node-key /path/node.key` (and
-   `-node-address` if its `-ticket-aud` is not its address in config.json).
+2. On the node (DNS pointing at it, port 80 open), from the extracted package:
+
+   ```bash
+   sudo ./setup.sh install-node --domain matrix-eu00.5gen.care \
+        --center-key center-ticket.pub.pem --kid <Center's KID> \
+        --link-to wss://<Center private ip>:8444/ --link-server-name matrix.5gen.care \
+        --name eu00 --region DE [--blocklist blocklist.txt] [--relay-secrets relay-secrets.json]
+   ```
+
+   It installs the server, gets the certificate (renewed by certbot.timer),
+   creates the node's own key (`cfg/sid/node.key`, never copied elsewhere),
+   starts the `matrix` service and prints the node's entry for config.json
+   (also kept in `/opt/matrix/cfg/node-entry.json`). `KID` is the one in
+   Center's `/etc/matrix/matrix.conf`. Upgrades: `sudo ./setup.sh upgrade`.
+3. On Center, add that entry to `nodes` and `sudo matrix-fleet apply` it.
+   `sudo matrix-fleet status` shows the node up within seconds; on the node it
+   says "Control node, linked to Center ...".
+
+The blocklist is not pushed over the link: replace it on every server with
+`sudo ./setup.sh blocklist blocklist.txt` (checked first, read without a
+restart; a broken file is refused because it would refuse every connection).
 
 The node logs in with its key, sends its camera list, then each camera that
 comes or goes and its counters every minute. Center pushes every applied

@@ -184,6 +184,9 @@ func (h *linkHub) serve(conn *websocket.Conn, address, peer string) {
 	h.registry.NodeStats(address, gen, hello.Clients, hello.Stats, hello.Relays)
 	log.Printf("link: node %s connected from %s (%d cameras, config version %d)", address, peer, len(hello.Cameras), hello.Version)
 
+	if welcome, err := json.Marshal(link.Message{Type: "welcome"}); err == nil {
+		l.queue(welcome)
+	}
 	if message := h.config.Load(); message != nil {
 		var current link.Message
 		if json.Unmarshal(*message, &current) == nil && current.Version > hello.Version {

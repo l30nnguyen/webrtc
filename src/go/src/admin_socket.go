@@ -32,6 +32,9 @@ type FleetStatus struct {
 	Fleet         bool                `json:"fleet"`
 	Nodes         []fleet.NodeStatus  `json:"nodes"`
 	Relays        []fleet.RelayStatus `json:"relays,omitempty"`
+	// Set on a control node: its link to Center.
+	Center string `json:"center,omitempty"`
+	Linked bool   `json:"linked,omitempty"`
 }
 
 // MovesResult is the answer of POST /v1/moves.
@@ -146,8 +149,15 @@ func (s *Server) fleetStatus() FleetStatus {
 		return FleetStatus{ConfigVersion: s.fleet.Version(), Fleet: true, Nodes: s.fleet.Status(), Relays: s.fleet.Relays(s.relayStatuses())}
 	}
 	report := s.LocalReport("")
-	return FleetStatus{Nodes: []fleet.NodeStatus{{Address: "(this server)", Healthy: true,
+	status := FleetStatus{Nodes: []fleet.NodeStatus{{Address: "(this server)", Healthy: true,
 		Cameras: len(report.Cameras), Clients: report.Clients, LastSeen: time.Now().UTC().Format(time.RFC3339)}}}
+	if s.nodeLink != nil {
+		_, version := s.nodeLink.Config()
+		status.ConfigVersion, status.Center, status.Linked = version, s.nodeLink.serverName, s.nodeLink.connected.Load()
+		status.Nodes[0].Address, status.Nodes[0].ConfigVersion = s.nodeLink.address, version
+		status.Relays = s.relayStatuses()
+	}
+	return status
 }
 
 func writeAdminJSON(w http.ResponseWriter, code int, body any) {

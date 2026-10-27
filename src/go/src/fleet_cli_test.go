@@ -206,3 +206,17 @@ func TestFleetThroughTheAdminSocket(t *testing.T) {
 		t.Fatalf("status -json: %d %s", code, out)
 	}
 }
+
+func TestFleetBlocklistCheck(t *testing.T) {
+	dir := t.TempDir()
+	good := filepath.Join(dir, "good.txt")
+	bad := filepath.Join(dir, "bad.txt")
+	os.WriteFile(good, []byte(strings.Repeat("a", 64)+"\ntenant:acme01\n"), 0o600)
+	os.WriteFile(bad, []byte("not a digest\n"), 0o600)
+	if out, code := runFleet(t, filepath.Join(dir, "c.json"), "blocklist-check", good); code != 0 {
+		t.Fatalf("good blocklist: %d %s", code, out)
+	}
+	if out, code := runFleet(t, filepath.Join(dir, "c.json"), "blocklist-check", bad); code != 1 {
+		t.Fatalf("bad blocklist: %d %s", code, out)
+	}
+}

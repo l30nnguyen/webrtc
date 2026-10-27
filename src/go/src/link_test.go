@@ -154,6 +154,9 @@ func TestNodeWithAWrongKeyIsRefused(t *testing.T) {
 	if _, version := n.Config(); version != 0 {
 		t.Fatal("node with a wrong key got the configuration")
 	}
+	if n.connected.Load() {
+		t.Fatal("node with a wrong key counts itself connected")
+	}
 }
 
 func TestNodeRefusesAConfigNotSignedByCenter(t *testing.T) {

@@ -11,6 +11,8 @@
 //     counters, its measurements of its region's relays and the configuration
 //     version it runs. Then {"type":"camera"} as cameras come and go, and
 //     {"type":"stats"} (counters and relays) every StatsInterval.
+//     Center answers {"type":"welcome"} once it has taken the login and the
+//     list; a refused node is just disconnected.
 //  3. Center pushes {"type":"config"}: the configuration signed with the
 //     Center ticket key over ConfigMessage(version, config). The node accepts
 //     only a valid signature and a version newer than its own, then answers

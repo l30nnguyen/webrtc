@@ -26,6 +26,7 @@ import (
 	"text/tabwriter"
 	"time"
 
+	"signaling-server/internal/admission"
 	"signaling-server/internal/fleet"
 	"signaling-server/internal/stats"
 )
@@ -42,6 +43,9 @@ const fleetUsage = `usage: matrix_cc fleet [options] COMMAND
   keygen FILE        on a node: create its link key (-node-key) and print the
                      public_key line for config.json
   pubkey FILE        print the public_key of an existing link key
+  blocklist-check FILE
+                     validate a blocklist before installing it (a broken one
+                     refuses every connection)
 
 options:
 `
@@ -86,6 +90,10 @@ func fleetCommand(args []string, stdout, stderr io.Writer) int {
 		err = c.keygen(rest[1])
 	case len(rest) == 2 && rest[0] == "pubkey":
 		err = c.pubkey(rest[1])
+	case len(rest) == 2 && rest[0] == "blocklist-check":
+		if err = (admission.Blocklist{Path: rest[1]}).Validate(); err == nil {
+			fmt.Fprintf(stdout, "%s is a valid blocklist.\n", rest[1])
+		}
 	case len(rest) == 2 && rest[0] == "check":
 		err = c.check(rest[1])
 	case len(rest) == 2 && rest[0] == "apply":
@@ -417,6 +425,12 @@ func (c fleetCLI) status() error {
 	}
 	if status.Fleet {
 		fmt.Fprintf(c.out, "Configuration version %d\n\n", status.ConfigVersion)
+	} else if status.Center != "" {
+		state := "linked"
+		if !status.Linked {
+			state = "NOT linked (see journalctl -u matrix)"
+		}
+		fmt.Fprintf(c.out, "Control node, %s to Center %s, configuration version %d\n\n", state, status.Center, status.ConfigVersion)
 	} else {
 		fmt.Fprintln(c.out, "No fleet configuration: this server serves its own cameras only.")
 	}

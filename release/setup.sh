@@ -1,14 +1,29 @@
 #!/bin/bash
 # Install or upgrade the Matrix control server from this release package.
 # Run as root from the extracted package folder on Ubuntu. The package binary
-# bin/matrix_cc_<version> is installed as /opt/matrix/matrix_cc.
+# bin/matrix_cc_<version> is installed as /opt/matrix/matrix_cc. One server is
+# the Control Center (install); the others are control nodes (install-node).
 #
-# Fresh install (gets a Let's Encrypt certificate, auto-renewed by certbot.timer):
+# Fresh Control Center (gets a Let's Encrypt certificate, auto-renewed by certbot.timer):
 #   sudo ./setup.sh install --domain matrix.5gen.care --keys /path/to/keys \
 #        [--port 443] [--kid NAME] [--min-issued 2026-10-01T00:00:00Z] [--discovery-tenant test01] \
 #        [--turn turn.conf] [--player-allow 203.0.113.5,10.0.0.0/8]
 #   The keys folder must hold issuer.pub.pem, center-ticket.key.pem and
 #   tenants.json; blocklist.txt and center-ticket.pub.pem are copied if present.
+#
+# Fresh control node (certificate as above; creates the node's link key and
+# prints its entry for Center's config.json):
+#   sudo ./setup.sh install-node --domain matrix-eu00.5gen.care \
+#        --center-key center-ticket.pub.pem --kid KID \
+#        --link-to wss://10.10.0.2:8444/ --link-server-name matrix.5gen.care \
+#        [--name eu00] [--region DE] [--port 443] [--blocklist blocklist.txt] \
+#        [--relay-secrets relay-secrets.json] [--turn turn.conf] [--link-ca ca.pem] [--player-allow ...]
+#   KID is Center's (KID= in its /etc/matrix/matrix.conf); --link-to is Center's
+#   LINK_LISTEN; --link-server-name is the name on Center's certificate.
+#
+# Replace the blocklist (validated first; the server reads it without a restart;
+# copy the same file to every server):
+#   sudo ./setup.sh blocklist /path/to/blocklist.txt
 #
 # Set or replace the TURN servers handed to cameras (JSON list of
 # {"host", "port", "username", "password"}; read on every connection, no restart):
@@ -29,9 +44,8 @@
 # Other nodes link to Center on LINK_LISTEN=host:port in /etc/matrix/matrix.conf
 # (the private address and port, e.g. 10.10.0.2:8444; firewall it to the nodes).
 #
-# Upgrade an installed server to this package (config, keys and data are kept;
-# edit /etc/matrix/matrix.conf first to change a setting, e.g. ASSIGN_ADDRESS=
-# wss://node.example:443/ to send new cameras and their viewers to another node):
+# Upgrade an installed Center or node to this package (config, keys and data
+# are kept; edit /etc/matrix/matrix.conf first to change a setting):
 #   sudo ./setup.sh upgrade
 set -euo pipefail
 
@@ -81,10 +95,17 @@ write_fleet_tool() {
     cat > "$FLEET_TOOL" <<'TOOL'
 #!/bin/bash
 # Fleet of this Center: status | stats [DAYS] | check FILE | apply FILE | rollback [VERSION]
+# On a node only status works; configuration is changed on Center.
 set -euo pipefail
 [[ $EUID -eq 0 ]] || { echo "matrix-fleet: run with sudo" >&2; exit 1; }
 # shellcheck source=/dev/null
 source /etc/matrix/matrix.conf
+if [[ "${ROLE:-center}" == node ]]; then
+    case "${1:-}" in
+        status|keygen|pubkey|blocklist-check|-json) ;;
+        *) echo "matrix-fleet: this is a control node; run \"${1:-}\" on the Control Center" >&2; exit 1 ;;
+    esac
+fi
 geoip=()
 [[ -f /opt/matrix/cfg/geoip.csv ]] && geoip=(-geoip /opt/matrix/cfg/geoip.csv)
 exec /opt/matrix/matrix_cc fleet -config /opt/matrix/cfg/config.json -self "wss://$DOMAIN:$PORT/" \
@@ -103,6 +124,10 @@ migrate_fleet_config() {
 }
 
 write_unit() {
+    if [[ "${ROLE:-center}" == node ]]; then
+        write_node_unit
+        return
+    fi
     local discovery=""
     [[ -n "${DISCOVERY_TENANT:-}" ]] && discovery=" -discovery-tenant $DISCOVERY_TENANT"
     [[ -n "${PLAYER_ALLOW:-}" ]] && discovery+=" -player-allow $PLAYER_ALLOW"
@@ -131,6 +156,45 @@ ExecStart=$APP_DIR/matrix_cc -root $APP_DIR -port $PORT -https -center \\
     -blocklist-file $DATA_DIR/blocklist.txt -tenants-file $DATA_DIR/tenants.json \\
     -activation-store $DATA_DIR/activations.jsonl -admin-token-file $DATA_DIR/admin.token$discovery
 ExecReload=/bin/kill -HUP \$MAINPID
+Restart=always
+RestartSec=2
+AmbientCapabilities=CAP_NET_BIND_SERVICE
+CapabilityBoundingSet=CAP_NET_BIND_SERVICE
+NoNewPrivileges=true
+ProtectSystem=strict
+ProtectHome=true
+PrivateTmp=true
+ReadWritePaths=$DATA_DIR
+RuntimeDirectory=matrix
+RuntimeDirectoryMode=0700
+LimitNOFILE=65536
+
+[Install]
+WantedBy=multi-user.target
+EOF
+    systemctl daemon-reload
+}
+
+# A control node: ticket admission with Center's public key, linked to Center.
+write_node_unit() {
+    local extra=""
+    [[ -n "${PLAYER_ALLOW:-}" ]] && extra+=" -player-allow $PLAYER_ALLOW"
+    [[ -f "$DATA_DIR/link-ca.pem" ]] && extra+=" -link-ca $DATA_DIR/link-ca.pem"
+    cat > "$UNIT" <<EOF
+[Unit]
+Description=Matrix control node
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+User=$SERVICE_USER
+Group=$SERVICE_USER
+WorkingDirectory=$APP_DIR
+ExecStart=$APP_DIR/matrix_cc -root $APP_DIR -port $PORT -https \\
+    -ticket-public-key $DATA_DIR/center-ticket.pub.pem -ticket-kid $KID -ticket-aud wss://$DOMAIN:$PORT/ \\
+    -blocklist-file $DATA_DIR/blocklist.txt -stats-file $DATA_DIR/stats.json \\
+    -link-to $LINK_TO -link-server-name $LINK_SERVER_NAME -node-key $DATA_DIR/node.key \\
+    -node-config-file $DATA_DIR/node-config.json -admin-socket /run/matrix/admin.sock$extra
 Restart=always
 RestartSec=2
 AmbientCapabilities=CAP_NET_BIND_SERVICE
@@ -190,6 +254,35 @@ install_relay_secrets() {
     echo "Installed the secrets of $(python3 -c 'import json, sys; print(", ".join(sorted(json.load(open(sys.argv[1])))))' "$file")"
 }
 
+# A broken blocklist refuses every connection, so it is checked first and
+# replaced atomically; the server notices the new file without a restart.
+install_blocklist() {
+    local file=$1
+    [[ -f "$file" ]] || die "missing $file"
+    "$APP_DIR/matrix_cc" fleet blocklist-check "$file" >/dev/null || die "$file is not a valid blocklist; nothing changed"
+    install -o "$SERVICE_USER" -g "$SERVICE_USER" -m 600 "$file" "$DATA_DIR/.blocklist.txt.new"
+    mv "$DATA_DIR/.blocklist.txt.new" "$DATA_DIR/blocklist.txt"
+    echo "Installed the blocklist ($(grep -cv '^[[:space:]]*\(#\|$\)' "$DATA_DIR/blocklist.txt" || true) entries)"
+}
+
+# Packages, service user and the certificate, shared by install and install-node.
+prepare_host() {
+    echo "Installing packages..."
+    apt-get update -q
+    DEBIAN_FRONTEND=noninteractive apt-get install -y -q certbot curl
+    id "$SERVICE_USER" >/dev/null 2>&1 ||
+        useradd --system --home-dir /nonexistent --no-create-home --shell /usr/sbin/nologin "$SERVICE_USER"
+}
+
+request_certificate() {
+    echo "Requesting the certificate for $DOMAIN (port 80 must be reachable)..."
+    write_cert_hook
+    certbot certonly --standalone --non-interactive --agree-tos --register-unsafely-without-email \
+        --keep-until-expiring -d "$DOMAIN"
+    "$HOOK"
+    systemctl enable --now certbot.timer >/dev/null 2>&1 || true
+}
+
 health_check() {
     for _ in $(seq 1 15); do
         if curl -sf --max-time 5 --resolve "$DOMAIN:$PORT:127.0.0.1" "https://$DOMAIN:$PORT/api/health"; then
@@ -224,13 +317,7 @@ cmd_install() {
         [[ -f "$keys/$f" ]] || die "missing $keys/$f"
     done
 
-    echo "Installing packages..."
-    apt-get update -q
-    DEBIAN_FRONTEND=noninteractive apt-get install -y -q certbot curl
-
-    id "$SERVICE_USER" >/dev/null 2>&1 ||
-        useradd --system --home-dir /nonexistent --no-create-home --shell /usr/sbin/nologin "$SERVICE_USER"
-
+    prepare_host
     install_release
     [[ -n "$turn" ]] && install_turn "$turn"
 
@@ -247,6 +334,7 @@ cmd_install() {
 
     install -d -m 755 "$(dirname "$CONF")"
     cat > "$CONF" <<EOF
+ROLE=center
 DOMAIN=$DOMAIN
 PORT=$PORT
 KID=$KID
@@ -255,17 +343,93 @@ DISCOVERY_TENANT=$DISCOVERY_TENANT
 PLAYER_ALLOW=$PLAYER_ALLOW
 EOF
 
-    echo "Requesting the certificate for $DOMAIN (port 80 must be reachable)..."
-    write_cert_hook
-    certbot certonly --standalone --non-interactive --agree-tos --register-unsafely-without-email \
-        --keep-until-expiring -d "$DOMAIN"
-    "$HOOK"
-    systemctl enable --now certbot.timer >/dev/null 2>&1 || true
-
+    request_certificate
+    ROLE=center
     write_unit
     systemctl enable --now matrix
     health_check
     echo "Installed $(grep '^version=' "$APP_DIR/RELEASE" | cut -d= -f2) at https://$DOMAIN:$PORT/"
+}
+
+cmd_install_node() {
+    local center_key="" blocklist="" turn="" secrets="" link_ca="" name="" region=""
+    DOMAIN="" PORT=443 KID="" LINK_TO="" LINK_SERVER_NAME="" PLAYER_ALLOW=""
+    while [[ $# -gt 0 ]]; do
+        case "$1" in
+            --domain) DOMAIN=$2; shift 2 ;;
+            --port) PORT=$2; shift 2 ;;
+            --center-key) center_key=$2; shift 2 ;;
+            --kid) KID=$2; shift 2 ;;
+            --link-to) LINK_TO=$2; shift 2 ;;
+            --link-server-name) LINK_SERVER_NAME=$2; shift 2 ;;
+            --link-ca) link_ca=$2; shift 2 ;;
+            --blocklist) blocklist=$2; shift 2 ;;
+            --relay-secrets) secrets=$2; shift 2 ;;
+            --turn) turn=$2; shift 2 ;;
+            --player-allow) PLAYER_ALLOW=$2; shift 2 ;;
+            --name) name=$2; shift 2 ;;
+            --region) region=$2; shift 2 ;;
+            *) die "unknown option $1" ;;
+        esac
+    done
+    [[ -n "$DOMAIN" && -n "$center_key" && -n "$KID" && -n "$LINK_TO" ]] ||
+        die "install-node needs --domain, --center-key, --kid and --link-to"
+    [[ -f "$CONF" ]] && die "already installed ($CONF exists); use: setup.sh upgrade"
+    [[ -f "$center_key" ]] || die "missing $center_key"
+    grep -q "BEGIN PUBLIC KEY" "$center_key" || die "$center_key must be Center's public key (center-ticket.pub.pem), never its private key"
+    [[ "$LINK_TO" =~ ^wss://[^/]+/$ ]] || die "--link-to must be wss://host:port/ (Center's LINK_LISTEN)"
+    local link_host=${LINK_TO#wss://}
+    link_host=${link_host%/}
+    link_host=${link_host%:*}
+    if [[ -z "$LINK_SERVER_NAME" ]]; then
+        [[ "$link_host" =~ ^[0-9.]+$|: ]] && die "--link-to names an IP address; add --link-server-name (the name on Center's certificate)"
+        LINK_SERVER_NAME=$link_host
+    fi
+
+    prepare_host
+    install_release
+    [[ -n "$turn" ]] && install_turn "$turn"
+    [[ -n "$secrets" ]] && install_relay_secrets "$secrets"
+
+    install -d -o "$SERVICE_USER" -g "$SERVICE_USER" -m 700 "$DATA_DIR"
+    install -o "$SERVICE_USER" -g "$SERVICE_USER" -m 600 "$center_key" "$DATA_DIR/center-ticket.pub.pem"
+    [[ -n "$link_ca" ]] && install -o "$SERVICE_USER" -g "$SERVICE_USER" -m 600 "$link_ca" "$DATA_DIR/link-ca.pem"
+    if [[ -n "$blocklist" ]]; then
+        install_blocklist "$blocklist"
+    elif [[ ! -f "$DATA_DIR/blocklist.txt" ]]; then
+        install -o "$SERVICE_USER" -g "$SERVICE_USER" -m 600 /dev/null "$DATA_DIR/blocklist.txt"
+    fi
+    if [[ ! -f "$DATA_DIR/node.key" ]]; then
+        runuser -u "$SERVICE_USER" -- "$APP_DIR/matrix_cc" fleet keygen "$DATA_DIR/node.key" >/dev/null
+    fi
+    local public_key
+    public_key=$("$APP_DIR/matrix_cc" fleet pubkey "$DATA_DIR/node.key" | sed 's/.*: "\(.*\)"/\1/')
+
+    install -d -m 755 "$(dirname "$CONF")"
+    cat > "$CONF" <<EOF
+ROLE=node
+DOMAIN=$DOMAIN
+PORT=$PORT
+KID=$KID
+LINK_TO=$LINK_TO
+LINK_SERVER_NAME=$LINK_SERVER_NAME
+PLAYER_ALLOW=$PLAYER_ALLOW
+EOF
+
+    request_certificate
+    ROLE=node
+    write_unit
+    systemctl enable --now matrix
+    health_check
+
+    local entry="{\"name\": \"${name:-NAME}\", \"address\": \"wss://$DOMAIN:$PORT/\", \"region\": \"${region:-REGION}\", \"public_key\": \"$public_key\"}"
+    echo "$entry" > "$APP_DIR/cfg/node-entry.json"
+    echo
+    echo "Installed control node $(grep '^version=' "$APP_DIR/RELEASE" | cut -d= -f2) at https://$DOMAIN:$PORT/"
+    echo "Add this entry to \"nodes\" in config.json on the Control Center, then run: sudo matrix-fleet apply config.json"
+    echo "  $entry"
+    echo "(also kept in $APP_DIR/cfg/node-entry.json). Until then the log says \"cannot reach Center\"; afterwards"
+    echo "\"sudo matrix-fleet status\" on Center shows this node up."
 }
 
 cmd_upgrade() {
@@ -284,6 +448,12 @@ cmd_upgrade() {
     echo "Upgraded to $(grep '^version=' "$APP_DIR/RELEASE" | cut -d= -f2) ($(grep '^commit=' "$APP_DIR/RELEASE" | cut -c8-14))"
 }
 
+cmd_blocklist() {
+    [[ -f "$CONF" ]] || die "not installed ($CONF missing)"
+    [[ $# -eq 1 ]] || die "usage: setup.sh blocklist FILE"
+    install_blocklist "$1"
+}
+
 cmd_relay_secrets() {
     [[ -f "$CONF" ]] || die "not installed ($CONF missing); use: setup.sh install"
     [[ $# -eq 1 ]] || die "usage: setup.sh relay-secrets FILE"
@@ -298,8 +468,10 @@ cmd_turn() {
 
 case "${1:-}" in
     install) shift; cmd_install "$@" ;;
+    install-node) shift; cmd_install_node "$@" ;;
     upgrade) shift; cmd_upgrade "$@" ;;
+    blocklist) shift; cmd_blocklist "$@" ;;
     turn) shift; cmd_turn "$@" ;;
     relay-secrets) shift; cmd_relay_secrets "$@" ;;
-    *) die "usage: setup.sh install --domain DOMAIN --keys DIR [options] | setup.sh upgrade | setup.sh turn FILE | setup.sh relay-secrets FILE" ;;
+    *) die "usage: setup.sh install ... | install-node ... | upgrade | blocklist FILE | turn FILE | relay-secrets FILE (see the top of this file)" ;;
 esac
