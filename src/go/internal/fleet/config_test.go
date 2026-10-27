@@ -211,3 +211,40 @@ func TestWarnings(t *testing.T) {
 		t.Fatal("warnings for a clean config")
 	}
 }
+
+func TestRelays(t *testing.T) {
+	c := routedConfig(nil)
+	c.Relays = []Relay{{Name: "turn-de", Region: "DE", Host: "turn-de.example.test", Metrics: "http://10.10.0.5:9641/metrics"}}
+	if err := c.Validate(self); err != nil {
+		t.Fatal(err)
+	}
+	c.Normalize()
+	if c.Relays[0].Port != DefaultRelayPort || c.Relays[0].CapacityMbps != DefaultRelayCapacityMbps {
+		t.Fatalf("defaults not filled: %+v", c.Relays[0])
+	}
+	for name, relay := range map[string]Relay{
+		"bad name":     {Name: "Turn DE", Region: "DE", Host: "h.example"},
+		"no region":    {Name: "t", Host: "h.example"},
+		"bad host":     {Name: "t", Region: "DE", Host: "h_x.example"},
+		"url as host":  {Name: "t", Region: "DE", Host: "turn:h.example"},
+		"bad port":     {Name: "t", Region: "DE", Host: "h.example", Port: 70000},
+		"bad metrics":  {Name: "t", Region: "DE", Host: "h.example", Metrics: "ftp://h/metrics"},
+		"negative cap": {Name: "t", Region: "DE", Host: "h.example", CapacityMbps: -1},
+	} {
+		bad := routedConfig(nil)
+		bad.Relays = []Relay{relay}
+		if err := bad.Validate(self); err == nil {
+			t.Errorf("%s accepted", name)
+		}
+	}
+	twice := routedConfig(nil)
+	twice.Relays = []Relay{{Name: "t", Region: "DE", Host: "a.example"}, {Name: "t", Region: "DE", Host: "b.example"}}
+	if twice.Validate(self) == nil {
+		t.Error("duplicate relay name accepted")
+	}
+	next := c
+	next.Relays = []Relay{{Name: "turn-de", Region: "DE", Host: "turn-de2.example.test"}}
+	if got := strings.Join(Diff(c, next), "\n"); !strings.Contains(got, "~ relay turn-de turn-de.example.test:3478") {
+		t.Fatalf("diff:\n%s", got)
+	}
+}

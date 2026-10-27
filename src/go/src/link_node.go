@@ -321,6 +321,7 @@ func setupNodeLink(srv *Server, root, linkTo, serverName, caPath, keyPath, addre
 		configPath = root + "cfg/node-config.json"
 	}
 	n := newNodeLink(srv, "wss://"+u.Host+link.Path, serverName, address, key, srv.ticketKey, tlsConfig, configPath)
+	srv.selfAddress = address
 	n.loadSaved()
 	log.Printf("Linking to Center %s as node %s", u.Host, address)
 	return n, nil

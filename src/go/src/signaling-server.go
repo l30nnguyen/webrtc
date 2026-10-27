@@ -105,6 +105,7 @@ type Server struct {
 	hub           *linkHub           // Center: node links
 	nodeLink      *nodeLink          // node: link to Center
 	limits        *publicLimits      // per-source limits on the public port; nil: off
+	selfAddress   string             // this node\'s WSS root as listed in the fleet configuration
 }
 
 func NewServer(playerPath string, rootDir string) *Server {
@@ -535,7 +536,7 @@ func (s *Server) readPump(c *Client) {
 				// This value is trusted only because the ticket was verified above;
 				// never accept a caller-supplied SID digest.
 				msg["sid_digest"] = c.Digest
-				if servers := s.loadTurnConfig(); len(servers) > 0 {
+				if servers := s.relaysFor(dest.ID); len(servers) > 0 {
 					msg["turn"] = servers
 				}
 				s.countStat((*stats.Counters).Request)
@@ -885,6 +886,7 @@ func configureServer(srv *Server, opts serverOptions) error {
 		srv.SetCenterHandler(handler)
 		srv.centerAPI = handler
 		srv.centerKey, srv.ticketKey = centerPrivate, centerPublic
+		srv.selfAddress = opts.mainAddress
 		srv.SetAdmission(admission.Validator{
 			Tickets:   admission.TicketVerifier{PublicKey: centerPublic, KeyID: opts.centerKID, Audience: opts.mainAddress},
 			Blocklist: blocklist, Replay: &admission.ReplayCache{},

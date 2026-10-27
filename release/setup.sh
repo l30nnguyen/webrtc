@@ -13,6 +13,9 @@
 # Set or replace the TURN servers handed to cameras (JSON list of
 # {"host", "port", "username", "password"}; read on every connection, no restart):
 #   sudo ./setup.sh turn /path/to/turn.conf
+# With relays in config.json, install this server's shared secrets of those
+# relays instead ({"turn-eu00": "<secret>"}; minted per session, see README):
+#   sudo ./setup.sh relay-secrets /path/to/relay-secrets.json
 #
 # Fleet: sudo matrix-fleet status | stats [DAYS] (installed in /usr/local/bin;
 # it talks to the server over /run/matrix/admin.sock, no network port).
@@ -175,6 +178,17 @@ install_turn() {
     echo "Installed the TURN configuration ($(python3 -c 'import json, sys; print(len(json.load(open(sys.argv[1]))))' "$file") server(s))"
 }
 
+# The relay secrets file holds this server's shared secrets of the relays in
+# config.json; only the service user may read it.
+install_relay_secrets() {
+    local file=$1
+    [[ -f "$file" ]] || die "missing $file"
+    python3 -c 'import json, sys; s = json.load(open(sys.argv[1])); assert isinstance(s, dict) and s and all(isinstance(v, str) and len(v) >= 16 for v in s.values())' "$file" ||
+        die "$file must be a JSON object of relay name to secret (16+ characters)"
+    install -o "$SERVICE_USER" -g "$SERVICE_USER" -m 600 "$file" "$APP_DIR/cfg/relay-secrets.json"
+    echo "Installed the secrets of $(python3 -c 'import json, sys; print(", ".join(sorted(json.load(open(sys.argv[1])))))' "$file")"
+}
+
 health_check() {
     for _ in $(seq 1 15); do
         if curl -sf --max-time 5 --resolve "$DOMAIN:$PORT:127.0.0.1" "https://$DOMAIN:$PORT/api/health"; then
@@ -269,6 +283,12 @@ cmd_upgrade() {
     echo "Upgraded to $(grep '^version=' "$APP_DIR/RELEASE" | cut -d= -f2) ($(grep '^commit=' "$APP_DIR/RELEASE" | cut -c8-14))"
 }
 
+cmd_relay_secrets() {
+    [[ -f "$CONF" ]] || die "not installed ($CONF missing); use: setup.sh install"
+    [[ $# -eq 1 ]] || die "usage: setup.sh relay-secrets FILE"
+    install_relay_secrets "$1"
+}
+
 cmd_turn() {
     [[ -f "$CONF" ]] || die "not installed ($CONF missing); use: setup.sh install"
     [[ $# -eq 1 ]] || die "usage: setup.sh turn FILE"
@@ -279,5 +299,6 @@ case "${1:-}" in
     install) shift; cmd_install "$@" ;;
     upgrade) shift; cmd_upgrade "$@" ;;
     turn) shift; cmd_turn "$@" ;;
-    *) die "usage: setup.sh install --domain DOMAIN --keys DIR [options] | setup.sh upgrade | setup.sh turn FILE" ;;
+    relay-secrets) shift; cmd_relay_secrets "$@" ;;
+    *) die "usage: setup.sh install --domain DOMAIN --keys DIR [options] | setup.sh upgrade | setup.sh turn FILE | setup.sh relay-secrets FILE" ;;
 esac

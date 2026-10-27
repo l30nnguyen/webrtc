@@ -4,6 +4,8 @@ import (
 	"bytes"
 	"encoding/json"
 	"fmt"
+	"net/netip"
+	"net/url"
 	"os"
 	"sort"
 	"strings"
@@ -21,7 +23,30 @@ type Config struct {
 	// Routes maps an ISO 3166 alpha-2 country code, or "*" for every other
 	// country, to the region whose nodes take its cameras.
 	Routes map[string]string `json:"routes,omitempty"`
+	// Relays are the relay stream servers nodes hand to cameras and viewers.
+	Relays []Relay `json:"relays,omitempty"`
 }
+
+// Relay is one relay stream server (coturn with use-auth-secret). It carries
+// no secret: each node keeps the shared secrets of the relays it hands out.
+type Relay struct {
+	Name   string `json:"name"`
+	Region string `json:"region"`
+	Host   string `json:"host"`
+	Port   int    `json:"port,omitempty"`
+	// CapacityMbps is the relayed bandwidth the server is filled to.
+	CapacityMbps int `json:"capacity_mbps,omitempty"`
+	// Metrics is the server's Prometheus endpoint, read by the nodes of its
+	// region for its load (optional).
+	Metrics string `json:"metrics,omitempty"`
+}
+
+const (
+	// DefaultRelayPort is the relay stream server port when a relay names none.
+	DefaultRelayPort = 3478
+	// DefaultRelayCapacityMbps is used when a relay names no capacity.
+	DefaultRelayCapacityMbps = 1000
+)
 
 // MaxConfigBytes bounds the configuration file.
 const MaxConfigBytes = 1 << 20
@@ -62,6 +87,15 @@ func (c *Config) Normalize() {
 		}
 		for j, code := range n.Countries {
 			n.Countries[j] = strings.ToUpper(code)
+		}
+	}
+	for i := range c.Relays {
+		r := &c.Relays[i]
+		if r.Port == 0 {
+			r.Port = DefaultRelayPort
+		}
+		if r.CapacityMbps == 0 {
+			r.CapacityMbps = DefaultRelayCapacityMbps
 		}
 	}
 	if len(c.Routes) > 0 {
@@ -119,6 +153,34 @@ func (c Config) Validate(self string) error {
 			regions[n.Region] = true
 		}
 	}
+	relayNames := map[string]bool{}
+	for _, r := range c.Relays {
+		if !validName(r.Name) {
+			return fmt.Errorf("relay name %q must be 1-32 characters of [a-z0-9-]", r.Name)
+		}
+		if relayNames[r.Name] {
+			return fmt.Errorf("relay name %q is used twice", r.Name)
+		}
+		relayNames[r.Name] = true
+		if !validName(strings.ToLower(r.Region)) {
+			return fmt.Errorf("relay %s: region %q must be 1-32 characters of [A-Za-z0-9-]", r.Name, r.Region)
+		}
+		if !validHost(r.Host) {
+			return fmt.Errorf("relay %s: host %q must be a host name or IP address", r.Name, r.Host)
+		}
+		if r.Port < 0 || r.Port > 65535 {
+			return fmt.Errorf("relay %s: port %d is out of range", r.Name, r.Port)
+		}
+		if r.CapacityMbps < 0 {
+			return fmt.Errorf("relay %s has a negative capacity", r.Name)
+		}
+		if r.Metrics != "" {
+			u, err := url.Parse(r.Metrics)
+			if err != nil || (u.Scheme != "http" && u.Scheme != "https") || u.Host == "" || u.User != nil {
+				return fmt.Errorf("relay %s: metrics must be an http(s)://host:port/path URL", r.Name)
+			}
+		}
+	}
 	for country, region := range c.Routes {
 		if country != "*" && !validCountry(strings.ToUpper(country)) {
 			return fmt.Errorf("route %q: the key must be a two-letter ISO 3166 code or \"*\"", country)
@@ -137,6 +199,27 @@ func validName(s string) bool {
 	for _, r := range s {
 		if !(r >= 'a' && r <= 'z' || r >= '0' && r <= '9' || r == '-') {
 			return false
+		}
+	}
+	return true
+}
+
+// validHost accepts an IP address or a DNS host name.
+func validHost(s string) bool {
+	if _, err := netip.ParseAddr(s); err == nil {
+		return true
+	}
+	if len(s) == 0 || len(s) > 253 {
+		return false
+	}
+	for _, label := range strings.Split(s, ".") {
+		if len(label) == 0 || len(label) > 63 || label[0] == '-' || label[len(label)-1] == '-' {
+			return false
+		}
+		for _, r := range label {
+			if !(r >= 'a' && r <= 'z' || r >= 'A' && r <= 'Z' || r >= '0' && r <= '9' || r == '-') {
+				return false
+			}
 		}
 	}
 	return true
@@ -212,7 +295,35 @@ func Diff(old, new Config) []string {
 			lines = append(lines, fmt.Sprintf("~ route %s -> %s  =>  %s", country, before, after))
 		}
 	}
+	oldRelays := map[string]Relay{}
+	for _, r := range old.Relays {
+		oldRelays[r.Name] = r
+	}
+	newRelays := map[string]bool{}
+	for _, r := range new.Relays {
+		newRelays[r.Name] = true
+		before, ok := oldRelays[r.Name]
+		switch {
+		case !ok:
+			lines = append(lines, "+ relay "+describeRelay(r))
+		case before != r:
+			lines = append(lines, "~ relay "+describeRelay(before)+"  =>  "+describeRelay(r))
+		}
+	}
+	for _, r := range old.Relays {
+		if !newRelays[r.Name] {
+			lines = append(lines, "- relay "+describeRelay(r))
+		}
+	}
 	return lines
+}
+
+func describeRelay(r Relay) string {
+	s := fmt.Sprintf("%s %s:%d region=%s capacity=%dMbps", r.Name, r.Host, r.Port, r.Region, r.CapacityMbps)
+	if r.Metrics != "" {
+		s += " metrics=" + r.Metrics
+	}
+	return s
 }
 
 func describeNode(n Node) string {

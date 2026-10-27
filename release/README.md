@@ -122,6 +122,34 @@ sudo matrix-fleet stats 7       # requests, connected/failed by path, errors, pe
 sudo matrix-fleet -json stats 7 # the same as JSON
 ```
 
+## Relay stream servers per region
+
+With `relays` in config.json, each viewing session gets the relay of the
+camera's region (the region of the node it is on) plus one from another region
+as a backup, with a user name and password minted for that session and valid
+for 24 hours; nothing long-lived reaches cameras or viewers.
+
+```json
+"relays": [
+  {"name": "turn-eu00", "region": "DE", "host": "turn-eu00.5gen.care", "port": 3478,
+   "capacity_mbps": 800, "metrics": "http://10.10.0.5:9641/metrics"}
+]
+```
+
+Each relay runs coturn with a shared secret:
+
+```
+use-auth-secret
+static-auth-secret=<secret>
+realm=5gen.care
+```
+
+Every server that hands the relay out keeps the same secret in
+`/opt/matrix/cfg/relay-secrets.json` (`{"turn-eu00": "<secret>"}`, owner
+`matrix`, mode 0600; `sudo ./setup.sh relay-secrets FILE`). It is read on each
+viewing request. A relay without a secret on a server is not handed out by
+that server; with none at all the server keeps using `cfg/turn.conf`.
+
 ## Limits on the public port
 
 The server limits each source address (IPv6: each /64) by default: 20 Center
