@@ -367,6 +367,8 @@ Before login a connection gets nothing else; unauthenticated connections are cap
 - A Reserved IP for Center, so `matrix.5gen.care` survives a droplet replacement.
 - A node outside DigitalOcean joins over WireGuard; nothing else changes.
 
+**Built so far.** (3) `config.json` with routes, `matrix_cc fleet check|apply|rollback` (the `matrix-fleet` wrapper on Center), reload on SIGHUP (`systemctl reload matrix`); `-config-file` replaces `-nodes-file` (kept as an alias); setup.sh moves `cfg/sid/nodes.json` to `cfg/config.json`. Until step 4 the wrapper reads the result from the journal and `check` does not count affected cameras.
+
 **Build order.** (1) this design; (2) server binary named `matrix_cc_<version>`, installed as `matrix_cc`; (3) `config.json` with routes and `check`/`apply`/`rollback`; (4) admin socket, `status`/`stats`, `/v1/admin/stats` leaves 443; (5) the link; (6) rate limits; (7) relays with expiring credentials; (8) relay load. Then the DigitalOcean move and a failover drill.
 
 ### Future entitlement and revocation target

@@ -53,25 +53,46 @@ Upgrades keep the installed file. Without it, cameras get no TURN relay.
 
 ## Fleet (several control server nodes)
 
-Center (this server) can spread cameras over several control server nodes. List
-them in `/opt/matrix/cfg/sid/nodes.json` (owner `matrix`, mode 0600) and run
-`sudo ./setup.sh upgrade`:
+Center (this server) can spread cameras over several control server nodes,
+listed with the country routes in `/opt/matrix/cfg/config.json`:
 
 ```json
-{"nodes": [
-  {"address": "wss://matrix.5gen.care:443/", "region": "us-east", "countries": ["US"]},
-  {"address": "wss://sg1.5gen.care:443/", "region": "sg", "countries": ["VN", "SG"], "capacity": 60000,
-   "token_sha256": "<sha256 hex of that node's report token>"}
-]}
+{
+  "nodes": [
+    {"name": "us00", "address": "wss://matrix.5gen.care:443/", "region": "US"},
+    {"name": "eu00", "address": "wss://matrix-eu00.5gen.care:443/", "region": "DE", "capacity": 60000,
+     "token_sha256": "<sha256 hex of that node's report token>"}
+  ],
+  "routes": {"IT": "DE", "DE": "DE", "*": "US"}
+}
 ```
+
+- `routes` maps an ISO 3166 two-letter country (`GB`, not `UK`) to a region;
+  `*` is every other country. A region with several nodes splits its cameras
+  by load; a region that is down or full sends them to the least loaded node.
+  A node's own `"countries": [...]` list still works when no route names the
+  country.
+- Change the file only with `matrix-fleet`, working on a copy:
+
+```bash
+sudo cp /opt/matrix/cfg/config.json ~/new.json && nano ~/new.json
+sudo matrix-fleet check ~/new.json      # validate and show the changes
+sudo matrix-fleet apply ~/new.json      # install as the next version and reload (no restart)
+sudo matrix-fleet rollback [VERSION]    # re-apply the previous (or a given) version
+```
+
+  Every version is kept in `/opt/matrix/cfg/config.d/`. A rejected file
+  changes nothing. Cameras already connected stay where they are; the change
+  applies to new connections.
 
 Every other node runs with the same `-kid` and Center public key and reports to
 Center every 15 s: `-report-to https://matrix.5gen.care/ -node-token-file FILE`
 (the token, 32+ bytes, mode 0600). Center sends each camera to the node it is
-already on, else to the least loaded healthy node of its country's region, and
-sends viewers to the node the camera is on. For the country choice, put the
-DB-IP "IP to Country Lite" CSV (CC BY 4.0, https://db-ip.com) at
-`/opt/matrix/cfg/geoip.csv`.
+already on (if that is still in its region), else to the least loaded healthy
+node of its region, and sends viewers to the node the camera is on. For the
+country choice, put the DB-IP "IP to Country Lite" CSV (CC BY 4.0,
+https://db-ip.com) at `/opt/matrix/cfg/geoip.csv`; `matrix-fleet check` then
+also warns about countries no IP range carries.
 
 Viewing counters (per UTC day, 31 days, kept in `cfg/sid/stats.json`) for the
 whole fleet:

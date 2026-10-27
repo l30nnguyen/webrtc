@@ -12,10 +12,7 @@ import (
 	"crypto/sha256"
 	"crypto/subtle"
 	"encoding/hex"
-	"encoding/json"
 	"errors"
-	"fmt"
-	"os"
 	"strings"
 	"sync"
 	"time"
@@ -39,21 +36,20 @@ const (
 	MaxReportCameras = 200000
 )
 
-// Node is one entry of the nodes file.
+// Node is one entry of the configuration's node list.
 type Node struct {
+	// Name is an optional short label (for example "eu00").
+	Name string `json:"name,omitempty"`
 	// Address is the node's exact WSS root, also its ticket audience.
 	Address string `json:"address"`
 	Region  string `json:"region"`
-	// Countries lists ISO 3166 codes whose cameras prefer this node.
+	// Countries lists ISO 3166 codes whose cameras prefer this node, unless
+	// the configuration's routes say otherwise.
 	Countries []string `json:"countries,omitempty"`
 	Capacity  int      `json:"capacity,omitempty"`
 	// TokenSHA256 is the hex SHA-256 of the token the node reports with.
 	// The node that runs Center has none.
 	TokenSHA256 string `json:"token_sha256,omitempty"`
-}
-
-type file struct {
-	Nodes []Node `json:"nodes"`
 }
 
 // Report is what a node sends to Center.
@@ -83,6 +79,9 @@ type Registry struct {
 	nodes    []*nodeState
 	byAddr   map[string]*nodeState
 	location map[string]*nodeState // camera device ID -> node it is online on
+	routes   map[string]string
+	version  int
+	self     string
 	local    Local
 	now      func() time.Time
 }
@@ -91,61 +90,81 @@ type Registry struct {
 // wrong token.
 var ErrUnauthorized = errors.New("unknown node or wrong token")
 
-// Load reads the nodes file. selfAddress is the node running Center; it is
-// added with default settings when the file does not list it.
+// Load reads a configuration file. selfAddress is the node running Center; it
+// is added with default settings when the file does not list it.
 func Load(path, selfAddress string, local Local, now func() time.Time) (*Registry, error) {
-	data, err := os.ReadFile(path)
+	config, err := LoadConfig(path)
 	if err != nil {
 		return nil, err
 	}
-	var f file
-	decoder := json.NewDecoder(strings.NewReader(string(data)))
-	decoder.DisallowUnknownFields()
-	if err := decoder.Decode(&f); err != nil {
-		return nil, fmt.Errorf("nodes file: %w", err)
-	}
-	return New(f.Nodes, selfAddress, local, now)
+	return NewFromConfig(config, selfAddress, local, now)
 }
 
 // New builds a registry from node entries.
 func New(nodes []Node, selfAddress string, local Local, now func() time.Time) (*Registry, error) {
+	return NewFromConfig(Config{Nodes: nodes}, selfAddress, local, now)
+}
+
+// NewFromConfig builds a registry from a configuration.
+func NewFromConfig(config Config, selfAddress string, local Local, now func() time.Time) (*Registry, error) {
 	if now == nil {
 		now = time.Now
 	}
-	r := &Registry{byAddr: map[string]*nodeState{}, location: map[string]*nodeState{}, local: local, now: now}
-	hasSelf := false
-	for _, n := range nodes {
-		if admission.ValidateAudience(n.Address) != nil {
-			return nil, fmt.Errorf("node address %q must be an exact wss://host[:port]/ URL", n.Address)
-		}
-		if r.byAddr[n.Address] != nil {
-			return nil, fmt.Errorf("node %s is listed twice", n.Address)
-		}
-		if n.Capacity < 0 {
-			return nil, fmt.Errorf("node %s has a negative capacity", n.Address)
-		}
-		if n.Capacity == 0 {
-			n.Capacity = DefaultCapacity
-		}
-		for i, c := range n.Countries {
-			n.Countries[i] = strings.ToUpper(c)
-		}
-		self := n.Address == selfAddress
-		if self {
-			hasSelf = true
-		} else if raw, err := hex.DecodeString(n.TokenSHA256); err != nil || len(raw) != sha256.Size {
-			return nil, fmt.Errorf("node %s needs token_sha256 (64 hex characters)", n.Address)
-		}
-		state := &nodeState{Node: n, local: self, cameras: map[string]struct{}{}}
-		r.nodes = append(r.nodes, state)
-		r.byAddr[n.Address] = state
-	}
-	if !hasSelf {
-		state := &nodeState{Node: Node{Address: selfAddress, Capacity: DefaultCapacity}, local: true, cameras: map[string]struct{}{}}
-		r.nodes = append([]*nodeState{state}, r.nodes...)
-		r.byAddr[selfAddress] = state
+	r := &Registry{byAddr: map[string]*nodeState{}, location: map[string]*nodeState{}, self: selfAddress, local: local, now: now}
+	if err := r.Apply(config); err != nil {
+		return nil, err
 	}
 	return r, nil
+}
+
+// Apply replaces the configuration. Nodes that stay keep their reported
+// state (cameras, last report); cameras already connected are not moved, the
+// new routes apply to their next connection. An invalid configuration
+// changes nothing.
+func (r *Registry) Apply(config Config) error {
+	if err := config.Validate(r.self); err != nil {
+		return err
+	}
+	config.Normalize()
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	nodes := make([]*nodeState, 0, len(config.Nodes)+1)
+	byAddr := make(map[string]*nodeState, len(config.Nodes)+1)
+	hasSelf := false
+	for _, n := range config.Nodes {
+		self := n.Address == r.self
+		hasSelf = hasSelf || self
+		state := r.byAddr[n.Address]
+		if state == nil {
+			state = &nodeState{cameras: map[string]struct{}{}}
+		}
+		state.Node, state.local = n, self
+		nodes = append(nodes, state)
+		byAddr[n.Address] = state
+	}
+	if !hasSelf {
+		state := r.byAddr[r.self]
+		if state == nil {
+			state = &nodeState{cameras: map[string]struct{}{}}
+		}
+		state.Node, state.local = Node{Address: r.self, Capacity: DefaultCapacity}, true
+		nodes = append([]*nodeState{state}, nodes...)
+		byAddr[r.self] = state
+	}
+	for id, n := range r.location {
+		if byAddr[n.Address] != n {
+			delete(r.location, id)
+		}
+	}
+	r.nodes, r.byAddr, r.routes, r.version = nodes, byAddr, config.Routes, config.Version
+	return nil
+}
+
+// Version is the version of the active configuration.
+func (r *Registry) Version() int {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	return r.version
 }
 
 // Accept stores a node's report after checking its token.
@@ -218,26 +237,24 @@ func (r *Registry) loadLocked(n *nodeState, now time.Time) float64 {
 
 // Assign picks the node for a camera: its current node when that is healthy,
 // not full and in the camera's region; otherwise the least loaded healthy node
-// of the camera's region (by country), or of the whole fleet. device is the
-// camera's unauthenticated hint (may be empty), country its ISO code (may be
-// empty). It returns "" only when every node is down or full.
+// of the camera's region, or of the whole fleet. The region comes from the
+// routes for the country, else from the nodes' own country lists, else from
+// the "*" route. device is the camera's unauthenticated hint (may be empty),
+// country its ISO code (may be empty). It returns "" only when every node is
+// down or full.
 func (r *Registry) Assign(device, country string) string {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	now := r.now()
 	r.refreshLocalLocked()
 	country = strings.ToUpper(country)
-	var candidates, regional []*nodeState
+	var candidates []*nodeState
 	for _, n := range r.nodes {
-		if !r.healthyLocked(n, now) || r.loadLocked(n, now) >= 1 {
-			continue
-		}
-		candidates = append(candidates, n)
-		if country != "" && contains(n.Countries, country) {
-			regional = append(regional, n)
+		if r.healthyLocked(n, now) && r.loadLocked(n, now) < 1 {
+			candidates = append(candidates, n)
 		}
 	}
-	if len(regional) > 0 {
+	if regional := r.regionalLocked(candidates, country); len(regional) > 0 {
 		candidates = regional
 	}
 	if len(candidates) == 0 {
@@ -259,6 +276,37 @@ func (r *Registry) Assign(device, country string) string {
 	}
 	best.pending = append(best.pending, now)
 	return best.Address
+}
+
+// regionalLocked keeps the candidates of the camera's region.
+func (r *Registry) regionalLocked(candidates []*nodeState, country string) []*nodeState {
+	var regional []*nodeState
+	if region, ok := r.routes[country]; ok && country != "" {
+		for _, n := range candidates {
+			if n.Region == region {
+				regional = append(regional, n)
+			}
+		}
+		return regional
+	}
+	if country != "" {
+		for _, n := range candidates {
+			if contains(n.Countries, country) {
+				regional = append(regional, n)
+			}
+		}
+		if len(regional) > 0 {
+			return regional
+		}
+	}
+	if region, ok := r.routes["*"]; ok {
+		for _, n := range candidates {
+			if n.Region == region {
+				regional = append(regional, n)
+			}
+		}
+	}
+	return regional
 }
 
 func contains(list []string, value string) bool {

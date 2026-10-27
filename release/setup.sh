@@ -14,10 +14,13 @@
 # {"host", "port", "username", "password"}; read on every connection, no restart):
 #   sudo ./setup.sh turn /path/to/turn.conf
 #
-# Fleet (optional, read at start): /opt/matrix/cfg/sid/nodes.json lists the
-# control server nodes ({"nodes":[{"address","region","countries","capacity",
-# "token_sha256"}]}); /opt/matrix/cfg/geoip.csv (DB-IP IP-to-Country Lite CSV)
-# adds the country choice. Run "setup.sh upgrade" after changing either.
+# Fleet (optional): /opt/matrix/cfg/config.json lists the control server nodes
+# and the country routes. Change it only with matrix-fleet (installed in
+# /usr/local/bin), which validates, keeps every version in cfg/config.d/ and
+# reloads the server without a restart:
+#   sudo matrix-fleet check new.json | apply new.json | rollback [VERSION]
+# /opt/matrix/cfg/geoip.csv (DB-IP IP-to-Country Lite CSV) adds the country
+# choice. A phase 2 cfg/sid/nodes.json is moved to config.json on upgrade.
 #
 # Upgrade an installed server to this package (config, keys and data are kept;
 # edit /etc/matrix/matrix.conf first to change a setting, e.g. ASSIGN_ADDRESS=
@@ -27,6 +30,8 @@ set -euo pipefail
 
 APP_DIR=/opt/matrix
 DATA_DIR=$APP_DIR/cfg/sid
+FLEET_CONFIG=$APP_DIR/cfg/config.json
+FLEET_TOOL=/usr/local/bin/matrix-fleet
 CONF=/etc/matrix/matrix.conf
 UNIT=/etc/systemd/system/matrix.service
 HOOK=/etc/letsencrypt/renewal-hooks/deploy/matrix.sh
@@ -60,6 +65,51 @@ install_release() {
     install -m 644 "$PKG_DIR/player/ws.html" "$APP_DIR/player/ws.html"
     install -m 644 "$PKG_DIR/cfg/version" "$APP_DIR/cfg/version"
     install -m 644 "$PKG_DIR/RELEASE" "$APP_DIR/RELEASE"
+    write_fleet_tool
+}
+
+# matrix-fleet runs "matrix_cc fleet" with this Center's paths and address,
+# then reloads the server and prints whether it took the new version.
+write_fleet_tool() {
+    cat > "$FLEET_TOOL" <<'TOOL'
+#!/bin/bash
+# Fleet configuration of this Center: check FILE | apply FILE | rollback [VERSION]
+set -euo pipefail
+[[ $EUID -eq 0 ]] || { echo "matrix-fleet: run with sudo" >&2; exit 1; }
+# shellcheck source=/dev/null
+source /etc/matrix/matrix.conf
+geoip=()
+[[ -f /opt/matrix/cfg/geoip.csv ]] && geoip=(-geoip /opt/matrix/cfg/geoip.csv)
+/opt/matrix/matrix_cc fleet -config /opt/matrix/cfg/config.json -self "wss://$DOMAIN:$PORT/" "${geoip[@]}" "$@"
+case "${1:-}" in
+    apply|rollback)
+        if ! grep -q -- "-config-file" /etc/systemd/system/matrix.service; then
+            echo "The server does not read config.json yet; run setup.sh upgrade from the release package."
+            exit 0
+        fi
+        since=$(date '+%Y-%m-%d %H:%M:%S')
+        systemctl reload matrix
+        result=""
+        for _ in 1 2 3 4 5; do
+            result=$(journalctl -u matrix --since "$since" -o cat | grep "fleet: configuration" | tail -1 || true)
+            [[ -n "$result" ]] && break
+            sleep 1
+        done
+        echo "Server: ${result:-no answer yet; see journalctl -u matrix -n 20}"
+        [[ "$result" == *applied* ]]
+        ;;
+esac
+TOOL
+    chmod 755 "$FLEET_TOOL"
+}
+
+# Phase 2 kept the node list in cfg/sid/nodes.json; it is now config.json.
+migrate_fleet_config() {
+    if [[ -f "$DATA_DIR/nodes.json" && ! -f "$FLEET_CONFIG" ]]; then
+        install -m 644 "$DATA_DIR/nodes.json" "$FLEET_CONFIG"
+        mv "$DATA_DIR/nodes.json" "$DATA_DIR/nodes.json.moved-to-config.json"
+        echo "Moved $DATA_DIR/nodes.json to $FLEET_CONFIG"
+    fi
 }
 
 write_unit() {
@@ -67,10 +117,10 @@ write_unit() {
     [[ -n "${DISCOVERY_TENANT:-}" ]] && discovery=" -discovery-tenant $DISCOVERY_TENANT"
     [[ -n "${PLAYER_ALLOW:-}" ]] && discovery+=" -player-allow $PLAYER_ALLOW"
     [[ -n "${ASSIGN_ADDRESS:-}" ]] && discovery+=" -assign-address $ASSIGN_ADDRESS"
-    # Fleet: with cfg/sid/nodes.json Center assigns cameras across the listed
+    # Fleet: with cfg/config.json Center assigns cameras across the listed
     # control server nodes; cfg/geoip.csv adds the region (country) choice.
-    [[ -f "$DATA_DIR/nodes.json" ]] && discovery+=" -nodes-file $DATA_DIR/nodes.json"
-    [[ -f "$DATA_DIR/nodes.json" && -f "$APP_DIR/cfg/geoip.csv" ]] && discovery+=" -geoip-file $APP_DIR/cfg/geoip.csv"
+    [[ -f "$FLEET_CONFIG" ]] && discovery+=" -config-file $FLEET_CONFIG"
+    [[ -f "$FLEET_CONFIG" && -f "$APP_DIR/cfg/geoip.csv" ]] && discovery+=" -geoip-file $APP_DIR/cfg/geoip.csv"
     discovery+=" -stats-file $DATA_DIR/stats.json"
     cat > "$UNIT" <<EOF
 [Unit]
@@ -88,6 +138,7 @@ ExecStart=$APP_DIR/matrix_cc -root $APP_DIR -port $PORT -https -center \\
     -main-address wss://$DOMAIN:$PORT/ \\
     -blocklist-file $DATA_DIR/blocklist.txt -tenants-file $DATA_DIR/tenants.json \\
     -activation-store $DATA_DIR/activations.jsonl -admin-token-file $DATA_DIR/admin.token$discovery
+ExecReload=/bin/kill -HUP \$MAINPID
 Restart=always
 RestartSec=2
 AmbientCapabilities=CAP_NET_BIND_SERVICE
@@ -217,6 +268,7 @@ cmd_upgrade() {
     # shellcheck source=/dev/null
     source "$CONF"
     install_release
+    migrate_fleet_config
     write_unit
     systemctl restart matrix
     rm -f "$APP_DIR/signaling-server"

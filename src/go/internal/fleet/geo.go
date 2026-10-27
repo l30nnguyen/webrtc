@@ -16,6 +16,7 @@ import (
 // IPv4 and IPv6). Lines whose code is not two letters are skipped.
 type Countries struct {
 	ranges []ipRange
+	codes  map[string]struct{}
 }
 
 type ipRange struct {
@@ -37,7 +38,7 @@ func LoadCountries(path string) (*Countries, error) {
 func ReadCountries(r io.Reader) (*Countries, error) {
 	reader := csv.NewReader(bufio.NewReader(r))
 	reader.FieldsPerRecord = -1
-	c := &Countries{}
+	c := &Countries{codes: map[string]struct{}{}}
 	for line := 1; ; line++ {
 		record, err := reader.Read()
 		if err == io.EOF {
@@ -54,7 +55,9 @@ func ReadCountries(r io.Reader) (*Countries, error) {
 		if errFirst != nil || errLast != nil || first.Is4() != last.Is4() || last.Less(first) {
 			return nil, fmt.Errorf("line %d: invalid range", line)
 		}
-		c.ranges = append(c.ranges, ipRange{first.Unmap(), last.Unmap(), strings.ToUpper(record[2])})
+		code := strings.ToUpper(record[2])
+		c.ranges = append(c.ranges, ipRange{first.Unmap(), last.Unmap(), code})
+		c.codes[code] = struct{}{}
 	}
 	sort.Slice(c.ranges, func(i, j int) bool { return c.ranges[i].first.Less(c.ranges[j].first) })
 	return c, nil
@@ -75,6 +78,12 @@ func (c *Countries) Lookup(addr netip.Addr) string {
 		return r.country
 	}
 	return ""
+}
+
+// Has reports whether any range carries the country code.
+func (c *Countries) Has(country string) bool {
+	_, ok := c.codes[strings.ToUpper(country)]
+	return ok
 }
 
 // Len is the number of ranges loaded.

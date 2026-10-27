@@ -97,6 +97,7 @@ type Server struct {
 	center        http.Handler
 	trustProxyTLS bool
 	stats         *stats.Counters // nil: counters off
+	fleet         *fleet.Registry // Center with a fleet configuration
 }
 
 func NewServer(playerPath string, rootDir string) *Server {
@@ -733,7 +734,7 @@ type serverOptions struct {
 	discoveryTenant   string
 	ticketLifetime    time.Duration
 	viewOrigin        string
-	nodesPath         string // Center: the fleet's nodes file
+	nodesPath         string // Center: the fleet configuration file (config.json)
 	geoipPath         string // Center: IP range -> country file
 }
 
@@ -813,8 +814,10 @@ func configureServer(srv *Server, opts serverOptions) error {
 			mainAddress := opts.mainAddress
 			registry, err = fleet.Load(opts.nodesPath, mainAddress, func() fleet.Report { return srv.LocalReport(mainAddress) }, nil)
 			if err != nil {
-				return fmt.Errorf("-nodes-file: %w", err)
+				return fmt.Errorf("-config-file: %w", err)
 			}
+			srv.fleet = registry
+			log.Printf("Fleet configuration version %d loaded", registry.Version())
 		}
 		var country func(netip.Addr) string
 		if opts.geoipPath != "" {
@@ -924,6 +927,9 @@ func configureHTTPServer(server *http.Server) {
 }
 
 func main() {
+	if len(os.Args) > 1 && os.Args[1] == "fleet" {
+		os.Exit(fleetCommand(os.Args[2:], os.Stdout, os.Stderr))
+	}
 	port := flag.Int("port", 8000, "Listen port")
 	rootDir := flag.String("root", "", "Root directory for config and downloads (default: current dir)")
 	https := flag.Bool("https", false, "Enable HTTPS (uses cert.pem from root directory)")
@@ -947,14 +953,21 @@ func main() {
 	viewOrigin := flag.String("view-origin", "", "optional exact HTTPS browser origin allowed to call POST /v1/view")
 	demoTenant := flag.String("demo-tenant", "", "DEV ONLY: with ticket admission, let unauthenticated Player* clients join this tenant")
 	discoveryTenant := flag.String("discovery-tenant", "", "DEV ONLY: expose camera-only /api/devices metadata for one admitted tenant; also serves the player at /demo/TENANT")
-	nodesPath := flag.String("nodes-file", "", "with -center: JSON list of control server nodes; Center then assigns cameras by region and load and sends viewers to the camera's node")
-	geoipPath := flag.String("geoip-file", "", "with -nodes-file: CSV of first_ip,last_ip,country (DB-IP IP-to-Country Lite) for region choice")
+	configPath := flag.String("config-file", "", "with -center: fleet configuration (config.json: control server nodes and country routes); Center then assigns cameras by region and load and sends viewers to the camera's node; reloaded on SIGHUP")
+	nodesPath := flag.String("nodes-file", "", "alias for -config-file (phase 2 name)")
+	geoipPath := flag.String("geoip-file", "", "with -config-file: CSV of first_ip,last_ip,country (DB-IP IP-to-Country Lite) for region choice")
 	statsPath := flag.String("stats-file", "", "file to keep viewing counters in across restarts (saved every minute)")
 	reportTo := flag.String("report-to", "", "Center URL (https://host[:port]/) this node reports its cameras and counters to")
 	nodeAddress := flag.String("node-address", "", "with -report-to: this node's exact WSS root as listed in Center's nodes file (default: -main-address or -ticket-aud)")
 	nodeTokenPath := flag.String("node-token-file", "", "with -report-to: file holding this node's report token")
 	playerAllowText := flag.String("player-allow", "", "comma-separated IPs/CIDRs allowed to load the player and /api/devices (default: everyone)")
 	flag.Parse()
+	if *nodesPath != "" {
+		if *configPath != "" && *configPath != *nodesPath {
+			log.Fatal("-config-file and -nodes-file must match when both are set")
+		}
+		*configPath = *nodesPath
+	}
 	if *demoTenant != "" && !sid.ValidTenant(*demoTenant) {
 		log.Fatal("-demo-tenant must be 6-8 characters of [a-z0-9]")
 	}
@@ -995,9 +1008,12 @@ func main() {
 		ticketKID: *ticketKID, ticketAudience: *ticketAudience,
 		blocklistPath: *blocklistPath, demoTenant: *demoTenant, discoveryTenant: *discoveryTenant,
 		ticketLifetime: *ticketLifetime, viewOrigin: *viewOrigin,
-		nodesPath: *nodesPath, geoipPath: *geoipPath,
+		nodesPath: *configPath, geoipPath: *geoipPath,
 	}); err != nil {
 		log.Fatal(err)
+	}
+	if srv.fleet != nil {
+		go srv.reloadFleetOnHangup(*configPath)
 	}
 	if *reportTo != "" {
 		centerURL, err := url.Parse(*reportTo)

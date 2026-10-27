@@ -7,6 +7,9 @@ import (
 	"fmt"
 	"log"
 	"net/http"
+	"os"
+	"os/signal"
+	"syscall"
 	"time"
 
 	"signaling-server/internal/admission"
@@ -75,6 +78,29 @@ func (s *Server) CameraConnected(deviceID string) bool {
 		}
 	}
 	return false
+}
+
+// reloadFleetOnHangup re-reads the fleet configuration on every SIGHUP
+// ("systemctl reload matrix", run by matrix-fleet apply). A configuration that
+// does not load or validate is logged and the running one is kept.
+func (s *Server) reloadFleetOnHangup(path string) {
+	hangup := make(chan os.Signal, 1)
+	signal.Notify(hangup, syscall.SIGHUP)
+	for range hangup {
+		if err := s.reloadFleet(path); err != nil {
+			log.Printf("fleet: configuration not applied, keeping version %d: %v", s.fleet.Version(), err)
+			continue
+		}
+		log.Printf("fleet: configuration version %d applied", s.fleet.Version())
+	}
+}
+
+func (s *Server) reloadFleet(path string) error {
+	config, err := fleet.LoadConfig(path)
+	if err != nil {
+		return err
+	}
+	return s.fleet.Apply(config)
 }
 
 // saveStatsLoop writes the counters to path every minute.
