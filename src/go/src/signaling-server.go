@@ -29,7 +29,9 @@ import (
 	"signaling-server/internal/activation"
 	"signaling-server/internal/admission"
 	"signaling-server/internal/center"
+	"signaling-server/internal/fleet"
 	"signaling-server/internal/sid"
+	"signaling-server/internal/stats"
 )
 
 const (
@@ -94,6 +96,7 @@ type Server struct {
 	playerAllow   []netip.Prefix
 	center        http.Handler
 	trustProxyTLS bool
+	stats         *stats.Counters // nil: counters off
 }
 
 func NewServer(playerPath string, rootDir string) *Server {
@@ -233,7 +236,8 @@ func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 
 func isCenterPath(path string) bool {
 	switch path {
-	case "/verify", "/v1/challenge", "/v1/resolve", "/v1/view", "/v1/demo/resolve", "/v1/admin/status", "/v1/admin/release":
+	case "/verify", "/v1/challenge", "/v1/resolve", "/v1/view", "/v1/demo/resolve", "/v1/admin/status", "/v1/admin/release",
+		"/v1/admin/stats", "/v1/node/report":
 		return true
 	default:
 		return false
@@ -263,6 +267,7 @@ func (s *Server) handleWebSocket(w http.ResponseWriter, r *http.Request) {
 		case anonymousDemo:
 			tenant = s.demoTenant
 		case queryErr != nil || !hasTicket || len(tickets) != 1 || len(query) != 1 || tickets[0] == "":
+			s.countStat((*stats.Counters).AdmissionRejected)
 			http.Error(w, "Admission required", http.StatusUnauthorized)
 			return
 		default:
@@ -271,6 +276,7 @@ func (s *Server) handleWebSocket(w http.ResponseWriter, r *http.Request) {
 				if errors.Is(err, admission.ErrUnavailable) {
 					http.Error(w, "Admission temporarily unavailable", http.StatusServiceUnavailable)
 				} else {
+					s.countStat((*stats.Counters).AdmissionRejected)
 					http.Error(w, "Admission required", http.StatusUnauthorized)
 				}
 				return
@@ -431,6 +437,10 @@ func (s *Server) readPump(c *Client) {
 			s.mu.Unlock()
 			continue
 		}
+		if msg["type"] == "report" {
+			s.recordReport(c, msg)
+			continue
+		}
 
 		isViewerRequest := c.Role == admission.RolePlayer && msg["type"] == "request"
 		if isViewerRequest {
@@ -493,6 +503,7 @@ func (s *Server) readPump(c *Client) {
 				if servers := s.loadTurnConfig(); len(servers) > 0 {
 					msg["turn"] = servers
 				}
+				s.countStat((*stats.Counters).Request)
 			}
 			data, _ := json.Marshal(msg)
 			select {
@@ -500,6 +511,9 @@ func (s *Server) readPump(c *Client) {
 			default:
 			}
 		} else {
+			if isViewerRequest {
+				s.countStat((*stats.Counters).CameraOffline)
+			}
 			data, _ := json.Marshal(map[string]string{"type": "error", "msg": "Device offline"})
 			select {
 			case c.Send <- data:
@@ -708,6 +722,7 @@ type serverOptions struct {
 	centerPrivatePath string
 	centerKID         string
 	mainAddress       string
+	assignAddress     string
 	tenantsPath       string
 	activationsPath   string
 	ticketPublicPath  string
@@ -718,6 +733,8 @@ type serverOptions struct {
 	discoveryTenant   string
 	ticketLifetime    time.Duration
 	viewOrigin        string
+	nodesPath         string // Center: the fleet's nodes file
+	geoipPath         string // Center: IP range -> country file
 }
 
 func configureServer(srv *Server, opts serverOptions) error {
@@ -731,7 +748,7 @@ func configureServer(srv *Server, opts serverOptions) error {
 		return errors.New("-discovery-tenant must be 6-8 characters of [a-z0-9]")
 	}
 	srv.SetTrustProxyTLS(opts.trustProxyTLS)
-	centerConfigProvided := opts.sidPublicPath != "" || opts.minIssuedText != "" || opts.centerPrivatePath != "" || opts.centerKID != "" || opts.mainAddress != "" || opts.tenantsPath != "" || opts.activationsPath != ""
+	centerConfigProvided := opts.sidPublicPath != "" || opts.minIssuedText != "" || opts.centerPrivatePath != "" || opts.centerKID != "" || opts.mainAddress != "" || opts.assignAddress != "" || opts.tenantsPath != "" || opts.activationsPath != "" || opts.nodesPath != "" || opts.geoipPath != ""
 	if centerConfigProvided && !opts.centerMode {
 		return errors.New("Center configuration flags require -center")
 	}
@@ -761,6 +778,9 @@ func configureServer(srv *Server, opts serverOptions) error {
 		if err := admission.ValidateAudience(opts.mainAddress); err != nil {
 			return errors.New("-main-address must be an exact wss://host[:port]/ URL")
 		}
+		if opts.assignAddress != "" && admission.ValidateAudience(opts.assignAddress) != nil {
+			return errors.New("-assign-address must be an exact wss://host[:port]/ URL")
+		}
 		if opts.ticketKID != "" && opts.ticketKID != opts.centerKID {
 			return errors.New("-ticket-kid must match the Center signing key ID")
 		}
@@ -788,14 +808,36 @@ func configureServer(srv *Server, opts serverOptions) error {
 				return fmt.Errorf("-admin-token-file: %w", err)
 			}
 		}
+		var registry *fleet.Registry
+		if opts.nodesPath != "" {
+			mainAddress := opts.mainAddress
+			registry, err = fleet.Load(opts.nodesPath, mainAddress, func() fleet.Report { return srv.LocalReport(mainAddress) }, nil)
+			if err != nil {
+				return fmt.Errorf("-nodes-file: %w", err)
+			}
+		}
+		var country func(netip.Addr) string
+		if opts.geoipPath != "" {
+			countries, err := fleet.LoadCountries(opts.geoipPath)
+			if err != nil {
+				return fmt.Errorf("-geoip-file: %w", err)
+			}
+			log.Printf("Loaded %d IP ranges for region choice", countries.Len())
+			country = countries.Lookup
+		}
+		var localStats func() stats.Days
+		if srv.stats != nil {
+			localStats = srv.stats.Snapshot
+		}
 		store, err := activation.Open(opts.activationsPath)
 		if err != nil {
 			return fmt.Errorf("activation store is invalid: %w", err)
 		}
 		handler, err := center.NewHandler(center.Config{
+			Fleet: registry, Country: country, LocalStats: localStats, LocalCamera: srv.CameraConnected,
 			SIDPublicKey: sidPublic, MinIssued: minIssued,
 			Signer:      admission.TicketSigner{PrivateKey: centerPrivate, KeyID: opts.centerKID, Audience: opts.mainAddress, Lifetime: opts.ticketLifetime},
-			MainAddress: opts.mainAddress, Blocklist: blocklist, Tenants: tenants, Activations: store,
+			MainAddress: opts.mainAddress, AssignAddress: opts.assignAddress, Blocklist: blocklist, Tenants: tenants, Activations: store,
 			ChallengeKey: deriveChallengeKey(centerPrivate), TrustProxyTLS: opts.trustProxyTLS,
 			DemoTenant: opts.demoTenant, ViewOrigin: opts.viewOrigin, AdminToken: adminToken,
 		})
@@ -894,6 +936,7 @@ func main() {
 	centerKID := flag.String("kid", "", "Center ticket signing key ID (required by -center; alias: -center-kid)")
 	centerKIDAlias := flag.String("center-kid", "", "Center ticket signing key ID (alias for -kid)")
 	mainAddress := flag.String("main-address", "", "exact MainServer WSS root URL and JWT audience (required by -center)")
+	assignAddress := flag.String("assign-address", "", "with -center: exact WSS root URL of the node to send cameras (proto 3) and their viewers to (default: -main-address); that node must use the same -kid and Center key")
 	tenantsPath := flag.String("tenants-file", "", "registered tenant JSON file (required by -center)")
 	activationsPath := flag.String("activation-store", "", "activation store path (required by -center)")
 	ticketPublicPath := flag.String("ticket-public-key", "", "Center PKIX Ed25519 public key PEM; enables ticket admission for every client")
@@ -904,6 +947,12 @@ func main() {
 	viewOrigin := flag.String("view-origin", "", "optional exact HTTPS browser origin allowed to call POST /v1/view")
 	demoTenant := flag.String("demo-tenant", "", "DEV ONLY: with ticket admission, let unauthenticated Player* clients join this tenant")
 	discoveryTenant := flag.String("discovery-tenant", "", "DEV ONLY: expose camera-only /api/devices metadata for one admitted tenant; also serves the player at /demo/TENANT")
+	nodesPath := flag.String("nodes-file", "", "with -center: JSON list of control server nodes; Center then assigns cameras by region and load and sends viewers to the camera's node")
+	geoipPath := flag.String("geoip-file", "", "with -nodes-file: CSV of first_ip,last_ip,country (DB-IP IP-to-Country Lite) for region choice")
+	statsPath := flag.String("stats-file", "", "file to keep viewing counters in across restarts (saved every minute)")
+	reportTo := flag.String("report-to", "", "Center URL (https://host[:port]/) this node reports its cameras and counters to")
+	nodeAddress := flag.String("node-address", "", "with -report-to: this node's exact WSS root as listed in Center's nodes file (default: -main-address or -ticket-aud)")
+	nodeTokenPath := flag.String("node-token-file", "", "with -report-to: file holding this node's report token")
 	playerAllowText := flag.String("player-allow", "", "comma-separated IPs/CIDRs allowed to load the player and /api/devices (default: everyone)")
 	flag.Parse()
 	if *demoTenant != "" && !sid.ValidTenant(*demoTenant) {
@@ -920,6 +969,13 @@ func main() {
 
 	playerPath := root + "player/ws.html"
 	srv := NewServer(playerPath, root)
+	srv.SetStats(stats.New(nil))
+	if *statsPath != "" {
+		if err := srv.stats.Load(*statsPath); err != nil {
+			log.Fatalf("-stats-file: %v", err)
+		}
+		go srv.saveStatsLoop(*statsPath)
+	}
 	if *demoTenant != "" && *ticketPublicPath == "" && !*centerMode {
 		log.Fatal("-demo-tenant requires ticket admission")
 	}
@@ -934,13 +990,36 @@ func main() {
 		centerMode: *centerMode, adminTokenPath: *adminTokenPath, https: *https, trustProxyTLS: *trustProxyTLS,
 		sidPublicPath: *sidPublicPath, minIssuedText: *minIssuedText,
 		centerPrivatePath: *centerPrivatePath, centerKID: centerSigningKID,
-		mainAddress: *mainAddress, tenantsPath: *tenantsPath,
+		mainAddress: *mainAddress, assignAddress: *assignAddress, tenantsPath: *tenantsPath,
 		activationsPath: *activationsPath, ticketPublicPath: *ticketPublicPath,
 		ticketKID: *ticketKID, ticketAudience: *ticketAudience,
 		blocklistPath: *blocklistPath, demoTenant: *demoTenant, discoveryTenant: *discoveryTenant,
 		ticketLifetime: *ticketLifetime, viewOrigin: *viewOrigin,
+		nodesPath: *nodesPath, geoipPath: *geoipPath,
 	}); err != nil {
 		log.Fatal(err)
+	}
+	if *reportTo != "" {
+		centerURL, err := url.Parse(*reportTo)
+		if err != nil || centerURL.Scheme != "https" || centerURL.Host == "" || centerURL.Path != "/" || centerURL.RawQuery != "" {
+			log.Fatal("-report-to must be https://host[:port]/")
+		}
+		address := *nodeAddress
+		if address == "" {
+			address = *mainAddress
+		}
+		if address == "" {
+			address = *ticketAudience
+		}
+		if admission.ValidateAudience(address) != nil {
+			log.Fatal("-node-address must be an exact wss://host[:port]/ URL")
+		}
+		token, err := readSecretFile(*nodeTokenPath)
+		if err != nil {
+			log.Fatalf("-node-token-file: %v", err)
+		}
+		log.Printf("Reporting to Center %s as node %s", *reportTo, address)
+		go srv.reportLoop(*reportTo, address, string(token))
 	}
 	playerAllow, err := parsePlayerAllow(*playerAllowText)
 	if err != nil {

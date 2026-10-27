@@ -699,25 +699,25 @@ func TestTenantFileReloads(t *testing.T) {
 func TestNonceHelpers(t *testing.T) {
 	key := bytes.Repeat([]byte{1}, 32)
 	now := time.Unix(1_800_000_000, 0)
-	nonce := newNonce(key, now)
+	nonce := newNonce(key, now, "")
 	if len(nonce) != activation.NonceSize {
 		t.Fatalf("nonce length = %d", len(nonce))
 	}
-	if _, ok := checkNonce(key, nonce, now.Add(29*time.Second)); !ok {
+	if _, ok := checkNonce(key, nonce, now.Add(29*time.Second), ""); !ok {
 		t.Fatal("fresh nonce rejected")
 	}
-	if _, ok := checkNonce(key, nonce, now.Add(31*time.Second)); ok {
+	if _, ok := checkNonce(key, nonce, now.Add(31*time.Second), ""); ok {
 		t.Fatal("stale nonce accepted")
 	}
-	if _, ok := checkNonce(key, nonce, now.Add(-10*time.Second)); ok {
+	if _, ok := checkNonce(key, nonce, now.Add(-10*time.Second), ""); ok {
 		t.Fatal("nonce from the future accepted")
 	}
-	if _, ok := checkNonce(bytes.Repeat([]byte{2}, 32), nonce, now); ok {
+	if _, ok := checkNonce(bytes.Repeat([]byte{2}, 32), nonce, now, ""); ok {
 		t.Fatal("nonce accepted under another key")
 	}
 	tampered := append([]byte(nil), nonce...)
 	tampered[3] ^= 1
-	if _, ok := checkNonce(key, tampered, now); ok {
+	if _, ok := checkNonce(key, tampered, now, ""); ok {
 		t.Fatal("tampered timestamp accepted")
 	}
 	_ = hex.EncodeToString
@@ -728,7 +728,7 @@ func TestNoncesAreUniqueWithinTheSameSecond(t *testing.T) {
 	now := time.Unix(1_800_000_000, 0)
 	seen := map[string]bool{}
 	for i := 0; i < 1000; i++ {
-		n := string(newNonce(key, now))
+		n := string(newNonce(key, now, ""))
 		if seen[n] {
 			t.Fatal("duplicate nonce within one second")
 		}

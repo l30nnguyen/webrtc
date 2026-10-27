@@ -15,6 +15,9 @@ const (
 	// ProofContext prefixes every signed message so a signature made for
 	// activation can never be mistaken for another protocol's signature.
 	ProofContext = "center-activate-v1"
+	// ProofContextV2 is the proof of a camera that connects to the node Center
+	// assigned in its challenge (proto 3) instead of its configured origin.
+	ProofContextV2 = "center-activate-v2"
 )
 
 // DeviceID is the identifier of a device: unpadded Base64URL of the SHA-256 of
@@ -31,12 +34,22 @@ func DeviceID(publicKey ed25519.PublicKey) string {
 // mainOrigin is the exact WSS origin the device will connect to, so a proof can
 // not be reused to obtain a ticket for a different MainServer.
 func Message(nonce []byte, sidText, mainOrigin string) ([]byte, error) {
+	return message(ProofContext, nonce, sidText, mainOrigin)
+}
+
+// MessageV2 is Message for proto 3: the same layout under ProofContextV2, where
+// nodeOrigin is the node address Center handed out with the challenge.
+func MessageV2(nonce []byte, sidText, nodeOrigin string) ([]byte, error) {
+	return message(ProofContextV2, nonce, sidText, nodeOrigin)
+}
+
+func message(context string, nonce []byte, sidText, mainOrigin string) ([]byte, error) {
 	if len(nonce) != NonceSize {
 		return nil, errors.New("invalid challenge nonce size")
 	}
 	digest := sha256.Sum256([]byte(sidText))
-	message := make([]byte, 0, len(ProofContext)+NonceSize+len(digest)+len(mainOrigin))
-	message = append(message, ProofContext...)
+	message := make([]byte, 0, len(context)+NonceSize+len(digest)+len(mainOrigin))
+	message = append(message, context...)
 	message = append(message, nonce...)
 	message = append(message, digest[:]...)
 	message = append(message, mainOrigin...)
@@ -47,6 +60,15 @@ func Message(nonce []byte, sidText, mainOrigin string) ([]byte, error) {
 // this exists for tests and tooling.
 func Sign(privateKey ed25519.PrivateKey, nonce []byte, sidText, mainOrigin string) ([]byte, error) {
 	message, err := Message(nonce, sidText, mainOrigin)
+	if err != nil {
+		return nil, err
+	}
+	return ed25519.Sign(privateKey, message), nil
+}
+
+// SignV2 produces a proto 3 proof over the assigned node origin.
+func SignV2(privateKey ed25519.PrivateKey, nonce []byte, sidText, nodeOrigin string) ([]byte, error) {
+	message, err := MessageV2(nonce, sidText, nodeOrigin)
 	if err != nil {
 		return nil, err
 	}

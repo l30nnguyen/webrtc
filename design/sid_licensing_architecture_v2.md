@@ -223,7 +223,69 @@ For a production rollout, build a versioned binary, stage config and keys with t
 
 A prior planning estimate used **~24 signaling nodes** at 4 vCPU/8 GB for 1.0M cameras plus 30% concurrent viewers, based on a planning density of 60,000 connections/node (stop assignments around 80,000; 100,000 hard ceiling). Scenarios were 20 nodes for cameras-only and ~51 nodes for two simultaneous viewers per camera. These are estimates, not measured capacity; reconnect storms, TLS handshakes, memory, descriptor limits, geography, and real media-session mix must be measured before procurement. The one-process client map means a camera and its viewers must currently reach the same signaling process.
 
-The current approved path is one MainServer address per ticket. Ordered multi-node assignment, registry-backed camera-to-node routing, cross-node signaling, load/latency scoring, multi-region failover, Center rate limiting, globally replicated revocation, and shared ephemeral TURN are separate future work. TURN is not required for initial signaling; any production TURN design must separately specify transport policy, ephemeral credentials, bandwidth sizing, and regional failure behavior. Fleet estimates and options are retained here only as planning context; they are not implemented guarantees.
+The current approved path is one MainServer address per ticket. Multi-region assignment and camera-to-node routing are planned in the next section. Cross-node signaling (a camera and a viewer on different nodes), globally replicated revocation, and shared ephemeral TURN are separate future work. TURN is not required for initial signaling; any production TURN design must separately specify transport policy, ephemeral credentials, bandwidth sizing, and regional failure behavior. Fleet estimates and options are retained here only as planning context; they are not implemented guarantees.
+
+### Multi-region signaling (planned 2026-10-26; phases 1–2 built, deployed for test, not committed)
+
+**Goal.** Spread cameras over signaling nodes in several regions. Center stays the one fixed entry point (`matrix.5gen.care`); it decides which node a camera uses and sends viewers to the node that camera is on.
+
+**Why Center-directed and not DNS or a load balancer.** A camera and its viewers must reach the same signaling process (the client map is per process). GeoDNS, anycast, or a regional load balancer routes each client by *its own* location, so a viewer in Vietnam and a camera in the US would land on different nodes and never meet. Only something that knows where the camera is can route the viewer, and that is Center. Signaling latency also matters little: a session exchanges a handful of messages; media goes peer to peer or through TURN. What matters for load is the long-lived camera WebSocket per node, and for quality the TURN relay location (see below).
+
+**Flow.**
+
+1. *Camera.* Every connection attempt starts at Center as today (`/v1/challenge`, `/verify`). Center picks a node: the camera's region from GeoIP of its source address (a country → region table), then the least-loaded healthy node in that region, falling back to the next-nearest region when the region is full or down. It returns that node's WSS address and a ticket whose audience is that node. The camera connects there.
+2. *Node presence.* When a camera registers on a node, the node reports `camera <device_id> online on <node>` to Center; it reports offline when the connection ends. Each node also heartbeats its address, region, connection count, and capacity every few seconds. A node that misses heartbeats is taken out of assignment and its cameras are treated as offline.
+3. *Viewer.* `/v1/view` already returns a MainServer address. It returns the node where the camera is **currently** online (from presence), not where it was first assigned, so failover needs no extra step. A camera that is not online gets a clear "camera offline" answer instead of a ticket. The app connects to the returned address as it does today.
+4. *Failover.* If a camera cannot reach its node, its normal retry goes back to Center, which assigns a healthy node. Assignment is sticky: a camera that reconnects is given the same node while it is healthy and not full, so viewers and caches stay valid.
+
+**Protocol and security changes.**
+
+- *Camera follows the address.* Today the camera signs its own configured origin and refuses any other `main_server_address`. Change: `/v1/challenge` also returns the assigned node address; the camera checks it is `wss://` on an allowed domain list built into the binary (for example `*.5gen.care`), signs it in the activation proof (`"center-activate-v2" || nonce || SHA-256(SID) || node-origin`), and connects to it. Center accepts only proofs over the address it handed out with that nonce. A camera never connects to an address outside its allow list, so a fake or compromised DNS answer cannot send it elsewhere.
+- *Per-node audience.* Center signs tickets with one shared key ID; each node verifies the signature with the shared public key and accepts only tickets whose audience is its own address. A ticket for one node is useless on another.
+- *Node ↔ Center channel.* Presence and heartbeats use an authenticated internal API (per-node token over TLS, or mTLS). Nodes never see the issuer or Center ticket private key.
+- *TURN per region.* Each node hands out its own region's `turn.conf`. Later, Center can give the viewer TURN servers near the camera as well.
+
+**Center itself.** Center must not become the single point of failure or a bottleneck. Every camera reconnect hits it, but the work is small (TLS, two Ed25519 checks, a store lookup). To run more than one Center instance behind `matrix.5gen.care`, the process-local state moves to a shared store: the activation store (today a JSONL file), the challenge nonces, ticket replay, and presence (Postgres for activations, Redis for the short-lived rest). Reconnect storms after a regional outage are already spread by the camera's 25–35 s random wait; Center also needs per-source rate limits.
+
+**Phases.**
+
+| Phase | Scope | Exit test |
+| --- | --- | --- |
+| 1. Redirect | Camera follows the Center-assigned address (allow list, v2 proof); Center returns a configured node address; per-node audience | Dev Center (`webrtc.5gen.care:8443`) sends a camera to prod (`matrix.5gen.care`) and a viewer finds it there |
+| 2. Registry | Node heartbeats and camera presence; Center assigns by region and load; `/v1/view` returns the live node; sticky assignment | Two nodes in two regions; cameras split by region; kill one node, its cameras move and viewers follow |
+| 3. Shared Center | Activation, nonce, replay, presence in a shared store; two or more Center instances; rate limits | One Center instance stopped with no camera or viewer impact |
+| 4. Operations | Regional TURN, per-node metrics and alerts, capacity limits enforced, failover drills | Measured connections per node replace the planning estimates above |
+
+**Phase 1 as built (2026-10-26, under test, not committed).** Center flag `-assign-address wss://host:port/` (setup.sh: `ASSIGN_ADDRESS` in `/etc/matrix/matrix.conf`; default `-main-address`). A camera posts `{"proto":3}` to `/v1/challenge` and gets `main_server_address` with the nonce, whose MAC covers that address (`center-challenge-v2`); it proves with `"center-activate-v2" || nonce || SHA-256(SID) || node` and `/verify` body `proto:3` plus `main_server_address`. The ticket audience is that node. Center remembers in memory which node each camera was last sent to and returns it from `/v1/view` and camera lookup (falls back to the assign address after a Center restart until the camera reconnects). The camera accepts a node only on `MATRIX_NODE_DOMAINS` (CMake, default `5gen.care`) or its configured host, and logs `Connecting to MainServer wss://… (assigned by Center)`. Nodes behind one Center must share its `-kid` and ticket key. Test setup: dev `webrtc.5gen.care:8443` runs `-kid matrix-20261023`; it ran `-assign-address wss://matrix.5gen.care:443/` for the phase 1 test (removed 2026-10-27).
+
+Old cameras that sign only their own origin keep working during the change: Center accepts the v1 proof and sends those cameras to the node with their configured address, until the fleet is upgraded.
+
+**Phase 2 as built (2026-10-26, deployed to prod and dev 2026-10-26/27, not committed).** User-facing names: the signaling server is the **control server**, TURN is the **relay stream server**.
+
+- *Nodes file.* Center flag `-nodes-file` (setup.sh: `/opt/matrix/cfg/sid/nodes.json`): `{"nodes":[{"address","region","countries","capacity","token_sha256"}]}`. The Center's own node needs no token and is read in-process; capacity defaults to 60,000 cameras.
+- *Node reports.* Other nodes run `-report-to https://matrix.5gen.care/ -node-token-file FILE` (default address `-main-address` or `-ticket-aud`, or `-node-address`) and `POST /v1/node/report` every 15 s with `Authorization: Bearer <token>` and `{address, cameras:[device IDs], clients, stats}`. A node silent for 50 s is down: no assignments, its cameras count as offline. The full camera list per report is fine for the test fleet; at 60,000 cameras per node it is about 2.7 MB per report, so phase 3 should send changes only.
+- *Assignment.* The camera sends `{"proto":3,"device":"<device id>"}` (an unauthenticated hint). Center keeps it on its current node when that node is healthy, not full and in the camera's region; otherwise it picks the least-loaded healthy node of the region, with the region from the source address's country (`-geoip-file`, DB-IP IP-to-Country Lite CSV, CC BY 4.0, setup.sh `/opt/matrix/cfg/geoip.csv`), or of the whole fleet. Recent assignments count toward load until the node reports. If every node is down or full, it falls back to `-assign-address`/`-main-address`.
+- *Viewers.* `/v1/view` and camera lookup return the Center's own node when the camera is connected there, else the node that reports the camera online, else the node it was last sent to.
+- *Verified locally:* country choice (camera sent to the regional node), viewer sent to the camera's node, fleet counters added up at Center, and failover (node stopped → the camera reconnected to the Center node within about a minute and viewers followed).
+
+### Connection analytics (built 2026-10-26, deployed, not committed; mobile app not yet reporting)
+
+After each viewing attempt the camera and the viewer app each send one message on their control server connection; the server counts it and never forwards it:
+
+```json
+{"type":"report","result":"connected","path":"relay","relay_offered":true,"relay_ready":true,"setup_ms":840}
+{"type":"report","result":"failed","error":"no_path","relay_offered":true,"relay_ready":false}
+```
+
+| Field | Values |
+| --- | --- |
+| `result` | `connected` or `failed` |
+| `path` (connected) | `lan` (same network), `direct` (internet, no relay), `relay` (relay stream server) |
+| `error` (failed) | `unauthorized` (wrong password), `camera_offline`, `no_offer` (camera never answered), `no_answer` (viewer never answered within 30 s), `no_path` (no network path, relay included), `timeout`, `closed` (left before connecting), `other` |
+| `relay_offered` / `relay_ready` | the relay stream server was configured / it handed out a relay address (false while offered means the relay server is unreachable or refused the credentials) |
+| `setup_ms` | request to connected |
+
+The role (camera or viewer) comes from the ticket, not the message. Each node also counts what it sees itself: viewer requests forwarded, requests for an offline camera, and connections refused at the ticket check. Counters are kept per UTC day for 31 days (`-stats-file`, saved every minute). Nodes include them in their report, and Center serves the fleet total, a per-day breakdown and per-node totals at `GET /v1/admin/stats?days=N` (admin token). The web player sends the viewer report. The mobile app should send the same message on its control server connection: once per Play, when the session connects (with the path from the selected candidate pair) or fails.
 
 ### Future entitlement and revocation target
 

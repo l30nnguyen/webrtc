@@ -168,6 +168,16 @@ func TestGoldenProofVector(t *testing.T) {
 	if got != want {
 		t.Fatalf("golden proof changed:\n%s", got)
 	}
+	// Proto 3: same inputs over an assigned node, pinned in the camera's
+	// center_client_test as well.
+	sig, err = SignV2(privateKey, nonce, goldenSID, "wss://node-b.example.test:443/")
+	if err != nil {
+		t.Fatal(err)
+	}
+	const wantV2 = "419fabc675696897e211cc4a7a7ca7a3ac69414cafeec97f19b420305385504ed96d49f164fb059f7ca0eef775bb1a1a412aba4c66c1ab3535da3432cba5710d"
+	if hex.EncodeToString(sig) != wantV2 {
+		t.Fatalf("golden proto 3 proof changed: %x", sig)
+	}
 }
 
 func deviceRecord(digest, deviceID string) Record {

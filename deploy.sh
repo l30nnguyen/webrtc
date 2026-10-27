@@ -8,6 +8,7 @@
 #         (systemd matrix.service, config and data kept).
 #
 # Usage: ./deploy.sh dev|prod
+#   ALLOW_DIRTY=1 deploys uncommitted changes as a -dirty test package.
 set -euo pipefail
 
 TARGET="${1:-}"
@@ -31,10 +32,10 @@ if [[ "$TARGET" == prod ]]; then
     [[ "$answer" == prod ]] || { echo "Aborted."; exit 1; }
 fi
 
-# make_release.sh refuses uncommitted changes and stops on a build failure.
+# make_release.sh refuses uncommitted changes (unless ALLOW_DIRTY=1) and stops
+# on a build failure.
 "$ROOT/release/make_release.sh"
-VERSION="$(tr -d '[:space:]' < "$ROOT/cfg/version")"
-NAME="matrix-server-$VERSION-$(git -C "$ROOT" rev-parse --short HEAD)"
+NAME="$(cat "$ROOT/dist/LATEST")"
 TARBALL="$ROOT/dist/$NAME.tar.gz"
 
 STAMP="$(date -u +%Y%m%dT%H%M%SZ)"

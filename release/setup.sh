@@ -13,8 +13,14 @@
 # {"host", "port", "username", "password"}; read on every connection, no restart):
 #   sudo ./setup.sh turn /path/to/turn.conf
 #
+# Fleet (optional, read at start): /opt/matrix/cfg/sid/nodes.json lists the
+# control server nodes ({"nodes":[{"address","region","countries","capacity",
+# "token_sha256"}]}); /opt/matrix/cfg/geoip.csv (DB-IP IP-to-Country Lite CSV)
+# adds the country choice. Run "setup.sh upgrade" after changing either.
+#
 # Upgrade an installed server to this package (config, keys and data are kept;
-# edit /etc/matrix/matrix.conf first to change a setting):
+# edit /etc/matrix/matrix.conf first to change a setting, e.g. ASSIGN_ADDRESS=
+# wss://node.example:443/ to send new cameras and their viewers to another node):
 #   sudo ./setup.sh upgrade
 set -euo pipefail
 
@@ -54,6 +60,12 @@ write_unit() {
     local discovery=""
     [[ -n "${DISCOVERY_TENANT:-}" ]] && discovery=" -discovery-tenant $DISCOVERY_TENANT"
     [[ -n "${PLAYER_ALLOW:-}" ]] && discovery+=" -player-allow $PLAYER_ALLOW"
+    [[ -n "${ASSIGN_ADDRESS:-}" ]] && discovery+=" -assign-address $ASSIGN_ADDRESS"
+    # Fleet: with cfg/sid/nodes.json Center assigns cameras across the listed
+    # control server nodes; cfg/geoip.csv adds the region (country) choice.
+    [[ -f "$DATA_DIR/nodes.json" ]] && discovery+=" -nodes-file $DATA_DIR/nodes.json"
+    [[ -f "$DATA_DIR/nodes.json" && -f "$APP_DIR/cfg/geoip.csv" ]] && discovery+=" -geoip-file $APP_DIR/cfg/geoip.csv"
+    discovery+=" -stats-file $DATA_DIR/stats.json"
     cat > "$UNIT" <<EOF
 [Unit]
 Description=Matrix signaling server

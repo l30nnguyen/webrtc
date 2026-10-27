@@ -51,6 +51,36 @@ sudo ./setup.sh turn /path/to/turn.conf
 
 Upgrades keep the installed file. Without it, cameras get no TURN relay.
 
+## Fleet (several control server nodes)
+
+Center (this server) can spread cameras over several control server nodes. List
+them in `/opt/matrix/cfg/sid/nodes.json` (owner `matrix`, mode 0600) and run
+`sudo ./setup.sh upgrade`:
+
+```json
+{"nodes": [
+  {"address": "wss://matrix.5gen.care:443/", "region": "us-east", "countries": ["US"]},
+  {"address": "wss://sg1.5gen.care:443/", "region": "sg", "countries": ["VN", "SG"], "capacity": 60000,
+   "token_sha256": "<sha256 hex of that node's report token>"}
+]}
+```
+
+Every other node runs with the same `-kid` and Center public key and reports to
+Center every 15 s: `-report-to https://matrix.5gen.care/ -node-token-file FILE`
+(the token, 32+ bytes, mode 0600). Center sends each camera to the node it is
+already on, else to the least loaded healthy node of its country's region, and
+sends viewers to the node the camera is on. For the country choice, put the
+DB-IP "IP to Country Lite" CSV (CC BY 4.0, https://db-ip.com) at
+`/opt/matrix/cfg/geoip.csv`.
+
+Viewing counters (per UTC day, 31 days, kept in `cfg/sid/stats.json`) for the
+whole fleet:
+
+```bash
+curl -s -H "Authorization: Bearer $(sudo cat /opt/matrix/cfg/sid/admin.token)" \
+     "https://matrix.5gen.care/v1/admin/stats?days=7"
+```
+
 ## Upgrade
 
 ```bash

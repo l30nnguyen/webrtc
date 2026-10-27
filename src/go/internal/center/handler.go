@@ -15,16 +15,24 @@ import (
 	"math"
 	"mime"
 	"net/http"
+	"net/netip"
 	"net/url"
+	"strconv"
 	"strings"
+	"sync"
 	"time"
 
 	"signaling-server/internal/activation"
 	"signaling-server/internal/admission"
+	"signaling-server/internal/fleet"
 	"signaling-server/internal/sid"
+	"signaling-server/internal/stats"
 )
 
 const MaxRequestBytes = 4096
+
+// MaxNodeReportBytes bounds a node's report (its camera list and counters).
+const MaxNodeReportBytes = 16 << 20
 
 // Activations is the binding store Center needs; *activation.Store implements it.
 type Activations interface {
@@ -39,9 +47,26 @@ type Config struct {
 	MinIssued    time.Time
 	Signer       admission.TicketSigner
 	MainAddress  string
-	Blocklist    admission.Blocklist
-	Tenants      TenantSource
-	Activations  Activations
+	// AssignAddress is the node (exact WSS root) Center sends proto 3 cameras
+	// to, and their viewers after them. Empty means MainAddress. Every node it
+	// names must verify tickets with this Center's key ID and public key.
+	AssignAddress string
+	// Fleet, when set, replaces AssignAddress: Center picks the node per camera
+	// from the nodes' reports (region, load, where the camera already is) and
+	// sends viewers to the node the camera is online on.
+	Fleet *fleet.Registry
+	// Country maps a camera's source address to an ISO country code for
+	// Fleet's region choice; nil means no region preference.
+	Country func(netip.Addr) string
+	// LocalStats returns the counters of the node running Center, for
+	// /v1/admin/stats when there is no Fleet.
+	LocalStats func() stats.Days
+	// LocalCamera reports whether a camera is connected to the node running
+	// Center; such a camera's viewers always go to this node.
+	LocalCamera func(deviceID string) bool
+	Blocklist   admission.Blocklist
+	Tenants     TenantSource
+	Activations Activations
 	// ChallengeKey keys the stateless challenge MAC (at least 32 bytes). All
 	// Center instances behind one address must share it.
 	ChallengeKey []byte
@@ -67,6 +92,10 @@ type Handler struct {
 	config  Config
 	nonces  *admission.ReplayCache
 	tickets admission.TicketVerifier
+	// nodes remembers which node each camera was last sent to, so viewers
+	// follow it. Process-local until node presence replaces it.
+	nodesMu sync.Mutex
+	nodes   map[string]string
 }
 
 func NewHandler(config Config) (*Handler, error) {
@@ -82,6 +111,12 @@ func NewHandler(config Config) (*Handler, error) {
 	}
 	if config.MainAddress == "" || config.Signer.Audience != config.MainAddress || admission.ValidateAudience(config.MainAddress) != nil {
 		return nil, errors.New("MainServer address and ticket audience must be the same exact WSS root URL")
+	}
+	if config.AssignAddress == "" {
+		config.AssignAddress = config.MainAddress
+	}
+	if admission.ValidateAudience(config.AssignAddress) != nil {
+		return nil, errors.New("assigned node address must be an exact WSS root URL")
 	}
 	if config.Signer.Lifetime > admission.MaxTicketLifetime {
 		return nil, errors.New("ticket lifetime exceeds the maximum")
@@ -113,10 +148,38 @@ func NewHandler(config Config) (*Handler, error) {
 	if config.Logf == nil {
 		config.Logf = log.Printf
 	}
-	h := &Handler{config: config}
+	h := &Handler{config: config, nodes: map[string]string{}}
 	h.nonces = &admission.ReplayCache{Now: h.now}
 	h.tickets = admission.TicketVerifier{PublicKey: config.Signer.PrivateKey.Public().(ed25519.PublicKey), KeyID: config.Signer.KeyID, Audience: config.MainAddress, Now: h.now}
 	return h, nil
+}
+
+// rememberNode records the node a camera was just given a ticket for.
+func (h *Handler) rememberNode(deviceID, node string) {
+	h.nodesMu.Lock()
+	h.nodes[deviceID] = node
+	h.nodesMu.Unlock()
+}
+
+// nodeFor is the node a camera is online on: this Center's own node when the
+// camera is connected here, else the fleet's view, else the node it was last
+// sent to; a camera Center knows nothing about is assumed to be on the
+// assigned node.
+func (h *Handler) nodeFor(deviceID string) string {
+	if h.config.LocalCamera != nil && h.config.LocalCamera(deviceID) {
+		return h.config.MainAddress
+	}
+	if h.config.Fleet != nil {
+		if node, online := h.config.Fleet.Locate(deviceID); online {
+			return node
+		}
+	}
+	h.nodesMu.Lock()
+	defer h.nodesMu.Unlock()
+	if node, ok := h.nodes[deviceID]; ok {
+		return node
+	}
+	return h.config.AssignAddress
 }
 
 func (h *Handler) now() time.Time {
@@ -156,6 +219,10 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		h.handleAdminStatus(w, r)
 	case "/v1/admin/release":
 		h.handleAdminRelease(w, r)
+	case "/v1/admin/stats":
+		h.handleAdminStats(w, r)
+	case "/v1/node/report":
+		h.handleNodeReport(w, r)
 	default:
 		writeJSON(w, http.StatusNotFound, map[string]string{"error": "not found"})
 	}
@@ -225,16 +292,55 @@ func decodeBody(w http.ResponseWriter, r *http.Request, dst any) bool {
 	return true
 }
 
+// handleChallenge issues a nonce. A camera that sends {"proto":3} also gets the
+// node to connect to, bound into the nonce; any other body (older cameras send
+// {}) gets the original two-field answer, so they keep their configured origin.
 func (h *Handler) handleChallenge(w http.ResponseWriter, r *http.Request) {
 	if !requirePOST(w, r) {
 		return
 	}
-	_, _ = io.Copy(io.Discard, http.MaxBytesReader(w, r.Body, MaxRequestBytes))
-	nonce := newNonce(h.config.ChallengeKey, h.now())
+	body, _ := io.ReadAll(http.MaxBytesReader(w, r.Body, MaxRequestBytes))
+	var request struct {
+		Proto int `json:"proto"`
+		// Device is the camera's own unauthenticated hint, used only to keep
+		// it on the node it is already on.
+		Device string `json:"device"`
+	}
+	if json.Unmarshal(body, &request) != nil || request.Proto != 3 {
+		nonce := newNonce(h.config.ChallengeKey, h.now(), "")
+		writeJSON(w, http.StatusOK, struct {
+			Nonce     string `json:"nonce"`
+			ExpiresIn int    `json:"expires_in"`
+		}{base64.RawURLEncoding.EncodeToString(nonce), int(ChallengeLifetime.Seconds())})
+		return
+	}
+	node := h.assign(r, request.Device)
+	nonce := newNonce(h.config.ChallengeKey, h.now(), node)
 	writeJSON(w, http.StatusOK, struct {
-		Nonce     string `json:"nonce"`
-		ExpiresIn int    `json:"expires_in"`
-	}{base64.RawURLEncoding.EncodeToString(nonce), int(ChallengeLifetime.Seconds())})
+		Nonce             string `json:"nonce"`
+		ExpiresIn         int    `json:"expires_in"`
+		MainServerAddress string `json:"main_server_address"`
+	}{base64.RawURLEncoding.EncodeToString(nonce), int(ChallengeLifetime.Seconds()), node})
+}
+
+// assign picks the node for a proto 3 camera.
+func (h *Handler) assign(r *http.Request, device string) string {
+	if h.config.Fleet == nil {
+		return h.config.AssignAddress
+	}
+	if !admission.ValidDeviceID(device) {
+		device = ""
+	}
+	country := ""
+	if h.config.Country != nil {
+		if addrPort, err := netip.ParseAddrPort(r.RemoteAddr); err == nil {
+			country = h.config.Country(addrPort.Addr())
+		}
+	}
+	if node := h.config.Fleet.Assign(device, country); node != "" {
+		return node
+	}
+	return h.config.AssignAddress // every node down or full: fall back
 }
 
 type verifyRequest struct {
@@ -243,6 +349,8 @@ type verifyRequest struct {
 	DevicePub string `json:"device_pub"`
 	Nonce     string `json:"nonce"`
 	Sig       string `json:"sig"`
+	// MainServerAddress is the node from the proto 3 challenge; empty for proto 2.
+	MainServerAddress string `json:"main_server_address,omitempty"`
 }
 
 func decodeFixed(text string, size int) ([]byte, bool) {
@@ -279,7 +387,17 @@ func (h *Handler) handleVerify(w http.ResponseWriter, r *http.Request) {
 	devicePub, okPub := decodeFixed(request.DevicePub, ed25519.PublicKeySize)
 	nonce, okNonce := decodeFixed(request.Nonce, activation.NonceSize)
 	signature, okSig := decodeFixed(request.Sig, ed25519.SignatureSize)
-	if request.Proto != 2 || !okPub || !okNonce || !okSig || strings.TrimSpace(request.SID) != request.SID {
+	// Proto 2 proves for this Center's MainServer; proto 3 for the node the
+	// challenge named, which the nonce MAC binds.
+	node := h.config.MainAddress
+	switch {
+	case request.Proto == 2 && request.MainServerAddress == "":
+	case request.Proto == 3 && admission.ValidateAudience(request.MainServerAddress) == nil:
+		node = request.MainServerAddress
+	default:
+		okPub = false
+	}
+	if !okPub || !okNonce || !okSig || strings.TrimSpace(request.SID) != request.SID {
 		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "invalid request"})
 		return
 	}
@@ -313,12 +431,21 @@ func (h *Handler) handleVerify(w http.ResponseWriter, r *http.Request) {
 
 	// The device proves it holds the key it presents, answering a challenge
 	// this Center issued, bound to this SID and to the MainServer origin.
-	expires, fresh := checkNonce(h.config.ChallengeKey, nonce, h.now())
+	var challengeNode string
+	if request.Proto == 3 {
+		challengeNode = node
+	}
+	expires, fresh := checkNonce(h.config.ChallengeKey, nonce, h.now(), challengeNode)
 	if !fresh {
 		h.reject(w)
 		return
 	}
-	message, err := activation.Message(nonce, request.SID, h.config.MainAddress)
+	var message []byte
+	if request.Proto == 3 {
+		message, err = activation.MessageV2(nonce, request.SID, node)
+	} else {
+		message, err = activation.Message(nonce, request.SID, node)
+	}
 	if err != nil || !ed25519.Verify(ed25519.PublicKey(devicePub), message, signature) {
 		h.reject(w)
 		return
@@ -379,11 +506,15 @@ func (h *Handler) handleVerify(w http.ResponseWriter, r *http.Request) {
 	}
 
 	signer := h.config.Signer
+	signer.Audience = node
 	signer.Now = h.now
 	ticket, err := signer.Sign(deviceID, digest, verified.Tenant, role)
 	if err != nil {
 		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "verification unavailable"})
 		return
+	}
+	if role == admission.RoleCamera {
+		h.rememberNode(deviceID, node)
 	}
 	writeJSON(w, http.StatusOK, struct {
 		MainServerAddress string `json:"main_server_address"`
@@ -392,7 +523,7 @@ func (h *Handler) handleVerify(w http.ResponseWriter, r *http.Request) {
 		DeviceID          string `json:"device_id"`
 		Tenant            string `json:"tenant"`
 		Role              string `json:"role"`
-	}{h.config.MainAddress, ticket, int(signer.EffectiveLifetime().Seconds()), deviceID, verified.Tenant, role})
+	}{node, ticket, int(signer.EffectiveLifetime().Seconds()), deviceID, verified.Tenant, role})
 }
 
 type resolveResponse struct {
@@ -421,7 +552,7 @@ func (h *Handler) lookupCamera(tenant, ref string) (resolveResponse, error) {
 	if blocked {
 		return resolveResponse{}, nil
 	}
-	return resolveResponse{Found: true, DeviceID: record.DeviceID, MainServerAddress: h.config.MainAddress}, nil
+	return resolveResponse{Found: true, DeviceID: record.DeviceID, MainServerAddress: h.nodeFor(record.DeviceID)}, nil
 }
 
 // handleResolve lets an activated player find a camera of its own tenant from
@@ -527,7 +658,9 @@ func (h *Handler) handleView(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	viewerID := base64.RawURLEncoding.EncodeToString(idBytes[:])
+	node := h.nodeFor(activation.DeviceID)
 	signer := h.config.Signer
+	signer.Audience = node
 	signer.Lifetime = time.Minute
 	signer.Now = h.now
 	ticket, err := signer.SignCameraViewer(viewerID, digest, verified.Tenant, activation.DeviceID)
@@ -543,7 +676,7 @@ func (h *Handler) handleView(w http.ResponseWriter, r *http.Request) {
 		CameraID          string `json:"camera_id"`
 		Tenant            string `json:"tenant"`
 		Role              string `json:"role"`
-	}{h.config.MainAddress, ticket, 60, viewerID, activation.DeviceID, verified.Tenant, admission.RolePlayer})
+	}{node, ticket, 60, viewerID, activation.DeviceID, verified.Tenant, admission.RolePlayer})
 }
 
 // adminAuthorized checks the pairing system's bearer token in constant time.
@@ -645,6 +778,85 @@ func (h *Handler) handleAdminRelease(w http.ResponseWriter, r *http.Request) {
 		"released": true, "changed": changed,
 		"bindable_at": now.Add(activation.ReleaseGrace).Unix(),
 	})
+}
+
+// handleNodeReport takes a node's periodic report: its cameras and counters.
+func (h *Handler) handleNodeReport(w http.ResponseWriter, r *http.Request) {
+	if h.config.Fleet == nil {
+		writeJSON(w, http.StatusNotFound, map[string]string{"error": "not found"})
+		return
+	}
+	if !requirePOST(w, r) {
+		return
+	}
+	header := r.Header.Get("Authorization")
+	token := strings.TrimPrefix(header, "Bearer ")
+	if token == header || token == "" {
+		writeJSON(w, http.StatusUnauthorized, map[string]string{"error": "unauthorized"})
+		return
+	}
+	var report fleet.Report
+	decoder := json.NewDecoder(http.MaxBytesReader(w, r.Body, MaxNodeReportBytes))
+	if decoder.Decode(&report) != nil {
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "invalid request"})
+		return
+	}
+	if err := h.config.Fleet.Accept(token, report); err != nil {
+		if errors.Is(err, fleet.ErrUnauthorized) {
+			h.config.Logf("center: refused a report for node %q", report.Address)
+			writeJSON(w, http.StatusUnauthorized, map[string]string{"error": "unauthorized"})
+		} else {
+			writeJSON(w, http.StatusBadRequest, map[string]string{"error": "invalid request"})
+		}
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"ok": true, "interval_s": int(fleet.ReportInterval.Seconds())})
+}
+
+type nodeStats struct {
+	fleet.NodeStatus
+	Total stats.Day `json:"total"`
+}
+
+// handleAdminStats returns viewing counters for the last ?days=N UTC days
+// (default 7): the fleet total, a per-day breakdown, and each node's total.
+func (h *Handler) handleAdminStats(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet {
+		w.Header().Set("Allow", http.MethodGet)
+		writeJSON(w, http.StatusMethodNotAllowed, map[string]string{"error": "method not allowed"})
+		return
+	}
+	if !h.adminAuthorized(w, r) {
+		return
+	}
+	days := 7
+	if text := r.URL.Query().Get("days"); text != "" {
+		n, err := strconv.Atoi(text)
+		if err != nil || n < 1 || n > stats.KeepDays {
+			writeJSON(w, http.StatusBadRequest, map[string]string{"error": "days must be 1 to 31"})
+			return
+		}
+		days = n
+	}
+	var statuses []fleet.NodeStatus
+	if h.config.Fleet != nil {
+		statuses = h.config.Fleet.Status()
+	} else {
+		local := fleet.NodeStatus{Address: h.config.MainAddress, Healthy: true, Stats: stats.Days{}}
+		if h.config.LocalStats != nil {
+			local.Stats = h.config.LocalStats()
+		}
+		statuses = []fleet.NodeStatus{local}
+	}
+	all := stats.Days{}
+	nodes := make([]nodeStats, 0, len(statuses))
+	for _, status := range statuses {
+		kept, total := stats.Range(status.Stats, days, h.now())
+		all.Add(kept)
+		nodes = append(nodes, nodeStats{NodeStatus: status, Total: total})
+	}
+	byDay, total := stats.Range(all, days, h.now())
+	writeJSON(w, http.StatusOK, map[string]any{"days": days, "total": total, "by_day": byDay, "nodes": nodes})
 }
 
 // handleDemoResolve is the unauthenticated lookup for the demo web player.

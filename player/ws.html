@@ -384,7 +384,7 @@
 
             <!-- Server config row -->
             <div class="input-group" style="margin-bottom:10px">
-                <input type="text" id="serverUrl" placeholder="Signaling Server" value="" style="max-width:280px">
+                <input type="text" id="serverUrl" placeholder="Control Server" value="" style="max-width:280px">
                 <button id="refreshBtn" onclick="fetchDevices()">🔄 Refresh</button>
                 <span id="healthBadge" class="health-badge offline">⚪ Server</span>
                 <label style="display:flex;align-items:center;gap:6px;margin-left:auto">
@@ -462,19 +462,19 @@
 
             <div class="stats-grid">
                 <div class="stat-item">
-                    <div class="stat-label">ICE Connection</div>
+                    <div class="stat-label">Connection</div>
                     <div class="stat-value" id="ice-connection-state">-</div>
                 </div>
                 <div class="stat-item">
-                    <div class="stat-label">ICE Gathering</div>
+                    <div class="stat-label">Address gathering</div>
                     <div class="stat-value" id="ice-gathering-state">-</div>
                 </div>
                 <div class="stat-item">
-                    <div class="stat-label">Signaling</div>
+                    <div class="stat-label">Negotiation</div>
                     <div class="stat-value" id="signaling-state">-</div>
                 </div>
                 <div class="stat-item">
-                    <div class="stat-label">Data Channel</div>
+                    <div class="stat-label">Command channel</div>
                     <div class="stat-value" id="dc-status">-</div>
                 </div>
             </div>
@@ -1421,7 +1421,7 @@
             } else if (!message) {
                 log('❌ Cannot send an empty message', 'warn');
             } else {
-                log('❌ Data channel is not open', 'error');
+                log('❌ Command channel is not open', 'error');
             }
         }
 
@@ -1430,6 +1430,51 @@
                 sendCustomMessage();
             }
         });
+
+        // Connection analytics: one report per Play to the control server
+        // ({"type":"report",...}); the server counts it and never forwards it.
+        const viewReport = {
+            session: null,
+            begin() {
+                this.finish();
+                const session = { startedAt: performance.now(), gotOffer: false, relayOffered: false, relayReady: false, done: false };
+                session.timer = setTimeout(() => this.failed(session.gotOffer ? 'timeout' : 'no_offer'), 30000);
+                this.session = session;
+            },
+            send(fields) {
+                const session = this.session;
+                if (!session || session.done) return;
+                session.done = true;
+                clearTimeout(session.timer);
+                if (!websocket || websocket.readyState !== WebSocket.OPEN) return;
+                try {
+                    websocket.send(JSON.stringify({ type: 'report', relay_offered: session.relayOffered,
+                        relay_ready: session.relayOffered && session.relayReady, ...fields }));
+                } catch (_) {}
+            },
+            failed(error) { this.send({ result: 'failed', error }); },
+            async connected(peer) {
+                const session = this.session;
+                if (!session || session.done) return;
+                let path = 'direct';
+                try {
+                    const stats = await peer.getStats();
+                    const kinds = {};
+                    let pair = null;
+                    stats.forEach(r => { if (r.type === 'local-candidate' || r.type === 'remote-candidate') kinds[r.id] = r.candidateType; });
+                    stats.forEach(r => { if (r.type === 'candidate-pair' && r.state === 'succeeded' && r.nominated) pair = r; });
+                    if (pair) {
+                        const local = kinds[pair.localCandidateId], remote = kinds[pair.remoteCandidateId];
+                        path = local === 'relay' || remote === 'relay' ? 'relay' : local === 'host' && remote === 'host' ? 'lan' : 'direct';
+                    }
+                } catch (_) {}
+                this.send({ result: 'connected', path, setup_ms: Math.round(performance.now() - session.startedAt) });
+            },
+            finish() {
+                if (this.session && !this.session.done) this.failed('closed');
+                this.session = null;
+            }
+        };
 
         function createPeerConnection(offer) {
             const config = {
@@ -1448,15 +1493,17 @@
                     username: firstCandidate.username,
                     credential: firstCandidate.password
                 });
-                log('TURN configured: ' + turnHost, 'info');
+                log('Relay stream server configured: ' + turnHost, 'info');
+                if (viewReport.session) viewReport.session.relayOffered = true;
             } else {
-                log('No TURN server info received from device offer', 'warn');
+                log('No relay stream server received from the camera', 'warn');
             }
 
             let pc = new RTCPeerConnection(config);
             pc.addEventListener('icecandidate', (event) => {
                 if (event.candidate && event.candidate.candidate) {
                     const candidate = event.candidate.candidate;
+                    if (candidate.includes(' typ relay') && viewReport.session) viewReport.session.relayReady = true;
                     if (candidate.includes('.local')) {
                         document.getElementById('mdns-warning').style.display = 'block';
                     }
@@ -1464,7 +1511,7 @@
             });
 
             pc.addEventListener('icecandidateerror', (event) => {
-                log(`❌ ICE candidate error: url=${event.url} errorCode=${event.errorCode} errorText=${event.errorText}`, 'error');
+                log(`❌ Relay stream server error ${event.errorCode}: ${event.errorText}`, 'error');
             });
 
             pc.addEventListener('iceconnectionstatechange', () => {
@@ -1472,9 +1519,11 @@
                 recording.connection(pc);
                 lens.connection(pc);
                 iceConnectionLog.textContent = pc.iceConnectionState;
-                log(`ICE Connection: ${pc.iceConnectionState}`, 'info');
+                log(`Connection: ${pc.iceConnectionState}`, 'info');
 
+                if (pc.iceConnectionState === 'failed') viewReport.failed('no_path');
                 if (pc.iceConnectionState === 'connected' || pc.iceConnectionState === 'completed') {
+                    viewReport.connected(pc);
                     // Track previous bytes for speed calculation
                     window._prevBytesSent = 0;
                     window._prevBytesRecv = 0;
@@ -1637,7 +1686,7 @@
 
             pc.addEventListener('icegatheringstatechange', () => {
                 iceGatheringLog.textContent = pc.iceGatheringState;
-                log(`ICE Gathering: ${pc.iceGatheringState}`, 'info');
+                log(`Address gathering: ${pc.iceGatheringState}`, 'info');
             });
             iceGatheringLog.textContent = pc.iceGatheringState;
 
@@ -1734,7 +1783,7 @@
                     recording.setChannel(pc, channel);
                     lens.setChannel(pc, channel);
                     dcStatusLog.textContent = 'Open';
-                    log('📡 Data channel opened', 'success');
+                    log('📡 Command channel opened', 'success');
                     document.getElementById('dc-command-input').disabled = false;
                     document.getElementById('dc-send-btn').disabled = false;
                 };
@@ -1770,7 +1819,7 @@
                     clearTimeout(dcTimeout);
                     dcTimeout = null;
                     dcStatusLog.textContent = 'Closed';
-                    log('📡 Data channel closed', 'warn');
+                    log('📡 Command channel closed', 'warn');
                     document.getElementById('dc-command-input').disabled = true;
                     document.getElementById('dc-send-btn').disabled = true;
                 };
@@ -1948,7 +1997,8 @@
             websocket = new WebSocket(wsUrl);
 
             websocket.onopen = () => {
-                log('✅ WebSocket connected', 'success');
+                log('✅ Control server connected', 'success');
+                viewReport.begin();
                 document.getElementById('start').style.display = 'none';
                 document.getElementById('stop').style.display = 'inline-block';
                 document.getElementById('media').style.display = 'block';
@@ -1965,14 +2015,19 @@
                 }
                 const message = JSON.parse(evt.data);
                 if (message.type == "offer") {
+                    if (viewReport.session) viewReport.session.gotOffer = true;
                     log('📥 Received offer from camera', 'info');
                     document.getElementById('offer-sdp').textContent = message.sdp;
                     await handleOffer(message);
                 } else if (message.type == "error") {
-                    log(`❌ Error from server: ${message.msg}`, 'error');
+                    log(`❌ Error from control server: ${message.msg}`, 'error');
                     const normalized = String(message.msg || '').toLowerCase();
+                    viewReport.failed(normalized.includes('unauthorized') ? 'unauthorized'
+                        : normalized.includes('offline') ? 'camera_offline' : 'other');
                     document.getElementById('findStatus').textContent = normalized.includes('unauthorized')
                         ? '❌ Camera password was rejected. Check it and try Play again.'
+                        : normalized.includes('offline')
+                            ? '❌ Camera is offline.'
                         : normalized.includes('invalid request')
                             ? '❌ Camera rejected the request. Check the camera password and SID.'
                             : '❌ Camera connection was rejected. Check the camera password and try again.';
@@ -1986,16 +2041,17 @@
             websocket.onclose = () => {
                 password = '';
                 if (websocket === signalingSocket) stop();
-                log('❌ WebSocket closed', 'error');
+                log('❌ Control server connection closed', 'error');
             };
 
             websocket.onerror = (error) => {
                 password = '';
-                log(`❌ WebSocket error: ${error}`, 'error');
+                log('❌ Control server connection error', 'error');
             };
         }
 
         function stop() {
+            viewReport.finish();
             talkback.reset();
             recording.reset();
             lens.reset();
