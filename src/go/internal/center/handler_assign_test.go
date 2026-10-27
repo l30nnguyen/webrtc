@@ -253,3 +253,23 @@ func TestViewersGoToTheCentersOwnNodeWhenTheCameraIsHere(t *testing.T) {
 		t.Fatalf("camera connected here, viewer sent to %s", got)
 	}
 }
+
+// The player page of a fleet node may ask this Center for viewer tickets.
+func TestViewAcceptsTheFleetNodesOrigins(t *testing.T) {
+	local := &fleet.Report{Address: mainAddress}
+	e := fleetEnv(t, local, strings.Repeat("a", 32))
+	for origin, allowed := range map[string]bool{
+		"https://sg1.example.test":     true, // wss://sg1.example.test:443/
+		"https://sg1.example.test:443": false,
+		"https://evil.example.test":    false,
+		"http://sg1.example.test":      false,
+	} {
+		response := e.do(http.MethodPost, "/v1/view", map[string]string{"sid": "x"}, map[string]string{"Origin": origin})
+		if got := response.Code != http.StatusForbidden; got != allowed {
+			t.Errorf("origin %s: code %d, allowed %v", origin, response.Code, allowed)
+		}
+		if allowed && response.Header().Get("Access-Control-Allow-Origin") != origin {
+			t.Errorf("origin %s: no CORS header", origin)
+		}
+	}
+}

@@ -232,7 +232,9 @@ func (h *Handler) handleViewCORS(w http.ResponseWriter, r *http.Request) bool {
 		// Host is preserved by the supported TLS-terminating proxy setup.
 		sameOrigin = "https://" + r.Host
 	}
-	if origin != sameOrigin && (h.config.ViewOrigin == "" || origin != h.config.ViewOrigin) {
+	// The player pages of the fleet's nodes call /v1/view here too.
+	fleetOrigin := h.config.Fleet != nil && h.config.Fleet.NodeOrigin(origin)
+	if origin != sameOrigin && !fleetOrigin && (h.config.ViewOrigin == "" || origin != h.config.ViewOrigin) {
 		writeJSON(w, http.StatusForbidden, map[string]string{"error": "origin not allowed"})
 		return true
 	}

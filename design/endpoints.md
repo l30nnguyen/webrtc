@@ -128,7 +128,7 @@ Response `200` (sent with `Cache-Control: no-store`):
 - **Which node:** the Center's own node if the camera is connected there, else the node that reports it online, else the node it was last sent to.
 - **The ticket** is single-use, valid 60 s, scoped to this one camera and to that node.
 - **Codes:** `401 SID rejected` for a bad SID, a viewer SID, an unknown tenant, a blocklisted SID or a camera never activated. `503` as in 1.2.
-- **Browsers:** allowed from the same origin, or from `-view-origin` (CORS preflight `OPTIONS` supported).
+- **Browsers:** allowed from the same origin, from the HTTPS origin of any node in `config.json` (their player pages), or from `-view-origin` (CORS preflight `OPTIONS` supported).
 
 ### 2.2 `POST https://matrix.5gen.care/v1/resolve`
 
@@ -194,7 +194,7 @@ The role (camera or viewer) comes from the ticket. Reports feed `matrix-fleet st
 | `GET /` | Plain text `OK` (no page) |
 | `GET /demo/<tenant>` | Web player (`ws.html`), only when `-discovery-tenant <tenant>` is set; limited to `-player-allow` IPs when that is set (Center: `/demo/test01`, `115.78.12.186`) |
 | `GET /api/devices[?type=producer]` | Cameras online in the discovery tenant: `{"count":N,"devices":[{"id","nickname","tenant","connected_at","path","type","rtt","sid"}]}`. Only with `-discovery-tenant` or `-demo-tenant`; limited by `-player-allow`. |
-| `GET /api/health` | `{"status":"ok","clients":N,"version":"2.1.1","ticket_admission":true}` |
+| `GET /api/health` | `{"status":"ok","clients":N,"version":"2.1.1","ticket_admission":true}`; a control node adds `"center":"https://matrix.5gen.care"`, which its player page uses for `/v1/view` |
 | `GET /downloads/<path>` | Files under `/opt/matrix/downloads/` (firmware) |
 | `GET /v1/demo/resolve?ref=<64 hex>` | Center only, only with `-demo-tenant` (development): unauthenticated 2.2 for the demo tenant |
 

@@ -731,12 +731,17 @@ func (s *Server) handleHealth(w http.ResponseWriter, r *http.Request) {
 	s.mu.RUnlock()
 
 	w.Header().Set("Access-Control-Allow-Origin", "*")
-	json.NewEncoder(w).Encode(map[string]interface{}{
+	health := map[string]interface{}{
 		"status":           "ok",
 		"clients":          n,
 		"version":          s.loadVersion(),
 		"ticket_admission": s.admission != nil,
-	})
+	}
+	// A control node names its Center, where its player page asks for tickets.
+	if s.nodeLink != nil {
+		health["center"] = "https://" + s.nodeLink.serverName
+	}
+	json.NewEncoder(w).Encode(health)
 }
 
 // downloadWriteTimeout bounds a whole file download. The listener-wide 10 s

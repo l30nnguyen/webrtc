@@ -17,7 +17,8 @@
 #        --center-key center-ticket.pub.pem --kid KID \
 #        --link-to wss://10.10.0.2:8444/ --link-server-name matrix.5gen.care \
 #        [--name eu00] [--region DE] [--port 443] [--blocklist blocklist.txt] \
-#        [--relay-secrets relay-secrets.json] [--turn turn.conf] [--link-ca ca.pem] [--player-allow ...]
+#        [--relay-secrets relay-secrets.json] [--turn turn.conf] [--link-ca ca.pem] [--player-allow ...] \
+#        [--discovery-tenant test01]   (player at /demo/<tenant>, camera list of that tenant on this node)
 #   KID is Center's (KID= in its /etc/matrix/matrix.conf); --link-to is Center's
 #   LINK_LISTEN; --link-server-name is the name on Center's certificate.
 #
@@ -178,6 +179,7 @@ EOF
 # A control node: ticket admission with Center's public key, linked to Center.
 write_node_unit() {
     local extra=""
+    [[ -n "${DISCOVERY_TENANT:-}" ]] && extra+=" -discovery-tenant $DISCOVERY_TENANT"
     [[ -n "${PLAYER_ALLOW:-}" ]] && extra+=" -player-allow $PLAYER_ALLOW"
     [[ -f "$DATA_DIR/link-ca.pem" ]] && extra+=" -link-ca $DATA_DIR/link-ca.pem"
     cat > "$UNIT" <<EOF
@@ -353,7 +355,7 @@ EOF
 
 cmd_install_node() {
     local center_key="" blocklist="" turn="" secrets="" link_ca="" name="" region=""
-    DOMAIN="" PORT=443 KID="" LINK_TO="" LINK_SERVER_NAME="" PLAYER_ALLOW=""
+    DOMAIN="" PORT=443 KID="" LINK_TO="" LINK_SERVER_NAME="" PLAYER_ALLOW="" DISCOVERY_TENANT=""
     while [[ $# -gt 0 ]]; do
         case "$1" in
             --domain) DOMAIN=$2; shift 2 ;;
@@ -367,6 +369,7 @@ cmd_install_node() {
             --relay-secrets) secrets=$2; shift 2 ;;
             --turn) turn=$2; shift 2 ;;
             --player-allow) PLAYER_ALLOW=$2; shift 2 ;;
+            --discovery-tenant) DISCOVERY_TENANT=$2; shift 2 ;;
             --name) name=$2; shift 2 ;;
             --region) region=$2; shift 2 ;;
             *) die "unknown option $1" ;;
@@ -414,6 +417,7 @@ KID=$KID
 LINK_TO=$LINK_TO
 LINK_SERVER_NAME=$LINK_SERVER_NAME
 PLAYER_ALLOW=$PLAYER_ALLOW
+DISCOVERY_TENANT=$DISCOVERY_TENANT
 EOF
 
     request_certificate

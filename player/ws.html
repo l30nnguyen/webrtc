@@ -1250,6 +1250,10 @@
                 const hData = await hRes.json();
                 if (!isCurrentRequest()) return;
                 ticketAdmissionRequired = hData.ticket_admission === true;
+                // A control node names its Center: viewer tickets come from there.
+                if (typeof hData.center === 'string' && hData.center.startsWith('https://')) {
+                    document.getElementById('centerUrl').value = hData.center.replace(/\/+$/, '');
+                }
                 healthBadge.textContent = `🟢 Server (${hData.clients} online) v${hData.version || '?'}`;
                 healthBadge.className   = 'health-badge';
                 document.getElementById('viewerVersion').textContent = 'v' + (hData.version || '?');

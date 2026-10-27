@@ -6,6 +6,7 @@ import (
 	"crypto/tls"
 	"crypto/x509"
 	"encoding/base64"
+	"net/http"
 	"net/http/httptest"
 	"os"
 	"path/filepath"
@@ -178,5 +179,16 @@ func TestNodeRefusesAConfigNotSignedByCenter(t *testing.T) {
 	}
 	if _, err := os.Stat(filepath.Join(dir, "c.json")); err != nil {
 		t.Fatal("accepted config not saved")
+	}
+}
+
+func TestNodeHealthNamesItsCenter(t *testing.T) {
+	l := newLinkLab(t)
+	srv, _ := l.startNode(l.nodeKey)
+	req := httptest.NewRequest(http.MethodGet, "/api/health", nil)
+	rec := httptest.NewRecorder()
+	srv.ServeHTTP(rec, req)
+	if !strings.Contains(rec.Body.String(), `"center":"https://example.com"`) {
+		t.Fatalf("health %s", rec.Body.String())
 	}
 }

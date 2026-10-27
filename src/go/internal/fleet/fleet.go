@@ -565,6 +565,25 @@ func (r *Registry) Known(address string) bool {
 	return r.byAddr[address] != nil
 }
 
+// NodeOrigin reports whether origin (a browser Origin header) is the HTTPS
+// origin of a node of this fleet, so a page served by that node may call
+// Center: wss://host:443/ is https://host, wss://host:8443/ is
+// https://host:8443.
+func (r *Registry) NodeOrigin(origin string) bool {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	for _, n := range r.nodes {
+		host := strings.TrimSuffix(strings.TrimPrefix(n.Address, "wss://"), "/")
+		if strings.HasSuffix(host, ":443") {
+			host = strings.TrimSuffix(host, ":443")
+		}
+		if origin == "https://"+host {
+			return true
+		}
+	}
+	return false
+}
+
 // NodeStatus is one node in the fleet overview.
 type NodeStatus struct {
 	Name     string `json:"name,omitempty"`
