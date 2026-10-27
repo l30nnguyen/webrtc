@@ -225,7 +225,7 @@ A prior planning estimate used **~24 signaling nodes** at 4 vCPU/8 GB for 1.0M c
 
 The current approved path is one MainServer address per ticket. Multi-region assignment and camera-to-node routing are planned in the next section. Cross-node signaling (a camera and a viewer on different nodes), globally replicated revocation, and shared ephemeral TURN are separate future work. TURN is not required for initial signaling; any production TURN design must separately specify transport policy, ephemeral credentials, bandwidth sizing, and regional failure behavior. Fleet estimates and options are retained here only as planning context; they are not implemented guarantees.
 
-### Multi-region signaling (planned 2026-10-26; phases 1–2 built, deployed for test, not committed)
+### Multi-region signaling (planned 2026-10-26; phases 1–2 built and deployed, commit a293c54)
 
 **Goal.** Spread cameras over signaling nodes in several regions. Center stays the one fixed entry point (`matrix.5gen.care`); it decides which node a camera uses and sends viewers to the node that camera is on.
 
@@ -253,14 +253,14 @@ The current approved path is one MainServer address per ticket. Multi-region ass
 | --- | --- | --- |
 | 1. Redirect | Camera follows the Center-assigned address (allow list, v2 proof); Center returns a configured node address; per-node audience | Dev Center (`webrtc.5gen.care:8443`) sends a camera to prod (`matrix.5gen.care`) and a viewer finds it there |
 | 2. Registry | Node heartbeats and camera presence; Center assigns by region and load; `/v1/view` returns the live node; sticky assignment | Two nodes in two regions; cameras split by region; kill one node, its cameras move and viewers follow |
-| 3. Shared Center | Activation, nonce, replay, presence in a shared store; two or more Center instances; rate limits | One Center instance stopped with no camera or viewer impact |
-| 4. Operations | Regional TURN, per-node metrics and alerts, capacity limits enforced, failover drills | Measured connections per node replace the planning estimates above |
+| 3. Control plane | One `config.json` on Center with check/apply/rollback; admin over SSH only; Center ↔ node link with pushed config; rate limits; regional relay stream servers chosen by load with expiring credentials (see *Fleet control plane*) | Config change applied to every node without a restart; a node or relay stopped and the fleet routes around it |
+| 4. Shared Center (later) | Activation, nonce, replay in a shared store; two or more Center instances | One Center instance stopped with no camera or viewer impact |
 
-**Phase 1 as built (2026-10-26, under test, not committed).** Center flag `-assign-address wss://host:port/` (setup.sh: `ASSIGN_ADDRESS` in `/etc/matrix/matrix.conf`; default `-main-address`). A camera posts `{"proto":3}` to `/v1/challenge` and gets `main_server_address` with the nonce, whose MAC covers that address (`center-challenge-v2`); it proves with `"center-activate-v2" || nonce || SHA-256(SID) || node` and `/verify` body `proto:3` plus `main_server_address`. The ticket audience is that node. Center remembers in memory which node each camera was last sent to and returns it from `/v1/view` and camera lookup (falls back to the assign address after a Center restart until the camera reconnects). The camera accepts a node only on `MATRIX_NODE_DOMAINS` (CMake, default `5gen.care`) or its configured host, and logs `Connecting to MainServer wss://… (assigned by Center)`. Nodes behind one Center must share its `-kid` and ticket key. Test setup: dev `webrtc.5gen.care:8443` runs `-kid matrix-20261023`; it ran `-assign-address wss://matrix.5gen.care:443/` for the phase 1 test (removed 2026-10-27).
+**Phase 1 as built (2026-10-26).** Center flag `-assign-address wss://host:port/` (setup.sh: `ASSIGN_ADDRESS` in `/etc/matrix/matrix.conf`; default `-main-address`). A camera posts `{"proto":3}` to `/v1/challenge` and gets `main_server_address` with the nonce, whose MAC covers that address (`center-challenge-v2`); it proves with `"center-activate-v2" || nonce || SHA-256(SID) || node` and `/verify` body `proto:3` plus `main_server_address`. The ticket audience is that node. Center remembers in memory which node each camera was last sent to and returns it from `/v1/view` and camera lookup (falls back to the assign address after a Center restart until the camera reconnects). The camera accepts a node only on `MATRIX_NODE_DOMAINS` (CMake, default `5gen.care`) or its configured host, and logs `Connecting to MainServer wss://… (assigned by Center)`. Nodes behind one Center must share its `-kid` and ticket key. Test setup: dev `webrtc.5gen.care:8443` runs `-kid matrix-20261023`; it ran `-assign-address wss://matrix.5gen.care:443/` for the phase 1 test (removed 2026-10-27).
 
 Old cameras that sign only their own origin keep working during the change: Center accepts the v1 proof and sends those cameras to the node with their configured address, until the fleet is upgraded.
 
-**Phase 2 as built (2026-10-26, deployed to prod and dev 2026-10-26/27, not committed).** User-facing names: the signaling server is the **control server**, TURN is the **relay stream server**.
+**Phase 2 as built (2026-10-26, deployed to prod and dev 2026-10-27).** User-facing names: the signaling server is the **control server**, TURN is the **relay stream server**.
 
 - *Nodes file.* Center flag `-nodes-file` (setup.sh: `/opt/matrix/cfg/sid/nodes.json`): `{"nodes":[{"address","region","countries","capacity","token_sha256"}]}`. The Center's own node needs no token and is read in-process; capacity defaults to 60,000 cameras.
 - *Node reports.* Other nodes run `-report-to https://matrix.5gen.care/ -node-token-file FILE` (default address `-main-address` or `-ticket-aud`, or `-node-address`) and `POST /v1/node/report` every 15 s with `Authorization: Bearer <token>` and `{address, cameras:[device IDs], clients, stats}`. A node silent for 50 s is down: no assignments, its cameras count as offline. The full camera list per report is fine for the test fleet; at 60,000 cameras per node it is about 2.7 MB per report, so phase 3 should send changes only.
@@ -268,7 +268,7 @@ Old cameras that sign only their own origin keep working during the change: Cent
 - *Viewers.* `/v1/view` and camera lookup return the Center's own node when the camera is connected there, else the node that reports the camera online, else the node it was last sent to.
 - *Verified locally:* country choice (camera sent to the regional node), viewer sent to the camera's node, fleet counters added up at Center, and failover (node stopped → the camera reconnected to the Center node within about a minute and viewers followed).
 
-### Connection analytics (built 2026-10-26, deployed, not committed; mobile app not yet reporting)
+### Connection analytics (built and deployed 2026-10-27; mobile app not yet reporting)
 
 After each viewing attempt the camera and the viewer app each send one message on their control server connection; the server counts it and never forwards it:
 
@@ -286,6 +286,88 @@ After each viewing attempt the camera and the viewer app each send one message o
 | `setup_ms` | request to connected |
 
 The role (camera or viewer) comes from the ticket, not the message. Each node also counts what it sees itself: viewer requests forwarded, requests for an offline camera, and connections refused at the ticket check. Counters are kept per UTC day for 31 days (`-stats-file`, saved every minute). Nodes include them in their report, and Center serves the fleet total, a per-day breakdown and per-node totals at `GET /v1/admin/stats?days=N` (admin token). The web player sends the viewer report. The mobile app should send the same message on its control server connection: once per Play, when the session connects (with the path from the selected candidate pair) or fails.
+
+### Fleet control plane (planned 2026-10-27)
+
+**Goal.** Run the fleet from one place. The operator works only on the Control Center (`matrix.5gen.care`): status, statistics and configuration. Configuration is pushed to every control node and applied without a restart; it affects only new camera connections and new viewing sessions. Target hosting is DigitalOcean.
+
+```
+ matrix-eu00.5gen.care            matrix.5gen.care                 matrix-us00.5gen.care
+   control node  ──link──▶   Control Center (+ its own node)  ◀──link──  control node
+        ▲                     config.json, matrix-fleet CLI                    ▲
+   relay (EU)                                                             relay (US)
+```
+
+Each node opens the link to Center and keeps it open; Center never connects to nodes. Each region's relay stream server reports its load to that region's node.
+
+**Ports.**
+
+| Port | Use | Reachable by |
+| --- | --- | --- |
+| 443 | Cameras, viewers, activation, viewer tickets, pairing-system admin (`/v1/admin/status`, `/v1/admin/release`) | Everyone |
+| 8444 (private) | Center ↔ node link: presence, statistics, config | Nodes only: Center listens on its private (VPC) address; DigitalOcean Cloud Firewall allows the port only from droplets tagged `matrix-node` |
+| 22 | Operator: `matrix-fleet` on Center | Operator IPs only |
+| 3478, 5349, relay range | Relay stream server | Everyone |
+
+Operator commands have no network port: `matrix-fleet` talks to the local server process over a Unix socket (`/run/matrix/admin.sock`, mode 0600).
+
+**`config.json`** (`/opt/matrix/cfg/config.json`, Center only; a superset of the phase 2 nodes file, which stays valid):
+
+```json
+{
+  "nodes": [
+    {"name": "us00", "address": "wss://matrix.5gen.care:443/", "region": "US"},
+    {"name": "eu00", "address": "wss://matrix-eu00.5gen.care:443/", "region": "DE", "capacity": 60000,
+     "public_key": "<node link public key, base64url>"}
+  ],
+  "routes": {"IT": "DE", "FR": "DE", "VN": "ASIA", "*": "US"},
+  "relays": [
+    {"name": "turn-eu00", "region": "DE", "capacity_mbps": 800,
+     "urls": ["turn:turn-eu00.5gen.care:3478", "turns:turn-eu00.5gen.care:5349"],
+     "metrics": "http://10.10.0.5:9641/metrics"}
+  ]
+}
+```
+
+- *Routes* map an ISO 3166 alpha-2 country (as the GeoIP data gives it) to a region; `*` is the default. A region with several nodes splits its cameras by load. A camera whose region is down or full goes to the least-loaded region. A node's own `countries` list (phase 2) still works and loses to `routes`.
+- *Relays* carry no secrets. Each node keeps the shared secret of the relays it hands out in `cfg/relay-secrets.json` (`{"turn-eu00": "<secret>"}`, mode 0600).
+- `version` is stamped by `apply`; the operator does not write it.
+
+**Changing config.**
+
+| Command | What it does |
+| --- | --- |
+| `matrix-fleet check FILE` | Validates (country codes, routes to regions that have nodes, unique names and addresses, keys, relay URLs), prints the difference from the active config and how many online cameras would be placed elsewhere on their next connection |
+| `matrix-fleet apply FILE` | Validates, stamps version N+1, keeps the active file in `cfg/config.d/`, replaces it atomically, reloads Center, pushes to every node and waits for their acks; prints which nodes run which version |
+| `matrix-fleet rollback` | Re-applies the previous file as a new version N+2 |
+| `matrix-fleet status` | Nodes (up/down, cameras, clients, load, config version) and relays (up/down, Mbps, allocations) |
+| `matrix-fleet stats [DAYS]` | Connection counters for the fleet, per day and per node (replaces `GET /v1/admin/stats` on 443) |
+
+A rejected file changes nothing. Cameras that are connected stay where they are.
+
+**Center ↔ node link.** A WebSocket from the node to `wss://<Center>:8444/v1/link`, TLS verified against the Center's host name.
+
+1. *Node login.* Center sends a random challenge. The node answers within 5 s (first message, at most 1 KB) with its address and an Ed25519 signature over `"matrix-node-link-v1" || challenge || Center host || node address`, made with its own key (`-node-key`, never leaves the node). Center checks it against the node's `public_key` in `config.json`. Removing a node from the config drops its link at once. A node can only report for itself.
+2. *Presence.* After login the node sends `hello` (full camera list, client count, config version), then `camera` messages as cameras come and go, and `stats` every 60 s. Center replaces its view of a node on every `hello`, so a missed change is repaired at the next reconnect. A ping every 10 s; a link with no answer is closed and the node counts as down.
+3. *Config push.* Center sends `{type:"config", version, config, sig}` where `sig` is Ed25519 over `"matrix-config-v1" || version || config` with the Center ticket key (nodes already hold its public key). The node rejects bad signatures and any version not newer than the one it runs, validates the content, saves it (`node-config.json`) and acks; or answers with the error and keeps the old one. `rollback` therefore issues a new version number. Config is data only.
+4. *Center down.* Nodes keep their last config and keep serving connected cameras and viewers. Only new camera activations wait for Center, as today.
+
+Before login a connection gets nothing else; unauthenticated connections are capped. The phase 2 HTTP report (`/v1/node/report`, bearer token) is removed.
+
+**Rate limits on 443.** Per source IP: token buckets on `/v1/challenge`, `/verify`, `/v1/view` and the resolve calls, a cap on concurrent connections, and a cap on WebSocket upgrades per minute; over the limit answers 429. DigitalOcean filters network floods (layers 3 and 4) for free; these limits cover request floods. A DDoS-absorbing HTTPS proxy in front of Center needs no camera change if one is needed later.
+
+**Relay stream servers.** The node picks relays for each viewing session: the least-loaded healthy relay of the camera's region, plus one in another region as backup. Credentials are minted per session with the relay's shared secret (coturn `use-auth-secret`): user `"<expiry unix time>:<device id>"`, password `base64(HMAC-SHA1(secret, user))`, valid 24 h. No long-lived relay password reaches a camera or viewer. A node with no relays configured keeps sending `cfg/turn.conf` as today.
+
+*Load.* Each node reads the metrics of its region's relays every 15 s (coturn's Prometheus endpoint, over the private network or localhost): byte counters give Mbps against `capacity_mbps`, a failed read marks the relay down. Relays from other regions are chosen by capacity only. Nodes include relay load in their `stats` message, so `matrix-fleet status` shows every relay.
+
+**DigitalOcean setup.**
+
+- One VPC per region with its own range (for example `10.10.0.0/20` EU, `10.20.0.0/20` US), peered with the Center's VPC. Peered ranges must not overlap; BLR1 has no cross-region peering; droplets created before 2 October 2024 need a manual change for peering.
+- Cloud Firewall: 443 and relay ports from everyone, 8444 from tag `matrix-node`, 22 from operator IPs, relay metrics from the region's node.
+- A Reserved IP for Center, so `matrix.5gen.care` survives a droplet replacement.
+- A node outside DigitalOcean joins over WireGuard; nothing else changes.
+
+**Build order.** (1) this design; (2) server binary named `matrix_cc_<version>`, installed as `matrix_cc`; (3) `config.json` with routes and `check`/`apply`/`rollback`; (4) admin socket, `status`/`stats`, `/v1/admin/stats` leaves 443; (5) the link; (6) rate limits; (7) relays with expiring credentials; (8) relay load. Then the DigitalOcean move and a failover drill.
 
 ### Future entitlement and revocation target
 
