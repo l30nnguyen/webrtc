@@ -17,7 +17,6 @@ import (
 	"net/http"
 	"net/netip"
 	"net/url"
-	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -59,7 +58,7 @@ type Config struct {
 	// Fleet's region choice; nil means no region preference.
 	Country func(netip.Addr) string
 	// LocalStats returns the counters of the node running Center, for
-	// /v1/admin/stats when there is no Fleet.
+	// Stats when there is no Fleet.
 	LocalStats func() stats.Days
 	// LocalCamera reports whether a camera is connected to the node running
 	// Center; such a camera's viewers always go to this node.
@@ -219,8 +218,6 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		h.handleAdminStatus(w, r)
 	case "/v1/admin/release":
 		h.handleAdminRelease(w, r)
-	case "/v1/admin/stats":
-		h.handleAdminStats(w, r)
 	case "/v1/node/report":
 		h.handleNodeReport(w, r)
 	default:
@@ -331,16 +328,22 @@ func (h *Handler) assign(r *http.Request, device string) string {
 	if !admission.ValidDeviceID(device) {
 		device = ""
 	}
-	country := ""
-	if h.config.Country != nil {
-		if addrPort, err := netip.ParseAddrPort(r.RemoteAddr); err == nil {
-			country = h.config.Country(addrPort.Addr())
-		}
-	}
-	if node := h.config.Fleet.Assign(device, country); node != "" {
+	if node := h.config.Fleet.Assign(device, h.country(r)); node != "" {
 		return node
 	}
 	return h.config.AssignAddress // every node down or full: fall back
+}
+
+// country is the ISO code of the request's source address, or "".
+func (h *Handler) country(r *http.Request) string {
+	if h.config.Country == nil {
+		return ""
+	}
+	addrPort, err := netip.ParseAddrPort(r.RemoteAddr)
+	if err != nil {
+		return ""
+	}
+	return h.config.Country(addrPort.Addr())
 }
 
 type verifyRequest struct {
@@ -515,6 +518,9 @@ func (h *Handler) handleVerify(w http.ResponseWriter, r *http.Request) {
 	}
 	if role == admission.RoleCamera {
 		h.rememberNode(deviceID, node)
+		if h.config.Fleet != nil {
+			h.config.Fleet.Placed(deviceID, h.country(r))
+		}
 	}
 	writeJSON(w, http.StatusOK, struct {
 		MainServerAddress string `json:"main_server_address"`
@@ -813,31 +819,24 @@ func (h *Handler) handleNodeReport(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, map[string]any{"ok": true, "interval_s": int(fleet.ReportInterval.Seconds())})
 }
 
-type nodeStats struct {
+// NodeStats is one node in a StatsReport.
+type NodeStats struct {
 	fleet.NodeStatus
 	Total stats.Day `json:"total"`
 }
 
-// handleAdminStats returns viewing counters for the last ?days=N UTC days
-// (default 7): the fleet total, a per-day breakdown, and each node's total.
-func (h *Handler) handleAdminStats(w http.ResponseWriter, r *http.Request) {
-	if r.Method != http.MethodGet {
-		w.Header().Set("Allow", http.MethodGet)
-		writeJSON(w, http.StatusMethodNotAllowed, map[string]string{"error": "method not allowed"})
-		return
-	}
-	if !h.adminAuthorized(w, r) {
-		return
-	}
-	days := 7
-	if text := r.URL.Query().Get("days"); text != "" {
-		n, err := strconv.Atoi(text)
-		if err != nil || n < 1 || n > stats.KeepDays {
-			writeJSON(w, http.StatusBadRequest, map[string]string{"error": "days must be 1 to 31"})
-			return
-		}
-		days = n
-	}
+// StatsReport is the fleet's viewing counters for the last Days UTC days.
+type StatsReport struct {
+	Days  int         `json:"days"`
+	Total stats.Day   `json:"total"`
+	ByDay stats.Days  `json:"by_day"`
+	Nodes []NodeStats `json:"nodes"`
+}
+
+// Stats adds up the viewing counters of every node for the last days UTC
+// days (1 to stats.KeepDays). It is served on the local admin socket, not
+// on the public port.
+func (h *Handler) Stats(days int) StatsReport {
 	var statuses []fleet.NodeStatus
 	if h.config.Fleet != nil {
 		statuses = h.config.Fleet.Status()
@@ -849,14 +848,14 @@ func (h *Handler) handleAdminStats(w http.ResponseWriter, r *http.Request) {
 		statuses = []fleet.NodeStatus{local}
 	}
 	all := stats.Days{}
-	nodes := make([]nodeStats, 0, len(statuses))
+	nodes := make([]NodeStats, 0, len(statuses))
 	for _, status := range statuses {
 		kept, total := stats.Range(status.Stats, days, h.now())
 		all.Add(kept)
-		nodes = append(nodes, nodeStats{NodeStatus: status, Total: total})
+		nodes = append(nodes, NodeStats{NodeStatus: status, Total: total})
 	}
 	byDay, total := stats.Range(all, days, h.now())
-	writeJSON(w, http.StatusOK, map[string]any{"days": days, "total": total, "by_day": byDay, "nodes": nodes})
+	return StatsReport{Days: days, Total: total, ByDay: byDay, Nodes: nodes}
 }
 
 // handleDemoResolve is the unauthenticated lookup for the demo web player.

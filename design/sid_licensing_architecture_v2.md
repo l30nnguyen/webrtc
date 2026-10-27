@@ -285,7 +285,7 @@ After each viewing attempt the camera and the viewer app each send one message o
 | `relay_offered` / `relay_ready` | the relay stream server was configured / it handed out a relay address (false while offered means the relay server is unreachable or refused the credentials) |
 | `setup_ms` | request to connected |
 
-The role (camera or viewer) comes from the ticket, not the message. Each node also counts what it sees itself: viewer requests forwarded, requests for an offline camera, and connections refused at the ticket check. Counters are kept per UTC day for 31 days (`-stats-file`, saved every minute). Nodes include them in their report, and Center serves the fleet total, a per-day breakdown and per-node totals at `GET /v1/admin/stats?days=N` (admin token). The web player sends the viewer report. The mobile app should send the same message on its control server connection: once per Play, when the session connects (with the path from the selected candidate pair) or fails.
+The role (camera or viewer) comes from the ticket, not the message. Each node also counts what it sees itself: viewer requests forwarded, requests for an offline camera, and connections refused at the ticket check. Counters are kept per UTC day for 31 days (`-stats-file`, saved every minute). Nodes include them in their report, and Center serves the fleet total, a per-day breakdown and per-node totals through `matrix-fleet stats N` on the Center host (admin socket; no longer on the public port). The web player sends the viewer report. The mobile app should send the same message on its control server connection: once per Play, when the session connects (with the path from the selected candidate pair) or fails.
 
 ### Fleet control plane (planned 2026-10-27)
 
@@ -341,7 +341,7 @@ Operator commands have no network port: `matrix-fleet` talks to the local server
 | `matrix-fleet apply FILE` | Validates, stamps version N+1, keeps the active file in `cfg/config.d/`, replaces it atomically, reloads Center, pushes to every node and waits for their acks; prints which nodes run which version |
 | `matrix-fleet rollback` | Re-applies the previous file as a new version N+2 |
 | `matrix-fleet status` | Nodes (up/down, cameras, clients, load, config version) and relays (up/down, Mbps, allocations) |
-| `matrix-fleet stats [DAYS]` | Connection counters for the fleet, per day and per node (replaces `GET /v1/admin/stats` on 443) |
+| `matrix-fleet stats [DAYS]` | Connection counters for the fleet, per day and per node (replaced `GET /v1/admin/stats` on 443) |
 
 A rejected file changes nothing. Cameras that are connected stay where they are.
 
@@ -367,7 +367,7 @@ Before login a connection gets nothing else; unauthenticated connections are cap
 - A Reserved IP for Center, so `matrix.5gen.care` survives a droplet replacement.
 - A node outside DigitalOcean joins over WireGuard; nothing else changes.
 
-**Built so far.** (3) `config.json` with routes, `matrix_cc fleet check|apply|rollback` (the `matrix-fleet` wrapper on Center), reload on SIGHUP (`systemctl reload matrix`); `-config-file` replaces `-nodes-file` (kept as an alias); setup.sh moves `cfg/sid/nodes.json` to `cfg/config.json`. Until step 4 the wrapper reads the result from the journal and `check` does not count affected cameras.
+**Built so far.** (3) `config.json` with routes, `matrix_cc fleet check|apply|rollback` (the `matrix-fleet` wrapper on Center), reload on SIGHUP (`systemctl reload matrix`); `-config-file` replaces `-nodes-file` (kept as an alias); setup.sh moves `cfg/sid/nodes.json` to `cfg/config.json`. (4) `-admin-socket /run/matrix/admin.sock` (systemd `RuntimeDirectory`, mode 0600): `matrix-fleet status`, `stats [DAYS]` (`-json` for scripts), `apply`/`rollback` reload through it and print the version the server took, `check` counts the online cameras that would move (from the country each camera last activated from; cameras connected before a Center restart are reported as unknown). `GET /v1/admin/stats` is removed from 443; `/v1/admin/status` and `/v1/admin/release` (pairing system) stay.
 
 **Build order.** (1) this design; (2) server binary named `matrix_cc_<version>`, installed as `matrix_cc`; (3) `config.json` with routes and `check`/`apply`/`rollback`; (4) admin socket, `status`/`stats`, `/v1/admin/stats` leaves 443; (5) the link; (6) rate limits; (7) relays with expiring credentials; (8) relay load. Then the DigitalOcean move and a failover drill.
 

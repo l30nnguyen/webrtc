@@ -205,7 +205,7 @@ func TestFleetAssignsByLoadAndViewersFollowPresence(t *testing.T) {
 	}
 }
 
-func TestAdminStatsAddsUpTheFleet(t *testing.T) {
+func TestStatsAddsUpTheFleet(t *testing.T) {
 	today := time.Date(2026, 10, 12, 0, 0, 0, 0, time.UTC).Format(time.DateOnly) // env clock date
 	local := &fleet.Report{Address: mainAddress, Stats: stats.Days{today: {Requests: 2, Camera: stats.Outcomes{Connected: 1}}}}
 	token := strings.Repeat("a", 32)
@@ -213,26 +213,13 @@ func TestAdminStatsAddsUpTheFleet(t *testing.T) {
 	e.nodeReport("node-token-0123456789abcdef0123456789", fleet.Report{Address: remoteNode,
 		Stats: stats.Days{today: {Requests: 3, Player: stats.Outcomes{Failed: 1, Errors: map[string]int{"no_path": 1}}}}})
 
-	if code := e.do(http.MethodGet, "/v1/admin/stats", nil, nil).Code; code != http.StatusUnauthorized {
-		t.Fatalf("stats without the admin token = %d", code)
+	// Statistics are not served on the public port, even with the admin token.
+	if code := e.do(http.MethodGet, "/v1/admin/stats?days=1", nil, map[string]string{"Authorization": "Bearer " + token}).Code; code != http.StatusNotFound {
+		t.Fatalf("public stats = %d", code)
 	}
-	response := e.do(http.MethodGet, "/v1/admin/stats?days=1", nil, map[string]string{"Authorization": "Bearer " + token})
-	var result struct {
-		Total stats.Day `json:"total"`
-		Nodes []struct {
-			Address string    `json:"address"`
-			Healthy bool      `json:"healthy"`
-			Total   stats.Day `json:"total"`
-		} `json:"nodes"`
-	}
-	if response.Code != http.StatusOK || json.Unmarshal(response.Body.Bytes(), &result) != nil {
-		t.Fatalf("stats = %d %s", response.Code, response.Body.String())
-	}
+	result := e.handler.Stats(1)
 	if result.Total.Requests != 5 || result.Total.Camera.Connected != 1 || result.Total.Player.Errors["no_path"] != 1 || len(result.Nodes) != 2 {
-		t.Fatalf("fleet stats = %s", response.Body.String())
-	}
-	if code := e.do(http.MethodGet, "/v1/admin/stats?days=99", nil, map[string]string{"Authorization": "Bearer " + token}).Code; code != http.StatusBadRequest {
-		t.Fatalf("days=99 = %d", code)
+		t.Fatalf("fleet stats = %+v", result)
 	}
 }
 

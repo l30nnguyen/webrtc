@@ -76,8 +76,8 @@ listed with the country routes in `/opt/matrix/cfg/config.json`:
 
 ```bash
 sudo cp /opt/matrix/cfg/config.json ~/new.json && nano ~/new.json
-sudo matrix-fleet check ~/new.json      # validate and show the changes
-sudo matrix-fleet apply ~/new.json      # install as the next version and reload (no restart)
+sudo matrix-fleet check ~/new.json      # validate, show the changes and how many online cameras would move
+sudo matrix-fleet apply ~/new.json      # install as the next version; the server takes it at once (no restart)
 sudo matrix-fleet rollback [VERSION]    # re-apply the previous (or a given) version
 ```
 
@@ -94,12 +94,15 @@ country choice, put the DB-IP "IP to Country Lite" CSV (CC BY 4.0,
 https://db-ip.com) at `/opt/matrix/cfg/geoip.csv`; `matrix-fleet check` then
 also warns about countries no IP range carries.
 
-Viewing counters (per UTC day, 31 days, kept in `cfg/sid/stats.json`) for the
-whole fleet:
+Status and viewing counters (per UTC day, 31 days, kept in
+`cfg/sid/stats.json`) for the whole fleet come from the server over its local
+admin socket `/run/matrix/admin.sock`; nothing administrative is served on the
+public port:
 
 ```bash
-curl -s -H "Authorization: Bearer $(sudo cat /opt/matrix/cfg/sid/admin.token)" \
-     "https://matrix.5gen.care/v1/admin/stats?days=7"
+sudo matrix-fleet status        # nodes up/down, cameras, clients, load, config version
+sudo matrix-fleet stats 7       # requests, connected/failed by path, errors, per day and per node
+sudo matrix-fleet -json stats 7 # the same as JSON
 ```
 
 ## Upgrade

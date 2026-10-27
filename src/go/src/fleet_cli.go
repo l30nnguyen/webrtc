@@ -1,24 +1,34 @@
 package main
 
 import (
+	"bytes"
+	"context"
 	"encoding/json"
 	"errors"
 	"flag"
 	"fmt"
 	"io"
 	"io/fs"
+	"net"
+	"net/http"
 	"os"
 	"path/filepath"
 	"regexp"
 	"sort"
 	"strconv"
+	"strings"
 	"syscall"
+	"text/tabwriter"
+	"time"
 
 	"signaling-server/internal/fleet"
+	"signaling-server/internal/stats"
 )
 
-const fleetUsage = `usage: matrix_cc fleet [options] check FILE | apply FILE | rollback [VERSION]
+const fleetUsage = `usage: matrix_cc fleet [options] COMMAND
 
+  status             nodes: up/down, cameras, clients, load; configuration version
+  stats [DAYS]       viewing counters for the last DAYS UTC days (default 7)
   check FILE         validate FILE and show what would change
   apply FILE         validate, stamp the next version, keep the active file in
                      the history folder and replace it; then reload the server
@@ -36,6 +46,8 @@ func fleetCommand(args []string, stdout, stderr io.Writer) int {
 	historyDir := flags.String("history", "", "folder keeping every applied version (default: config.d next to -config)")
 	self := flags.String("self", "", "the Center's own node address, wss://host:port/ (it needs no report token)")
 	geoipPath := flags.String("geoip", "", "IP-to-country CSV; warns about route countries it never names")
+	socket := flags.String("socket", "", "the server's admin socket (-admin-socket); needed by status and stats, and lets apply/rollback reload the server and check count the cameras that would move")
+	asJSON := flags.Bool("json", false, "status and stats: print the server's JSON answer")
 	flags.Usage = func() {
 		fmt.Fprint(stderr, fleetUsage)
 		flags.PrintDefaults()
@@ -46,10 +58,22 @@ func fleetCommand(args []string, stdout, stderr io.Writer) int {
 	if *historyDir == "" {
 		*historyDir = filepath.Join(filepath.Dir(*configPath), "config.d")
 	}
-	c := fleetCLI{configPath: *configPath, historyDir: *historyDir, self: *self, geoipPath: *geoipPath, out: stdout}
+	c := fleetCLI{configPath: *configPath, historyDir: *historyDir, self: *self, geoipPath: *geoipPath,
+		admin: adminClient{socket: *socket}, json: *asJSON, out: stdout}
 	rest := flags.Args()
 	var err error
 	switch {
+	case len(rest) == 1 && rest[0] == "status":
+		err = c.status()
+	case len(rest) >= 1 && len(rest) <= 2 && rest[0] == "stats":
+		days := 7
+		if len(rest) == 2 {
+			if days, err = strconv.Atoi(rest[1]); err != nil || days < 1 {
+				fmt.Fprintln(stderr, "stats: DAYS must be a positive number")
+				return 2
+			}
+		}
+		err = c.stats(days)
 	case len(rest) == 2 && rest[0] == "check":
 		err = c.check(rest[1])
 	case len(rest) == 2 && rest[0] == "apply":
@@ -76,6 +100,8 @@ func fleetCommand(args []string, stdout, stderr io.Writer) int {
 
 type fleetCLI struct {
 	configPath, historyDir, self, geoipPath string
+	admin                                   adminClient
+	json                                    bool
 	out                                     io.Writer
 }
 
@@ -124,6 +150,19 @@ func (c fleetCLI) candidate(path string) (next, active fleet.Config, changed boo
 		fmt.Fprintln(c.out, "  "+line)
 	}
 	fmt.Fprintln(c.out, "Cameras already connected stay where they are; the change applies to new connections.")
+	if c.admin.socket != "" {
+		var moves MovesResult
+		body, _ := json.Marshal(next)
+		if err := c.admin.call(http.MethodPost, "/v1/moves", body, &moves); err != nil {
+			fmt.Fprintf(c.out, "Cannot count the cameras that would move: %v\n", err)
+		} else {
+			fmt.Fprintf(c.out, "Of %d camera(s) online now, %d would go to another node at their next connection", moves.Online, moves.Moved)
+			if moves.Unknown > 0 {
+				fmt.Fprintf(c.out, " (%d connected before Center started, country unknown, not counted)", moves.Unknown)
+			}
+			fmt.Fprintln(c.out, ".")
+		}
+	}
 	return next, active, true, nil
 }
 
@@ -247,6 +286,17 @@ func (c fleetCLI) install(next, active fleet.Config) error {
 		return err
 	}
 	fmt.Fprintf(c.out, "Installed version %d as %s (kept in %s).\n", next.Version, c.configPath, c.historyFile(next.Version))
+	if c.admin.socket == "" {
+		fmt.Fprintln(c.out, "Reload the server to use it (systemctl reload matrix).")
+		return nil
+	}
+	var reloaded struct {
+		Version int `json:"version"`
+	}
+	if err := c.admin.call(http.MethodPost, "/v1/reload", nil, &reloaded); err != nil {
+		return fmt.Errorf("the server did not take version %d: %w", next.Version, err)
+	}
+	fmt.Fprintf(c.out, "The server now runs version %d.\n", reloaded.Version)
 	return nil
 }
 
@@ -291,4 +341,184 @@ func writeConfigFile(path string, config fleet.Config, like string) error {
 		}
 	}
 	return os.Rename(tmp.Name(), path)
+}
+
+// adminClient calls the server's admin socket.
+type adminClient struct {
+	socket string
+}
+
+func (a adminClient) call(method, path string, body []byte, into any) error {
+	if a.socket == "" {
+		return errors.New("no admin socket given (-socket)")
+	}
+	client := &http.Client{
+		Timeout: 30 * time.Second,
+		Transport: &http.Transport{DialContext: func(ctx context.Context, _, _ string) (net.Conn, error) {
+			return (&net.Dialer{}).DialContext(ctx, "unix", a.socket)
+		}},
+	}
+	request, err := http.NewRequest(method, "http://matrix"+path, bytes.NewReader(body))
+	if err != nil {
+		return err
+	}
+	response, err := client.Do(request)
+	if err != nil {
+		return fmt.Errorf("server not reachable on %s: %w", a.socket, err)
+	}
+	defer response.Body.Close()
+	data, err := io.ReadAll(io.LimitReader(response.Body, 16<<20))
+	if err != nil {
+		return err
+	}
+	if response.StatusCode != http.StatusOK {
+		var failure struct {
+			Error string `json:"error"`
+		}
+		if json.Unmarshal(data, &failure) == nil && failure.Error != "" {
+			return errors.New(failure.Error)
+		}
+		return fmt.Errorf("server answered %d", response.StatusCode)
+	}
+	if raw, ok := into.(*json.RawMessage); ok {
+		*raw = data
+		return nil
+	}
+	return json.Unmarshal(data, into)
+}
+
+func (c fleetCLI) status() error {
+	var raw json.RawMessage
+	if err := c.admin.call(http.MethodGet, "/v1/status", nil, &raw); err != nil {
+		return err
+	}
+	if c.json {
+		_, err := c.out.Write(raw)
+		return err
+	}
+	var status FleetStatus
+	if err := json.Unmarshal(raw, &status); err != nil {
+		return err
+	}
+	if status.Fleet {
+		fmt.Fprintf(c.out, "Configuration version %d\n\n", status.ConfigVersion)
+	} else {
+		fmt.Fprintln(c.out, "No fleet configuration: this server serves its own cameras only.")
+	}
+	table := tabwriter.NewWriter(c.out, 0, 0, 2, ' ', 0)
+	fmt.Fprintln(table, "NODE\tADDRESS\tREGION\tSTATE\tCAMERAS\tCLIENTS\tLOAD\tLAST REPORT")
+	for _, n := range status.Nodes {
+		state := "DOWN"
+		if n.Healthy {
+			state = "up"
+		}
+		load := "-"
+		if n.Capacity > 0 {
+			load = fmt.Sprintf("%.1f%%", 100*float64(n.Cameras)/float64(n.Capacity))
+		}
+		fmt.Fprintf(table, "%s\t%s\t%s\t%s\t%d\t%d\t%s\t%s\n", dash(n.Name), n.Address, dash(n.Region), state,
+			n.Cameras, n.Clients, load, dash(n.LastSeen))
+	}
+	return table.Flush()
+}
+
+func (c fleetCLI) stats(days int) error {
+	var raw json.RawMessage
+	if err := c.admin.call(http.MethodGet, fmt.Sprintf("/v1/stats?days=%d", days), nil, &raw); err != nil {
+		return err
+	}
+	if c.json {
+		_, err := c.out.Write(raw)
+		return err
+	}
+	var report struct {
+		Days  int        `json:"days"`
+		Total stats.Day  `json:"total"`
+		ByDay stats.Days `json:"by_day"`
+		Nodes []struct {
+			fleet.NodeStatus
+			Total stats.Day `json:"total"`
+		} `json:"nodes"`
+	}
+	if err := json.Unmarshal(raw, &report); err != nil {
+		return err
+	}
+	t := report.Total
+	fmt.Fprintf(c.out, "Last %d day(s) (UTC), whole fleet\n\n", report.Days)
+	fmt.Fprintf(c.out, "Viewing requests        %d\n", t.Requests)
+	fmt.Fprintf(c.out, "Camera was offline      %d\n", t.CameraOffline)
+	fmt.Fprintf(c.out, "Refused at the ticket   %d\n\n", t.AdmissionRejected)
+
+	table := tabwriter.NewWriter(c.out, 0, 0, 2, ' ', 0)
+	fmt.Fprintln(table, "REPORTED BY\tCONNECTED\tFAILED\tLAN\tDIRECT\tRELAY\tRELAY READY/OFFERED\tAVG SETUP")
+	for _, row := range []struct {
+		name string
+		o    stats.Outcomes
+	}{{"camera", t.Camera}, {"viewer", t.Player}} {
+		setup := "-"
+		if row.o.SetupCount > 0 {
+			setup = fmt.Sprintf("%d ms", row.o.SetupMillisSum/int64(row.o.SetupCount))
+		}
+		fmt.Fprintf(table, "%s\t%d\t%d\t%d\t%d\t%d\t%d/%d\t%s\n", row.name, row.o.Connected, row.o.Failed,
+			row.o.Paths["lan"], row.o.Paths["direct"], row.o.Paths["relay"], row.o.RelayReady, row.o.RelayOffered, setup)
+	}
+	table.Flush()
+	for _, row := range []struct {
+		name string
+		o    stats.Outcomes
+	}{{"camera", t.Camera}, {"viewer", t.Player}} {
+		if len(row.o.Errors) > 0 {
+			fmt.Fprintf(c.out, "Failures seen by the %s: %s\n", row.name, countList(row.o.Errors))
+		}
+	}
+
+	fmt.Fprintln(c.out)
+	table = tabwriter.NewWriter(c.out, 0, 0, 2, ' ', 0)
+	fmt.Fprintln(table, "DAY\tREQUESTS\tCAMERA OK/FAILED\tVIEWER OK/FAILED")
+	dates := make([]string, 0, len(report.ByDay))
+	for date := range report.ByDay {
+		dates = append(dates, date)
+	}
+	sort.Strings(dates)
+	for _, date := range dates {
+		d := report.ByDay[date]
+		fmt.Fprintf(table, "%s\t%d\t%d/%d\t%d/%d\n", date, d.Requests, d.Camera.Connected, d.Camera.Failed, d.Player.Connected, d.Player.Failed)
+	}
+	table.Flush()
+
+	fmt.Fprintln(c.out)
+	table = tabwriter.NewWriter(c.out, 0, 0, 2, ' ', 0)
+	fmt.Fprintln(table, "NODE\tADDRESS\tREQUESTS\tCAMERA OK/FAILED\tVIEWER OK/FAILED")
+	for _, n := range report.Nodes {
+		d := n.Total
+		fmt.Fprintf(table, "%s\t%s\t%d\t%d/%d\t%d/%d\n", dash(n.Name), n.Address, d.Requests, d.Camera.Connected, d.Camera.Failed, d.Player.Connected, d.Player.Failed)
+	}
+	return table.Flush()
+}
+
+func dash(s string) string {
+	if s == "" {
+		return "-"
+	}
+	return s
+}
+
+// countList prints {"no_path": 3, "closed": 1} as "no_path 3, closed 1",
+// largest first.
+func countList(counts map[string]int) string {
+	keys := make([]string, 0, len(counts))
+	for k := range counts {
+		keys = append(keys, k)
+	}
+	sort.Slice(keys, func(i, j int) bool {
+		if counts[keys[i]] != counts[keys[j]] {
+			return counts[keys[i]] > counts[keys[j]]
+		}
+		return keys[i] < keys[j]
+	})
+	parts := make([]string, len(keys))
+	for i, k := range keys {
+		parts[i] = fmt.Sprintf("%s %d", k, counts[k])
+	}
+	return strings.Join(parts, ", ")
 }

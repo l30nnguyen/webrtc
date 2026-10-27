@@ -14,10 +14,11 @@
 # {"host", "port", "username", "password"}; read on every connection, no restart):
 #   sudo ./setup.sh turn /path/to/turn.conf
 #
-# Fleet (optional): /opt/matrix/cfg/config.json lists the control server nodes
-# and the country routes. Change it only with matrix-fleet (installed in
-# /usr/local/bin), which validates, keeps every version in cfg/config.d/ and
-# reloads the server without a restart:
+# Fleet: sudo matrix-fleet status | stats [DAYS] (installed in /usr/local/bin;
+# it talks to the server over /run/matrix/admin.sock, no network port).
+# /opt/matrix/cfg/config.json (optional) lists the control server nodes and the
+# country routes. Change it only with matrix-fleet, which validates, keeps every
+# version in cfg/config.d/ and reloads the server without a restart:
 #   sudo matrix-fleet check new.json | apply new.json | rollback [VERSION]
 # /opt/matrix/cfg/geoip.csv (DB-IP IP-to-Country Lite CSV) adds the country
 # choice. A phase 2 cfg/sid/nodes.json is moved to config.json on upgrade.
@@ -68,37 +69,20 @@ install_release() {
     write_fleet_tool
 }
 
-# matrix-fleet runs "matrix_cc fleet" with this Center's paths and address,
-# then reloads the server and prints whether it took the new version.
+# matrix-fleet runs "matrix_cc fleet" with this Center's paths, address and
+# admin socket (status, stats, reload after apply/rollback).
 write_fleet_tool() {
     cat > "$FLEET_TOOL" <<'TOOL'
 #!/bin/bash
-# Fleet configuration of this Center: check FILE | apply FILE | rollback [VERSION]
+# Fleet of this Center: status | stats [DAYS] | check FILE | apply FILE | rollback [VERSION]
 set -euo pipefail
 [[ $EUID -eq 0 ]] || { echo "matrix-fleet: run with sudo" >&2; exit 1; }
 # shellcheck source=/dev/null
 source /etc/matrix/matrix.conf
 geoip=()
 [[ -f /opt/matrix/cfg/geoip.csv ]] && geoip=(-geoip /opt/matrix/cfg/geoip.csv)
-/opt/matrix/matrix_cc fleet -config /opt/matrix/cfg/config.json -self "wss://$DOMAIN:$PORT/" "${geoip[@]}" "$@"
-case "${1:-}" in
-    apply|rollback)
-        if ! grep -q -- "-config-file" /etc/systemd/system/matrix.service; then
-            echo "The server does not read config.json yet; run setup.sh upgrade from the release package."
-            exit 0
-        fi
-        since=$(date '+%Y-%m-%d %H:%M:%S')
-        systemctl reload matrix
-        result=""
-        for _ in 1 2 3 4 5; do
-            result=$(journalctl -u matrix --since "$since" -o cat | grep "fleet: configuration" | tail -1 || true)
-            [[ -n "$result" ]] && break
-            sleep 1
-        done
-        echo "Server: ${result:-no answer yet; see journalctl -u matrix -n 20}"
-        [[ "$result" == *applied* ]]
-        ;;
-esac
+exec /opt/matrix/matrix_cc fleet -config /opt/matrix/cfg/config.json -self "wss://$DOMAIN:$PORT/" \
+    -socket /run/matrix/admin.sock "${geoip[@]}" "$@"
 TOOL
     chmod 755 "$FLEET_TOOL"
 }
@@ -121,7 +105,7 @@ write_unit() {
     # control server nodes; cfg/geoip.csv adds the region (country) choice.
     [[ -f "$FLEET_CONFIG" ]] && discovery+=" -config-file $FLEET_CONFIG"
     [[ -f "$FLEET_CONFIG" && -f "$APP_DIR/cfg/geoip.csv" ]] && discovery+=" -geoip-file $APP_DIR/cfg/geoip.csv"
-    discovery+=" -stats-file $DATA_DIR/stats.json"
+    discovery+=" -stats-file $DATA_DIR/stats.json -admin-socket /run/matrix/admin.sock"
     cat > "$UNIT" <<EOF
 [Unit]
 Description=Matrix control server
@@ -148,6 +132,8 @@ ProtectSystem=strict
 ProtectHome=true
 PrivateTmp=true
 ReadWritePaths=$DATA_DIR
+RuntimeDirectory=matrix
+RuntimeDirectoryMode=0700
 LimitNOFILE=65536
 
 [Install]

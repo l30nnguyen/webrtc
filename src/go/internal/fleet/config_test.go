@@ -178,3 +178,34 @@ func TestDiff(t *testing.T) {
 		}
 	}
 }
+
+func TestMovesCountsCamerasANewConfigPlacesElsewhere(t *testing.T) {
+	camC := strings.Repeat("C", 43)
+	r, err := NewFromConfig(routedConfig(map[string]string{"IT": "SG", "*": "US"}), self, func() Report {
+		return Report{Address: self, Cameras: []string{camC}}
+	}, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := r.Accept("sg1-token", Report{Address: asia, Cameras: []string{camA, camB}}); err != nil {
+		t.Fatal(err)
+	}
+	r.Placed(camA, "it") // Italian camera on the SG node
+	r.Placed(camB, "VN") // Vietnamese camera on the SG node (node country list)
+	r.Placed(camC, "US") // camC on the Center node
+	r.Placed("not-a-device", "IT")
+
+	moved, online, unknown, err := r.Moves(routedConfig(map[string]string{"IT": "DE", "*": "US"}))
+	if err != nil || moved != 1 || online != 3 || unknown != 0 {
+		t.Fatalf("IT -> DE: moved %d online %d unknown %d %v", moved, online, unknown, err)
+	}
+	// Removing the SG node moves both of its cameras.
+	without := routedConfig(map[string]string{"*": "US"})
+	without.Nodes = without.Nodes[:2]
+	if moved, _, _, _ := r.Moves(without); moved != 2 {
+		t.Fatalf("SG removed: moved %d", moved)
+	}
+	if _, _, _, err := r.Moves(routedConfig(map[string]string{"IT": "XX"})); err == nil {
+		t.Fatal("invalid config counted")
+	}
+}

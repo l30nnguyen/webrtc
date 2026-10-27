@@ -156,3 +156,53 @@ func TestServerReloadKeepsTheRunningConfigOnError(t *testing.T) {
 		t.Fatalf("broken file applied: %v, version %d", err, registry.Version())
 	}
 }
+
+func TestFleetThroughTheAdminSocket(t *testing.T) {
+	dir := t.TempDir()
+	active := filepath.Join(dir, "config.json")
+	first := writeCandidate(t, dir, "first.json", `{"IT":"DE"}`)
+	if _, code := runFleet(t, active, "apply", first); code != 0 {
+		t.Fatal("apply failed")
+	}
+	registry, err := fleet.Load(active, cliSelf, nil, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	srv := NewServer("", dir+"/")
+	srv.fleet = registry
+	socket := filepath.Join(dir, "admin.sock")
+	listener, err := listenAdminSocket(socket)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer listener.Close()
+	go srv.serveAdmin(listener, active)
+	if info, err := os.Stat(socket); err != nil || info.Mode().Perm() != 0o600 {
+		t.Fatalf("socket mode %v %v", info.Mode(), err)
+	}
+	withSocket := func(args ...string) (string, int) {
+		return runFleet(t, active, append([]string{"-socket", socket}, args...)...)
+	}
+
+	out, code := withSocket("status")
+	if code != 0 || !strings.Contains(out, "Configuration version 1") || !strings.Contains(out, "de00") {
+		t.Fatalf("status: %d %s", code, out)
+	}
+	second := writeCandidate(t, dir, "second.json", `{"IT":"US"}`)
+	if out, code := withSocket("check", second); code != 0 || !strings.Contains(out, "Of 0 camera(s) online now, 0 would go") {
+		t.Fatalf("check: %d %s", code, out)
+	}
+	if out, code := withSocket("apply", second); code != 0 || !strings.Contains(out, "The server now runs version 2") {
+		t.Fatalf("apply: %d %s", code, out)
+	}
+	if registry.Version() != 2 {
+		t.Fatalf("server version %d", registry.Version())
+	}
+	// Not a Center: no statistics here.
+	if out, code := withSocket("stats"); code != 1 || !strings.Contains(out, "not one") {
+		t.Fatalf("stats: %d %s", code, out)
+	}
+	if out, code := withSocket("-json", "status"); code != 0 || !strings.Contains(out, `"config_version":2`) {
+		t.Fatalf("status -json: %d %s", code, out)
+	}
+}

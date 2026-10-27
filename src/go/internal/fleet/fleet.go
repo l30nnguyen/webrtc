@@ -79,6 +79,7 @@ type Registry struct {
 	nodes    []*nodeState
 	byAddr   map[string]*nodeState
 	location map[string]*nodeState // camera device ID -> node it is online on
+	country  map[string]string     // camera device ID -> country of its last activation
 	routes   map[string]string
 	version  int
 	self     string
@@ -110,7 +111,8 @@ func NewFromConfig(config Config, selfAddress string, local Local, now func() ti
 	if now == nil {
 		now = time.Now
 	}
-	r := &Registry{byAddr: map[string]*nodeState{}, location: map[string]*nodeState{}, self: selfAddress, local: local, now: now}
+	r := &Registry{byAddr: map[string]*nodeState{}, location: map[string]*nodeState{}, country: map[string]string{},
+		self: selfAddress, local: local, now: now}
 	if err := r.Apply(config); err != nil {
 		return nil, err
 	}
@@ -281,32 +283,96 @@ func (r *Registry) Assign(device, country string) string {
 // regionalLocked keeps the candidates of the camera's region.
 func (r *Registry) regionalLocked(candidates []*nodeState, country string) []*nodeState {
 	var regional []*nodeState
-	if region, ok := r.routes[country]; ok && country != "" {
-		for _, n := range candidates {
-			if n.Region == region {
-				regional = append(regional, n)
-			}
-		}
-		return regional
-	}
-	if country != "" {
-		for _, n := range candidates {
-			if contains(n.Countries, country) {
-				regional = append(regional, n)
-			}
-		}
-		if len(regional) > 0 {
-			return regional
-		}
-	}
-	if region, ok := r.routes["*"]; ok {
-		for _, n := range candidates {
-			if n.Region == region {
-				regional = append(regional, n)
-			}
+	for _, n := range candidates {
+		if inRegion(r.routes, candidates, n.Node, country) {
+			regional = append(regional, n)
 		}
 	}
 	return regional
+}
+
+// inRegion reports whether node n is in the region of a camera from country,
+// among the given nodes: by the routes for the country, else by the nodes'
+// own country lists, else by the "*" route.
+func inRegion(routes map[string]string, nodes []*nodeState, n Node, country string) bool {
+	if region, ok := routes[country]; ok && country != "" {
+		return n.Region == region
+	}
+	if country != "" {
+		for _, other := range nodes {
+			if contains(other.Countries, country) {
+				return contains(n.Countries, country)
+			}
+		}
+	}
+	if region, ok := routes["*"]; ok {
+		return n.Region == region
+	}
+	return false
+}
+
+// Placed records the country a camera activated from, so that Moves can
+// tell which connected cameras a new configuration would place elsewhere.
+// It is called only after the camera proved its key.
+func (r *Registry) Placed(device, country string) {
+	if !admission.ValidDeviceID(device) {
+		return
+	}
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	r.country[device] = strings.ToUpper(country)
+}
+
+// Moves counts the cameras online now that config would place on another
+// node at their next connection: their node leaves the fleet, or it is not
+// in the region config gives their country. Cameras whose country is not
+// known (connected before Center started) are counted in unknown.
+func (r *Registry) Moves(config Config) (moved, online, unknown int, err error) {
+	if err := config.Validate(r.self); err != nil {
+		return 0, 0, 0, err
+	}
+	config.Normalize()
+	nodes := make([]*nodeState, 0, len(config.Nodes))
+	byAddr := map[string]Node{}
+	for _, n := range config.Nodes {
+		nodes = append(nodes, &nodeState{Node: n})
+		byAddr[n.Address] = n
+	}
+	if _, ok := byAddr[r.self]; !ok {
+		byAddr[r.self] = Node{Address: r.self}
+	}
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	now := r.now()
+	r.refreshLocalLocked()
+	for device, current := range r.location {
+		if !r.healthyLocked(current, now) {
+			continue
+		}
+		online++
+		next, kept := byAddr[current.Address]
+		if !kept {
+			moved++
+			continue
+		}
+		country, known := r.country[device]
+		if !known {
+			unknown++
+			continue
+		}
+		// A camera with no region (no route matches) may stay anywhere.
+		hasRegion := false
+		for _, n := range byAddr {
+			if inRegion(config.Routes, nodes, n, country) {
+				hasRegion = true
+				break
+			}
+		}
+		if hasRegion && !inRegion(config.Routes, nodes, next, country) {
+			moved++
+		}
+	}
+	return moved, online, unknown, nil
 }
 
 func contains(list []string, value string) bool {
@@ -339,6 +405,7 @@ func (r *Registry) Known(address string) bool {
 
 // NodeStatus is one node in the fleet overview.
 type NodeStatus struct {
+	Name     string     `json:"name,omitempty"`
 	Address  string     `json:"address"`
 	Region   string     `json:"region,omitempty"`
 	Healthy  bool       `json:"healthy"`
@@ -357,7 +424,7 @@ func (r *Registry) Status() []NodeStatus {
 	r.refreshLocalLocked()
 	out := make([]NodeStatus, 0, len(r.nodes))
 	for _, n := range r.nodes {
-		status := NodeStatus{Address: n.Address, Region: n.Region, Healthy: r.healthyLocked(n, now),
+		status := NodeStatus{Name: n.Name, Address: n.Address, Region: n.Region, Healthy: r.healthyLocked(n, now),
 			Cameras: len(n.cameras), Clients: n.clients, Capacity: n.Capacity, Stats: stats.Days{}}
 		if !n.lastSeen.IsZero() {
 			status.LastSeen = n.lastSeen.UTC().Format(time.RFC3339)

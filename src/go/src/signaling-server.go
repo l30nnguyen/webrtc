@@ -98,6 +98,7 @@ type Server struct {
 	trustProxyTLS bool
 	stats         *stats.Counters // nil: counters off
 	fleet         *fleet.Registry // Center with a fleet configuration
+	centerAPI     *center.Handler // Center: statistics for the admin socket
 }
 
 func NewServer(playerPath string, rootDir string) *Server {
@@ -238,7 +239,7 @@ func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 func isCenterPath(path string) bool {
 	switch path {
 	case "/verify", "/v1/challenge", "/v1/resolve", "/v1/view", "/v1/demo/resolve", "/v1/admin/status", "/v1/admin/release",
-		"/v1/admin/stats", "/v1/node/report":
+		"/v1/node/report":
 		return true
 	default:
 		return false
@@ -849,6 +850,7 @@ func configureServer(srv *Server, opts serverOptions) error {
 			return fmt.Errorf("Center configuration is invalid: %w", err)
 		}
 		srv.SetCenterHandler(handler)
+		srv.centerAPI = handler
 		srv.SetAdmission(admission.Validator{
 			Tickets:   admission.TicketVerifier{PublicKey: centerPublic, KeyID: opts.centerKID, Audience: opts.mainAddress},
 			Blocklist: blocklist, Replay: &admission.ReplayCache{},
@@ -960,6 +962,7 @@ func main() {
 	reportTo := flag.String("report-to", "", "Center URL (https://host[:port]/) this node reports its cameras and counters to")
 	nodeAddress := flag.String("node-address", "", "with -report-to: this node's exact WSS root as listed in Center's nodes file (default: -main-address or -ticket-aud)")
 	nodeTokenPath := flag.String("node-token-file", "", "with -report-to: file holding this node's report token")
+	adminSocket := flag.String("admin-socket", "", "Unix socket (created mode 0600) for matrix-fleet: status, statistics, configuration reload")
 	playerAllowText := flag.String("player-allow", "", "comma-separated IPs/CIDRs allowed to load the player and /api/devices (default: everyone)")
 	flag.Parse()
 	if *nodesPath != "" {
@@ -1014,6 +1017,13 @@ func main() {
 	}
 	if srv.fleet != nil {
 		go srv.reloadFleetOnHangup(*configPath)
+	}
+	if *adminSocket != "" {
+		listener, err := listenAdminSocket(*adminSocket)
+		if err != nil {
+			log.Fatalf("-admin-socket: %v", err)
+		}
+		go srv.serveAdmin(listener, *configPath)
 	}
 	if *reportTo != "" {
 		centerURL, err := url.Parse(*reportTo)
