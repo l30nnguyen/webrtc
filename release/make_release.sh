@@ -1,7 +1,8 @@
 #!/bin/bash
 # Build a release package of the Matrix signaling server:
 #   dist/matrix-server-<version>-<commit>.tar.gz
-# containing the linux/amd64 binary, the player, cfg/version and setup.sh.
+# containing the linux/amd64 binary bin/matrix_cc_<version>, the player,
+# cfg/version and setup.sh.
 # Install or upgrade a VPS from it with setup.sh (see release/README.md).
 #
 # Usage: release/make_release.sh
@@ -30,22 +31,24 @@ STAGE="$(mktemp -d)"
 trap 'rm -rf "$STAGE"' EXIT
 PKG="$STAGE/$NAME"
 mkdir -p "$PKG/bin" "$PKG/player" "$PKG/cfg"
+BINARY="$PKG/bin/matrix_cc_$VERSION"
 
 echo "Building $NAME..."
-(cd "$ROOT/src/go" && CGO_ENABLED=0 GOOS=linux GOARCH=amd64 go build -trimpath -o "$PKG/bin/signaling-server" ./src)
+(cd "$ROOT/src/go" && CGO_ENABLED=0 GOOS=linux GOARCH=amd64 go build -trimpath -o "$BINARY" ./src)
 cp "$ROOT/player/ws.html" "$PKG/player/ws.html"
 cp "$ROOT/cfg/version" "$PKG/cfg/version"
 cp "$ROOT/release/setup.sh" "$ROOT/release/README.md" "$PKG/"
-chmod 755 "$PKG/setup.sh" "$PKG/bin/signaling-server"
+chmod 755 "$PKG/setup.sh" "$BINARY"
 
-GO_VERSION="$(go version "$PKG/bin/signaling-server" | awk '{print $2}')"
+GO_VERSION="$(go version "$BINARY" | awk '{print $2}')"
 cat > "$PKG/RELEASE" <<EOF
 version=$VERSION
+binary=$(basename "$BINARY")
 commit=$(git -C "$ROOT" rev-parse HEAD)
 dirty=$DIRTY
 go=$GO_VERSION
 built=$(date -u +%Y-%m-%dT%H:%M:%SZ)
-binary_sha256=$(sha256sum "$PKG/bin/signaling-server" | awk '{print $1}')
+binary_sha256=$(sha256sum "$BINARY" | awk '{print $1}')
 player_sha256=$(sha256sum "$PKG/player/ws.html" | awk '{print $1}')
 EOF
 

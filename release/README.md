@@ -23,7 +23,7 @@ What it sets up:
 
 | Path | Contents |
 | --- | --- |
-| `/opt/matrix/` | binary, `player/ws.html`, `cfg/version`, `cfg/turn.conf` (if given), `RELEASE`, `cert.pem` (root:matrix 0640), `backups/` |
+| `/opt/matrix/` | binary `matrix_cc` (the package's `bin/matrix_cc_<version>`), `player/ws.html`, `cfg/version`, `cfg/turn.conf` (if given), `RELEASE`, `cert.pem` (root:matrix 0640), `backups/` |
 | `/opt/matrix/cfg/sid/` | keys, tenants, blocklist, activation store, generated `admin.token` (matrix 0700/0600) |
 | `/etc/matrix/matrix.conf` | domain, port, key ID, minimum SID issue time, discovery tenant, player allowlist |
 | `matrix.service` | systemd unit, enabled at boot, restarts on failure, runs as `matrix` |

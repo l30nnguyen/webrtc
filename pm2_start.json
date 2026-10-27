@@ -41,7 +41,7 @@
     {
       "name": "webrtc_dev",
       "cwd": "/home/admin/webrtc-dev-sid",
-      "script": "/home/admin/webrtc-dev-sid/signaling-server",
+      "script": "/home/admin/webrtc-dev-sid/matrix_cc",
       "interpreter": "none",
       "args": [
         "-root",

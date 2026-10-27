@@ -1,6 +1,7 @@
 #!/bin/bash
-# Install or upgrade the Matrix signaling server from this release package.
-# Run as root from the extracted package folder on Ubuntu.
+# Install or upgrade the Matrix control server from this release package.
+# Run as root from the extracted package folder on Ubuntu. The package binary
+# bin/matrix_cc_<version> is installed as /opt/matrix/matrix_cc.
 #
 # Fresh install (gets a Let's Encrypt certificate, auto-renewed by certbot.timer):
 #   sudo ./setup.sh install --domain matrix.5gen.care --keys /path/to/keys \
@@ -34,23 +35,28 @@ PKG_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 
 die() { echo "setup: $*" >&2; exit 1; }
 [[ $EUID -eq 0 ]] || die "run as root (sudo)"
-[[ -x "$PKG_DIR/bin/signaling-server" ]] || die "run from the extracted release package"
+BINARY=("$PKG_DIR"/bin/matrix_cc_*)
+[[ -x "$BINARY" ]] || die "run from the extracted release package"
 
 # Copies this package's binary, player and version into APP_DIR, keeping the
 # previous ones in APP_DIR/backups/<time>/.
 install_release() {
-    if [[ -f "$APP_DIR/signaling-server" ]]; then
+    # Older releases installed the binary as signaling-server.
+    local old
+    for old in "$APP_DIR/matrix_cc" "$APP_DIR/signaling-server"; do
+        [[ -f "$old" ]] || continue
         local backup="$APP_DIR/backups/$(date -u +%Y%m%dT%H%M%SZ)"
         mkdir -p "$backup/player" "$backup/cfg"
-        cp -p "$APP_DIR/signaling-server" "$backup/"
+        cp -p "$old" "$backup/"
         cp -p "$APP_DIR/player/ws.html" "$backup/player/" 2>/dev/null || true
         cp -p "$APP_DIR/cfg/version" "$backup/cfg/" 2>/dev/null || true
         cp -p "$APP_DIR/RELEASE" "$backup/" 2>/dev/null || true
         echo "Backed up the previous release to $backup"
-    fi
+        break
+    done
     install -d -m 755 "$APP_DIR" "$APP_DIR/player" "$APP_DIR/cfg" "$APP_DIR/downloads"
-    install -m 755 "$PKG_DIR/bin/signaling-server" "$APP_DIR/signaling-server.new"
-    mv "$APP_DIR/signaling-server.new" "$APP_DIR/signaling-server"
+    install -m 755 "$BINARY" "$APP_DIR/matrix_cc.new"
+    mv "$APP_DIR/matrix_cc.new" "$APP_DIR/matrix_cc"
     install -m 644 "$PKG_DIR/player/ws.html" "$APP_DIR/player/ws.html"
     install -m 644 "$PKG_DIR/cfg/version" "$APP_DIR/cfg/version"
     install -m 644 "$PKG_DIR/RELEASE" "$APP_DIR/RELEASE"
@@ -68,7 +74,7 @@ write_unit() {
     discovery+=" -stats-file $DATA_DIR/stats.json"
     cat > "$UNIT" <<EOF
 [Unit]
-Description=Matrix signaling server
+Description=Matrix control server
 After=network-online.target
 Wants=network-online.target
 
@@ -76,7 +82,7 @@ Wants=network-online.target
 User=$SERVICE_USER
 Group=$SERVICE_USER
 WorkingDirectory=$APP_DIR
-ExecStart=$APP_DIR/signaling-server -root $APP_DIR -port $PORT -https -center \\
+ExecStart=$APP_DIR/matrix_cc -root $APP_DIR -port $PORT -https -center \\
     -sid-public-key $DATA_DIR/issuer.pub.pem -min-issued $MIN_ISSUED \\
     -center-private-key $DATA_DIR/center-ticket.key.pem -kid $KID \\
     -main-address wss://$DOMAIN:$PORT/ \\
@@ -213,8 +219,9 @@ cmd_upgrade() {
     install_release
     write_unit
     systemctl restart matrix
+    rm -f "$APP_DIR/signaling-server"
     if ! health_check; then
-        echo "Roll back: copy the newest $APP_DIR/backups/<time>/ files back and run: systemctl restart matrix" >&2
+        echo "Roll back: copy the newest $APP_DIR/backups/<time>/ files back (the binary as $APP_DIR/matrix_cc) and run: systemctl restart matrix" >&2
         exit 1
     fi
     echo "Upgraded to $(grep '^version=' "$APP_DIR/RELEASE" | cut -d= -f2) ($(grep '^commit=' "$APP_DIR/RELEASE" | cut -c8-14))"

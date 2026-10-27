@@ -165,13 +165,13 @@ Build from the Go module directory. This produces the one server binary used for
 ```sh
 cd server/src/go
 go build -o sidctl ./cmd/sidctl
-go build -o signaling-server ./src
+go build -o matrix_cc ./src   # release packages name it matrix_cc_<version>
 ```
 
 Run an ordinary signaling-server instance with Center APIs on the same HTTPS/WSS listener at 8443. Use the exact public MainServer root in `-main-address`. If explicitly setting `-ticket-public-key`, `-ticket-kid`, or `-ticket-aud`, each must agree with the Center signing configuration; the audience must exactly match the configured MainServer root. Paths shown here are deployment placeholders; protect all private files and persistent state with restrictive ownership and permissions.
 
 ```sh
-./signaling-server -root ../.. -port 8443 -https -center \
+./matrix_cc -root ../.. -port 8443 -https -center \
   -sid-public-key /secure/sid-issuer.pub.pem \
   -min-issued <minimum-issued-RFC3339> \
   -center-private-key /secure/center-ticket.key.pem -kid center-2026-01 \
