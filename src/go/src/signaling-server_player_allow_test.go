@@ -54,13 +54,29 @@ func TestPlayerAllowLimitsPlayerAndDeviceList(t *testing.T) {
 			t.Fatalf("allowed %s got %d for the player", remote, code)
 		}
 	}
-	for _, path := range []string{"/", "/demo/test01", "/api/devices"} {
+	for _, path := range []string{"/demo/test01", "/api/devices"} {
 		if code := playerStatus(s, path, "198.51.100.7:5000"); code != http.StatusNotFound {
 			t.Fatalf("other client got %d for %s, want 404", code, path)
 		}
 	}
 	if code := playerStatus(s, "/api/health", "198.51.100.7:5000"); code != http.StatusOK {
 		t.Fatalf("health check must stay public, got %d", code)
+	}
+}
+
+func TestRootAnswersOKInsteadOfThePlayer(t *testing.T) {
+	s := playerTestServer(t)
+	s.SetDiscoveryTenant("test01")
+	allow, _ := parsePlayerAllow("115.78.12.186")
+	s.SetPlayerAllow(allow)
+	for _, remote := range []string{"115.78.12.186:5000", "198.51.100.7:5000"} {
+		req := httptest.NewRequest(http.MethodGet, "/", nil)
+		req.RemoteAddr = remote
+		rec := httptest.NewRecorder()
+		s.ServeHTTP(rec, req)
+		if rec.Code != http.StatusOK || rec.Body.String() != "OK\n" || rec.Header().Get("Content-Type") != "text/plain; charset=utf-8" {
+			t.Fatalf("/ from %s = %d %q %q", remote, rec.Code, rec.Body.String(), rec.Header().Get("Content-Type"))
+		}
 	}
 }
 

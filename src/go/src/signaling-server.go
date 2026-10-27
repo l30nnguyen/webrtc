@@ -227,7 +227,11 @@ func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	switch {
-	case r.URL.Path == "/" || (s.discoveryTenant != "" && r.URL.Path == "/demo/"+s.discoveryTenant):
+	case r.URL.Path == "/":
+		// The root names nothing: the player lives at /demo/<tenant>.
+		w.Header().Set("Content-Type", "text/plain; charset=utf-8")
+		w.Write([]byte("OK\n"))
+	case s.discoveryTenant != "" && r.URL.Path == "/demo/"+s.discoveryTenant:
 		if !s.playerAllowed(r) {
 			http.NotFound(w, r)
 			return
@@ -1124,7 +1128,9 @@ func main() {
 			}
 		}
 		log.Printf("Listening on wss://0.0.0.0%s", addr)
-		log.Printf("  GET https://0.0.0.0%s/         — Matrix Player", addr)
+		if *discoveryTenant != "" {
+			log.Printf("  GET https://0.0.0.0%s/demo/%s — Matrix Player", addr, *discoveryTenant)
+		}
 		log.Printf("  GET https://0.0.0.0%s/api/devices  — list online devices", addr)
 		log.Printf("  GET https://0.0.0.0%s/api/health   — health check", addr)
 		log.Fatal(httpServer.ListenAndServeTLS("", ""))
@@ -1133,7 +1139,9 @@ func main() {
 			log.Fatal("-link-listen requires -https")
 		}
 		log.Printf("Listening on ws://0.0.0.0%s", addr)
-		log.Printf("  GET http://0.0.0.0%s/         — Matrix Player", addr)
+		if *discoveryTenant != "" {
+			log.Printf("  GET http://0.0.0.0%s/demo/%s — Matrix Player", addr, *discoveryTenant)
+		}
 		log.Printf("  GET http://0.0.0.0%s/api/devices  — list online devices", addr)
 		log.Printf("  GET http://0.0.0.0%s/api/health   — health check", addr)
 		log.Fatal(httpServer.ListenAndServe())

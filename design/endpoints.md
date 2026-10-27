@@ -191,8 +191,8 @@ The role (camera or viewer) comes from the ticket. Reports feed `matrix-fleet st
 | Endpoint | Purpose |
 | --- | --- |
 | `wss://<host>/<id>?ticket=...` | Control connections (1.3, 2.3) |
-| `GET /` | Web player (`ws.html`). Limited to `-player-allow` IPs when that is set. |
-| `GET /demo/<tenant>` | Same player, only when `-discovery-tenant <tenant>` is set |
+| `GET /` | Plain text `OK` (no page) |
+| `GET /demo/<tenant>` | Web player (`ws.html`), only when `-discovery-tenant <tenant>` is set; limited to `-player-allow` IPs when that is set (Center: `/demo/test01`, `115.78.12.186`) |
 | `GET /api/devices[?type=producer]` | Cameras online in the discovery tenant: `{"count":N,"devices":[{"id","nickname","tenant","connected_at","path","type","rtt","sid"}]}`. Only with `-discovery-tenant` or `-demo-tenant`; limited by `-player-allow`. |
 | `GET /api/health` | `{"status":"ok","clients":N,"version":"2.1.1","ticket_admission":true}` |
 | `GET /downloads/<path>` | Files under `/opt/matrix/downloads/` (firmware) |

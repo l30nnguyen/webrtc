@@ -30,7 +30,8 @@ What it sets up:
 | `/etc/letsencrypt/renewal-hooks/deploy/matrix.sh` | rebuilds `cert.pem` and restarts the service after each renewal (`certbot.timer`) |
 
 `--discovery-tenant` turns on the camera list for that tenant (demo only) and
-serves the player at `/demo/<tenant>`; leave it out to keep both off.
+serves the player at `/demo/<tenant>`; leave it out to keep both off. The root
+`/` only answers `OK`.
 `--player-allow` (comma-separated IPs/CIDRs) limits the player page and the
 camera list to those client addresses; everyone else gets 404. Health, Center,
 WebSocket and downloads stay public.
