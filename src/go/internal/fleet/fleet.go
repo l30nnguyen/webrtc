@@ -46,6 +46,9 @@ type Node struct {
 	// PublicKey is the node's link key (raw Ed25519, base64url). The node
 	// that runs Center has none; a node without one cannot connect.
 	PublicKey string `json:"public_key,omitempty"`
+	// LinkFrom lists the IP addresses and CIDRs the node's link may come
+	// from. Empty means the addresses its host name resolves to.
+	LinkFrom []string `json:"link_from,omitempty"`
 	// TokenSHA256 belonged to the phase 2 HTTP report. It is accepted so old
 	// files still load, and ignored.
 	TokenSHA256 string `json:"token_sha256,omitempty"`

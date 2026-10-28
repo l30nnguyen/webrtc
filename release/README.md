@@ -87,17 +87,24 @@ sudo matrix-fleet rollback [VERSION]    # re-apply the previous (or a given) ver
   applies to new connections.
 
 Every other node runs with the same `-kid` and Center public key
-(`-ticket-public-key`) and keeps a link open to Center's private link port:
+(`-ticket-public-key`) and keeps a link open to Center at
+`wss://matrix.5gen.care/v1/link` (port 443). Center answers 404 there, as for
+any unknown path, unless the request comes from one of that node's IP
+addresses (`link_from` in config.json, or what the node's host name resolves
+to, refreshed every 5 minutes) and carries a fresh signature with the node's
+key. Center then signs its challenge, so the node knows it is the real
+Center, and the node signs the login. 5 failed attempts from an IP block it
+for an hour (restart Center to clear). Node clocks must be within 60 s
+(systemd-timesyncd). `LINK_LISTEN=<private ip>:8444` in Center's
+`/etc/matrix/matrix.conf` also serves the links on a private address.
 
-1. On Center, set `LINK_LISTEN=<private ip>:8444` in `/etc/matrix/matrix.conf`
-   and run `sudo ./setup.sh upgrade`. Allow that port only from the nodes
-   (DigitalOcean: Cloud Firewall rule from the tag `matrix-node`).
+1. Make sure the node's DNS name points at the node (or plan its `link_from`).
 2. On the node (DNS pointing at it, port 80 open), from the extracted package:
 
    ```bash
    sudo ./setup.sh install-node --domain matrix-eu00.5gen.care \
         --center-key center-ticket.pub.pem --kid <Center's KID> \
-        --link-to wss://<Center private ip>:8444/ --link-server-name matrix.5gen.care \
+        --link-to wss://matrix.5gen.care/ \
         --name eu00 --region DE [--blocklist blocklist.txt] [--relay-secrets relay-secrets.json]
    ```
 

@@ -10,7 +10,8 @@ Both server roles run the same binary:
 | Port | Where | Who reaches it |
 | --- | --- | --- |
 | 443 (HTTPS + WSS) | Center and every node | Everyone: cameras, apps, browsers, the pairing system |
-| 8444 (private, `LINK_LISTEN`) | Center only | Control nodes only (firewall) |
+| 443 `/v1/link` | Center only | Control nodes only: everyone else gets `404` (section 4.2) |
+| `LINK_LISTEN` (optional, private) | Center only | Control nodes, when a private network exists |
 | `/run/matrix/admin.sock` (Unix socket) | Center and every node | `matrix-fleet` on that machine, through sudo |
 | 3478/udp + relay range | Relay hosts (violet) | Cameras and apps |
 | 9100 (node_exporter) | Relay hosts | That region's control node only |
@@ -235,14 +236,22 @@ Authorization: Bearer <admin token>
 
 Without the token: `401`. With no token configured: `404`.
 
-### 4.2 Control node ↔ Center link (`wss://<Center private IP>:8444/v1/link`)
+### 4.2 Control node ↔ Center link (`wss://matrix.5gen.care/v1/link`)
 
 The node opens the connection and keeps it open. TLS is checked against the Center's name (`-link-server-name`). The full protocol is in `src/go/internal/link/link.go`.
 
+Before anything is upgraded, Center answers `404` (the same as any unknown path) unless all of these hold:
+
+- the request comes from one of that node's IP addresses: `link_from` in `config.json` (IPs or CIDRs), or else what the node's host name resolves to (refreshed every 5 minutes and on every config change);
+- it has the headers `Matrix-Link-Node` (node address), `Matrix-Link-Time` (Unix seconds, within 60 s of Center's clock), `Matrix-Link-Nonce` (32 random bytes, base64url, never reused) and `Matrix-Link-Sig`: Ed25519 with the node's key over `"matrix-node-upgrade-v1" ‖ time ‖ nonce ‖ Center name ‖ address`;
+- the IP is not blocked. 5 failed attempts (bad header or login) within an hour block it for an hour.
+
+One login at a time per IP, and at most 32 waiting overall (`503` when busy).
+
 | Step | Message |
 | --- | --- |
-| Center → node | `{"type":"challenge","nonce":"<32 bytes>"}` |
-| node → Center, within 5 s, ≤ 1 KB | `{"type":"login","address":"wss://<node>:443/","sig":"..."}`. Ed25519 with the node's key over `"matrix-node-link-v1" ‖ nonce ‖ Center name ‖ address`, checked against `public_key` in `config.json`. |
+| Center → node | `{"type":"challenge","nonce":"<32 bytes>","sig":"..."}`. `sig` is Ed25519 with the Center ticket key over `"matrix-center-link-v1" ‖ node's upgrade nonce ‖ nonce ‖ Center name ‖ address`. The node hangs up if it doesn't verify, so a fake server can't pose as Center. |
+| node → Center, within 5 s, ≤ 1 KB | `{"type":"login","address":"wss://<node>:443/","sig":"..."}` (the same address as the header). Ed25519 with the node's key over `"matrix-node-link-v1" ‖ nonce ‖ Center name ‖ address`, checked against `public_key` in `config.json`. |
 | node → Center | `{"type":"hello","cameras":[...],"clients":N,"stats":{...},"relays":[...],"version":N}` |
 | Center → node | `{"type":"welcome"}`. The node counts itself linked only after this. A refused node is simply disconnected. |
 | node → Center | `{"type":"camera","id":"<device id>","online":true}`, sent as cameras come and go |

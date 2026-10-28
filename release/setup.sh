@@ -15,12 +15,13 @@
 # prints its entry for Center's config.json):
 #   sudo ./setup.sh install-node --domain matrix-eu00.5gen.care \
 #        --center-key center-ticket.pub.pem --kid KID \
-#        --link-to wss://10.10.0.2:8444/ --link-server-name matrix.5gen.care \
+#        --link-to wss://matrix.5gen.care/ \
 #        [--name eu00] [--region DE] [--port 443] [--blocklist blocklist.txt] \
 #        [--relay-secrets relay-secrets.json] [--turn turn.conf] [--link-ca ca.pem] [--player-allow ...] \
 #        [--discovery-tenant test01]   (player at /demo/<tenant>, camera list of that tenant on this node)
 #   KID is Center's (KID= in its /etc/matrix/matrix.conf); --link-to is Center's
-#   LINK_LISTEN; --link-server-name is the name on Center's certificate.
+#   address (or its LINK_LISTEN); --link-server-name is the name on Center's
+#   certificate, needed only when --link-to names an IP address.
 #
 # Replace the blocklist (validated first; the server reads it without a restart;
 # copy the same file to every server):
@@ -42,8 +43,10 @@
 #   sudo matrix-fleet check new.json | apply new.json | rollback [VERSION]
 # /opt/matrix/cfg/geoip.csv (DB-IP IP-to-Country Lite CSV) adds the country
 # choice. A phase 2 cfg/sid/nodes.json is moved to config.json on upgrade.
-# Other nodes link to Center on LINK_LISTEN=host:port in /etc/matrix/matrix.conf
-# (the private address and port, e.g. 10.10.0.2:8444; firewall it to the nodes).
+# Other nodes link to Center's main port at /v1/link; only each node's own IP
+# addresses (link_from in config.json, or what its name resolves to) get past a
+# 404. LINK_LISTEN=host:port in /etc/matrix/matrix.conf also serves the links on
+# a separate (private) address.
 #
 # Upgrade an installed Center or node to this package (config, keys and data
 # are kept; edit /etc/matrix/matrix.conf first to change a setting):
@@ -137,7 +140,7 @@ write_unit() {
     # control server nodes; cfg/geoip.csv adds the region (country) choice.
     [[ -f "$FLEET_CONFIG" ]] && discovery+=" -config-file $FLEET_CONFIG"
     [[ -f "$FLEET_CONFIG" && -f "$APP_DIR/cfg/geoip.csv" ]] && discovery+=" -geoip-file $APP_DIR/cfg/geoip.csv"
-    # Nodes link to LINK_LISTEN (host:port, the private address; see README).
+    # Nodes link to the main port; LINK_LISTEN (host:port) adds a private one.
     [[ -f "$FLEET_CONFIG" && -n "${LINK_LISTEN:-}" ]] && discovery+=" -link-listen $LINK_LISTEN"
     discovery+=" -stats-file $DATA_DIR/stats.json -admin-socket /run/matrix/admin.sock"
     cat > "$UNIT" <<EOF
@@ -380,7 +383,7 @@ cmd_install_node() {
     [[ -f "$CONF" ]] && die "already installed ($CONF exists); use: setup.sh upgrade"
     [[ -f "$center_key" ]] || die "missing $center_key"
     grep -q "BEGIN PUBLIC KEY" "$center_key" || die "$center_key must be Center's public key (center-ticket.pub.pem), never its private key"
-    [[ "$LINK_TO" =~ ^wss://[^/]+/$ ]] || die "--link-to must be wss://host:port/ (Center's LINK_LISTEN)"
+    [[ "$LINK_TO" =~ ^wss://[^/]+/$ ]] || die "--link-to must be wss://host[:port]/ (Center's address)"
     local link_host=${LINK_TO#wss://}
     link_host=${link_host%/}
     link_host=${link_host%:*}

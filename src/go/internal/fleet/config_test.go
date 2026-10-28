@@ -125,6 +125,8 @@ func TestValidate(t *testing.T) {
 		"address with path":    func(c *Config) { c.Nodes[1].Address = "wss://de1.example.test/x" },
 		"negative capacity":    func(c *Config) { c.Nodes[1].Capacity = -1 },
 		"region with a space":  func(c *Config) { c.Nodes[1].Region = "D E" },
+		"bad link_from":        func(c *Config) { c.Nodes[1].LinkFrom = []string{"10.0.0.0/33"} },
+		"link_from on Center":  func(c *Config) { c.Nodes[0].LinkFrom = []string{"10.0.0.1"} },
 	}
 	for name, mutate := range cases {
 		c := routedConfig(nil)
@@ -133,7 +135,9 @@ func TestValidate(t *testing.T) {
 			t.Errorf("%s: accepted", name)
 		}
 	}
-	if err := routedConfig(map[string]string{"IT": "DE", "*": "US"}).Validate(self); err != nil {
+	valid := routedConfig(map[string]string{"IT": "DE", "*": "US"})
+	valid.Nodes[1].LinkFrom = []string{"152.42.232.159", "10.104.0.0/20", "2001:db8::/64"}
+	if err := valid.Validate(self); err != nil {
 		t.Fatalf("valid config rejected: %v", err)
 	}
 }

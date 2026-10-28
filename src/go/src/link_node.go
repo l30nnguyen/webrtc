@@ -2,6 +2,7 @@ package main
 
 import (
 	"crypto/ed25519"
+	"crypto/rand"
 	"crypto/tls"
 	"crypto/x509"
 	"encoding/base64"
@@ -11,9 +12,11 @@ import (
 	"io/fs"
 	"log"
 	mathrand "math/rand"
+	"net/http"
 	"net/url"
 	"os"
 	"path/filepath"
+	"strconv"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -164,9 +167,23 @@ func (n *nodeLink) run() {
 }
 
 func (n *nodeLink) connectOnce() error {
+	nodeNonce := make([]byte, link.NonceSize)
+	if _, err := rand.Read(nodeNonce); err != nil {
+		return err
+	}
+	unix := time.Now().Unix()
+	header := http.Header{}
+	header.Set(link.HeaderNode, n.address)
+	header.Set(link.HeaderTime, strconv.FormatInt(unix, 10))
+	header.Set(link.HeaderNonce, base64.RawURLEncoding.EncodeToString(nodeNonce))
+	header.Set(link.HeaderSig, base64.RawURLEncoding.EncodeToString(
+		ed25519.Sign(n.key, link.HeaderMessage(unix, nodeNonce, n.serverName, n.address))))
 	dialer := websocket.Dialer{TLSClientConfig: n.tls, HandshakeTimeout: 10 * time.Second}
-	conn, _, err := dialer.Dial(n.url, nil)
+	conn, resp, err := dialer.Dial(n.url, header)
 	if err != nil {
+		if resp != nil && resp.StatusCode == http.StatusNotFound {
+			return errors.New("Center refused this node: check its public_key and IP address in config.json, and its clock")
+		}
 		return err
 	}
 	defer conn.Close()
@@ -179,6 +196,11 @@ func (n *nodeLink) connectOnce() error {
 	nonce, err := base64.RawURLEncoding.DecodeString(challenge.Nonce)
 	if err != nil || len(nonce) != link.NonceSize {
 		return errors.New("bad challenge")
+	}
+	// Only the real Center holds the key that signs configurations.
+	centerSig, err := base64.RawURLEncoding.DecodeString(challenge.Sig)
+	if err != nil || !ed25519.Verify(n.centerKey, link.CenterMessage(nodeNonce, nonce, n.serverName, n.address), centerSig) {
+		return errors.New("the server is not Center: its challenge is not signed with Center's key")
 	}
 	sig := ed25519.Sign(n.key, link.LoginMessage(nonce, n.serverName, n.address))
 	var writeMu sync.Mutex
@@ -290,7 +312,7 @@ func readNodeKey(path string) (ed25519.PrivateKey, error) {
 func setupNodeLink(srv *Server, root, linkTo, serverName, caPath, keyPath, address, mainAddress, ticketAudience, configPath string) (*nodeLink, error) {
 	u, err := url.Parse(linkTo)
 	if err != nil || u.Scheme != "wss" || u.Hostname() == "" || u.Path != "/" || u.RawQuery != "" || u.User != nil {
-		return nil, errors.New("-link-to must be wss://host:port/")
+		return nil, errors.New("-link-to must be wss://host[:port]/")
 	}
 	if serverName == "" {
 		serverName = u.Hostname()

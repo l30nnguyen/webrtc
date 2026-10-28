@@ -1,7 +1,17 @@
 // Package link is the protocol between a control node and Center: one
-// WebSocket per node, opened by the node to Center's private link port.
+// WebSocket per node, opened by the node to Center at Path, on the public
+// port (or a private link port).
 //
-//  1. Center sends {"type":"challenge","nonce"}. The node answers within
+//  0. The node's upgrade request carries HeaderNode (its address), HeaderTime
+//     (Unix seconds), HeaderNonce (NonceSize random bytes, base64url) and
+//     HeaderSig: its signature over HeaderMessage(time, nonce, center,
+//     address). Center answers 404, as for any unknown path, unless the
+//     request comes from one of that node's IP addresses (config.json
+//     link_from, or what its host name resolves to), the time is within
+//     HeaderWindow and the nonce is new. Nothing is upgraded before that.
+//  1. Center sends {"type":"challenge","nonce","sig"}: sig is Center's
+//     signature over CenterMessage(node nonce, nonce, center, address), so the
+//     node knows it reached the real Center. The node answers within
 //     LoginTimeout with {"type":"login","address","sig"} (at most
 //     MaxLoginBytes): an Ed25519 signature with the node's own key over
 //     LoginMessage(nonce, center, address), where center is the host name the
@@ -34,8 +44,15 @@ import (
 )
 
 const (
-	// Path is the link's HTTP path on Center's link port.
+	// Path is the link's HTTP path.
 	Path = "/v1/link"
+	// The upgrade request's headers (step 0).
+	HeaderNode  = "Matrix-Link-Node"
+	HeaderTime  = "Matrix-Link-Time"
+	HeaderNonce = "Matrix-Link-Nonce"
+	HeaderSig   = "Matrix-Link-Sig"
+	// HeaderWindow is how far HeaderTime may be from Center's clock.
+	HeaderWindow = 60 * time.Second
 	// NonceSize is the size of Center's login challenge.
 	NonceSize = 32
 	// LoginTimeout is how long Center waits for the login.
@@ -54,6 +71,8 @@ const (
 	MaxPendingLogins = 32
 
 	loginContext  = "matrix-node-link-v1"
+	headerContext = "matrix-node-upgrade-v1"
+	centerContext = "matrix-center-link-v1"
 	configContext = "matrix-config-v1"
 )
 
@@ -88,6 +107,30 @@ func LoginMessage(nonce []byte, center, address string) []byte {
 	message := make([]byte, 0, len(loginContext)+len(nonce)+len(center)+len(address)+3)
 	message = append(message, loginContext...)
 	message = append(message, 0)
+	message = append(message, nonce...)
+	message = append(message, center...)
+	message = append(message, 0)
+	message = append(message, address...)
+	return message
+}
+
+// HeaderMessage is what a node signs in its upgrade request.
+func HeaderMessage(unix int64, nonce []byte, center, address string) []byte {
+	message := append([]byte(headerContext), 0)
+	message = strconv.AppendInt(message, unix, 10)
+	message = append(message, 0)
+	message = append(message, nonce...)
+	message = append(message, center...)
+	message = append(message, 0)
+	message = append(message, address...)
+	return message
+}
+
+// CenterMessage is what Center signs in its challenge: the node's upgrade
+// nonce and Center's own.
+func CenterMessage(nodeNonce, nonce []byte, center, address string) []byte {
+	message := append([]byte(centerContext), 0)
+	message = append(message, nodeNonce...)
 	message = append(message, nonce...)
 	message = append(message, center...)
 	message = append(message, 0)

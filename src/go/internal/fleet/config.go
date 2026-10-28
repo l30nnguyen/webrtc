@@ -149,6 +149,14 @@ func (c Config) Validate(self string) error {
 				return fmt.Errorf("node %s: public_key must be a raw Ed25519 key in base64url (43 characters)", n.Address)
 			}
 		}
+		if n.Address == self && len(n.LinkFrom) > 0 {
+			return fmt.Errorf("node %s is this Center's own node and takes no link_from", n.Address)
+		}
+		for _, item := range n.LinkFrom {
+			if _, err := ParsePrefix(item); err != nil {
+				return fmt.Errorf("node %s: link_from %q must be an IP address or CIDR", n.Address, item)
+			}
+		}
 		if n.Region != "" {
 			regions[n.Region] = true
 		}
@@ -335,5 +343,21 @@ func describeNode(n Node) string {
 	if len(n.Countries) > 0 {
 		s += " countries=" + strings.Join(n.Countries, ",")
 	}
+	if len(n.LinkFrom) > 0 {
+		s += " link_from=" + strings.Join(n.LinkFrom, ",")
+	}
 	return s
+}
+
+// ParsePrefix reads an IP address (as a single-address prefix) or a CIDR.
+func ParsePrefix(text string) (netip.Prefix, error) {
+	if addr, err := netip.ParseAddr(text); err == nil {
+		addr = addr.Unmap()
+		return netip.PrefixFrom(addr, addr.BitLen()), nil
+	}
+	prefix, err := netip.ParsePrefix(text)
+	if err != nil {
+		return netip.Prefix{}, err
+	}
+	return prefix.Masked(), nil
 }

@@ -30,6 +30,7 @@ import (
 	"signaling-server/internal/admission"
 	"signaling-server/internal/center"
 	"signaling-server/internal/fleet"
+	"signaling-server/internal/link"
 	"signaling-server/internal/relay"
 	"signaling-server/internal/sid"
 	"signaling-server/internal/stats"
@@ -220,6 +221,14 @@ func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 	if !s.allowRequest(w, r) {
+		return
+	}
+	if r.URL.Path == link.Path {
+		if s.hub == nil {
+			http.NotFound(w, r)
+			return
+		}
+		s.hub.ServeHTTP(w, r)
 		return
 	}
 	if s.center != nil && isCenterPath(r.URL.Path) {
@@ -1007,9 +1016,9 @@ func main() {
 	nodesPath := flag.String("nodes-file", "", "alias for -config-file (phase 2 name)")
 	geoipPath := flag.String("geoip-file", "", "with -config-file: CSV of first_ip,last_ip,country (DB-IP IP-to-Country Lite) for region choice")
 	statsPath := flag.String("stats-file", "", "file to keep viewing counters in across restarts (saved every minute)")
-	linkListen := flag.String("link-listen", "", "with -config-file and -https: host:port of the private port control nodes link to (for example 10.10.0.2:8444)")
-	linkName := flag.String("link-name", "", "with -link-listen: Center host name the nodes check its certificate for and sign at login (default: the -main-address host)")
-	linkTo := flag.String("link-to", "", "node: Center's link root, wss://host:port/ (its -link-listen port); this node then reports its cameras and counters and takes Center's configuration")
+	linkListen := flag.String("link-listen", "", "with -center, -config-file and -https: also serve the node links on this host:port (for example a private address 10.10.0.2:8444); they are always on the main port")
+	linkName := flag.String("link-name", "", "with -center and -config-file: Center host name the nodes check its certificate for and sign (default: the -main-address host)")
+	linkTo := flag.String("link-to", "", "node: Center's link root, wss://host[:port]/ (its main port, or its -link-listen port); this node then reports its cameras and counters and takes Center's configuration")
 	linkServerName := flag.String("link-server-name", "", "with -link-to: Center host name for the certificate check and login, when -link-to names an IP (default: the -link-to host)")
 	linkCA := flag.String("link-ca", "", "with -link-to: PEM file of the CA that signed Center's certificate (default: the system roots)")
 	nodeKeyPath := flag.String("node-key", "", "with -link-to: this node's link key (PKCS#8 Ed25519 PEM, mode 0600; create with: matrix_cc fleet keygen FILE)")
@@ -1074,7 +1083,12 @@ func main() {
 		log.Fatal(err)
 	}
 	if srv.fleet != nil {
+		if err := srv.startLinkHub(*linkName, *mainAddress); err != nil {
+			log.Fatalf("node links: %v", err)
+		}
 		go srv.reloadFleetOnHangup(*configPath)
+	} else if *linkListen != "" {
+		log.Fatal("-link-listen requires -center and -config-file")
 	}
 	if *adminSocket != "" {
 		listener, err := listenAdminSocket(*adminSocket)
@@ -1127,8 +1141,8 @@ func main() {
 			Certificates: []tls.Certificate{cert},
 			MinVersion:   tls.VersionTLS12,
 		}
-		if *linkListen != "" {
-			if err := srv.startLinkListener(*linkListen, *linkName, *mainAddress, httpServer.TLSConfig); err != nil {
+		if srv.hub != nil && *linkListen != "" {
+			if err := srv.startLinkListener(*linkListen, httpServer.TLSConfig); err != nil {
 				log.Fatalf("-link-listen: %v", err)
 			}
 		}

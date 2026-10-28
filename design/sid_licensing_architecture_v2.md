@@ -305,7 +305,7 @@ Each node opens the link to Center and keeps it open; Center never connects to n
 | Port | Use | Reachable by |
 | --- | --- | --- |
 | 443 | Cameras, viewers, activation, viewer tickets, pairing-system admin (`/v1/admin/status`, `/v1/admin/release`) | Everyone |
-| 8444 (private) | Center ↔ node link: presence, statistics, config | Nodes only: Center listens on its private (VPC) address; DigitalOcean Cloud Firewall allows the port only from droplets tagged `matrix-node` |
+| 443 `/v1/link` | Center ↔ node link: presence, statistics, config | Nodes only: the regions can't share a private network, so the link is on the public port and Center answers 404 to anything but a node's own IP with a fresh signature (below). `LINK_LISTEN` can add a private address later. |
 | 22 | Operator: `matrix-fleet` on Center | Operator IPs only |
 | 3478, 5349, relay range | Relay stream server | Everyone |
 
@@ -344,7 +344,9 @@ Operator commands have no network port: `matrix-fleet` talks to the local server
 
 A rejected file changes nothing. Cameras that are connected stay where they are.
 
-**Center ↔ node link.** A WebSocket from the node to `wss://<Center>:8444/v1/link`, TLS verified against the Center's host name.
+**Center ↔ node link.** A WebSocket from the node to `wss://<Center>/v1/link` on port 443, TLS verified against the Center's host name.
+
+0. *Gate.* Before upgrading, Center checks the source IP against the node's `link_from` (or its resolved host name) and a signed, timestamped, single-use header (`Matrix-Link-*`). Anything else gets the plain 404 of an unknown path. 5 failures from an IP block it for an hour. Center's challenge is signed with its ticket key over the node's nonce, so the node verifies it reached the real Center.
 
 1. *Node login.* Center sends a random challenge. The node answers within 5 s (first message, at most 1 KB) with its address and an Ed25519 signature over `"matrix-node-link-v1" || challenge || Center host || node address`, made with its own key (`-node-key`, never leaves the node). Center checks it against the node's `public_key` in `config.json`. Removing a node from the config drops its link at once. A node can only report for itself.
 2. *Presence.* After login the node sends `hello` (full camera list, client count, config version), then `camera` messages as cameras come and go, and `stats` every 60 s. Center replaces its view of a node on every `hello`, so a missed change is repaired at the next reconnect. A ping every 10 s; a link with no answer is closed and the node counts as down.
@@ -362,7 +364,7 @@ Before login a connection gets nothing else; unauthenticated connections are cap
 **DigitalOcean setup.**
 
 - One VPC per region with its own range (for example `10.10.0.0/20` EU, `10.20.0.0/20` US), peered with the Center's VPC. Peered ranges must not overlap; BLR1 has no cross-region peering; droplets created before 2 October 2024 need a manual change for peering.
-- Cloud Firewall: 443 and relay ports from everyone, 8444 from tag `matrix-node`, 22 from operator IPs, relay metrics (node_exporter 9100) from the region's node.
+- Cloud Firewall: 80, 443 and relay ports from everyone, 22 from operator IPs, nothing else, relay metrics (node_exporter 9100) from the region's node.
 - A Reserved IP for Center, so `matrix.5gen.care` survives a droplet replacement.
 - A node outside DigitalOcean joins over WireGuard; nothing else changes.
 
