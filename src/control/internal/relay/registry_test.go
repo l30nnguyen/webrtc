@@ -8,11 +8,12 @@ import (
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
-	"os"
 	"path/filepath"
 	"strconv"
 	"testing"
 	"time"
+
+	"signaling-server/internal/history"
 )
 
 var testKey = []byte("relay-shared-secret-0123456789")
@@ -108,14 +109,21 @@ func TestRegistryTakesSignedReports(t *testing.T) {
 	}
 }
 
-func TestRegistryKeepsRelaysAndMinutes(t *testing.T) {
+func TestRegistryKeepsRelaysAndStatistics(t *testing.T) {
 	dir := t.TempDir()
 	now := time.Date(2026, 11, 3, 8, 0, 5, 0, time.UTC)
-	r, _ := NewRegistry(dir)
-	r.Now = func() time.Time { return now }
+	clock := func() time.Time { return now }
+	store, err := history.Open(filepath.Join(dir, "statistic"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	store.Now = clock
+	r, _ := NewRegistry(filepath.Join(dir, "relays"))
+	r.Now, r.History = clock, store
 	report := sampleReport()
-	for i, counters := range []struct{ rx, tx, total, alloc int64 }{{0, 0, 0, 0}, {1e6, 2e6, 4, 2}, {3e6, 5e6, 6, 3}} {
-		report.RxBytes, report.TxBytes, report.AllocationsTotal, report.Allocations = counters.rx, counters.tx, counters.total, counters.alloc
+	for i, c := range []struct{ rx, tx, total, alloc, udp, tls int64 }{{0, 0, 0, 0, 0, 0}, {1e6, 2e6, 4, 2, 1, 1}, {3e6, 5e6, 6, 3, 2, 1}} {
+		report.RxBytes, report.TxBytes, report.AllocationsTotal, report.Allocations = c.rx, c.tx, c.total, c.alloc
+		report.ByTransport = map[string]int64{"udp": c.udp, "tcp": 0, "tls": c.tls}
 		report.Mbps = float64(i)
 		post(r, signed(t, report, testKey, now))
 		now = now.Add(15 * time.Second)
@@ -125,47 +133,32 @@ func TestRegistryKeepsRelaysAndMinutes(t *testing.T) {
 	now = time.Date(2026, 11, 3, 8, 1, 10, 0, time.UTC)
 	post(r, signed(t, report, testKey, now))
 	now = now.Add(time.Minute)
-	r.Flush()
+	store.Flush()
 
-	minutes := r.Minutes(now.Add(-time.Hour))
-	if len(minutes) != 2 {
-		t.Fatalf("minutes %+v", minutes)
+	rows, err := store.Rows(history.Query{From: now.Add(-time.Hour), To: now, Step: history.Minute, Source: history.SourceRelay})
+	if err != nil || len(rows) != 2 {
+		t.Fatalf("rows %+v %v", rows, err)
 	}
-	first, second := minutes[0], minutes[1]
-	if first.Reports != 3 || first.TxBytes != 5e6 || first.NewAllocations != 6 || first.AllocationsMax != 3 || first.MbpsMax != 2 || first.MbpsAvg != 1 {
+	first, second := rows[0], rows[1]
+	if first.Name != "relay-sg01" || first.Region != "SG" || first.Counts["reports"] != 3 || first.Counts["tx_bytes"] != 5e6 ||
+		first.Counts["new_clients"] != 6 || first.Gauges["clients"].Max != 3 || first.Gauges["clients_udp"].Max != 2 ||
+		first.Gauges["mbps"].Max != 2 || first.Gauges["mbps"].Avg != 1 {
 		t.Fatalf("first minute %+v", first)
 	}
-	if second.TxBytes != 1e6 || second.NewAllocations != 1 {
+	if second.Counts["tx_bytes"] != 1e6 || second.Counts["new_clients"] != 1 {
 		t.Fatalf("after the restart %+v", second)
-	}
-	if _, err := os.Stat(filepath.Join(dir, "stats", "2026-11-03.jsonl")); err != nil {
-		t.Fatal(err)
 	}
 	// Known again after the control server restarts, but not handed out
 	// until it reports again.
-	again, err := NewRegistry(dir)
+	again, err := NewRegistry(filepath.Join(dir, "relays"))
 	if err != nil {
 		t.Fatal(err)
 	}
-	again.Now = r.Now
+	again.Now = clock
 	if known := again.Known(); len(known) != 1 || known[0].Name != "relay-sg01" {
 		t.Fatalf("reloaded %+v", known)
 	}
 	if len(again.Relays()) != 0 {
 		t.Fatal("a relay from the saved file is handed out before it reports")
-	}
-}
-
-func TestStatsArePruned(t *testing.T) {
-	dir := t.TempDir()
-	r, _ := NewRegistry(dir)
-	old := filepath.Join(dir, "stats", "2026-01-01.jsonl")
-	os.WriteFile(old, []byte("{}\n"), 0o600)
-	r.Now = func() time.Time { return time.Date(2026, 11, 3, 8, 0, 0, 0, time.UTC) }
-	post(r, signed(t, sampleReport(), testKey, r.Now()))
-	r.Now = func() time.Time { return time.Date(2026, 11, 3, 8, 1, 0, 0, time.UTC) }
-	r.Flush()
-	if _, err := os.Stat(old); !os.IsNotExist(err) {
-		t.Fatal("statistics older than StatsDays kept")
 	}
 }

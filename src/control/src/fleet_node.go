@@ -15,17 +15,23 @@ import (
 // SetStats turns on viewing counters on this node.
 func (s *Server) SetStats(counters *stats.Counters) { s.stats = counters }
 
-func (s *Server) countStat(update func(*stats.Counters)) {
+// countStat counts an event in the daily viewing counters and, as name, in
+// the region's statistics.
+func (s *Server) countStat(name string, update func(*stats.Counters)) {
 	if s.stats != nil {
 		update(s.stats)
 	}
+	s.countHistory(map[string]int64{name: 1})
 }
+
+// relayProtocols are the ways a viewer may reach the relay stream server.
+var relayProtocols = map[string]bool{"udp": true, "tcp": true, "tls": true}
 
 // recordReport counts a {"type":"report"} message: the outcome of one viewing
 // attempt as the camera or the viewer app saw it. The role comes from the
 // client's ticket, never from the message. Reports are never forwarded.
 func (s *Server) recordReport(c *Client, msg map[string]interface{}) {
-	if s.stats == nil {
+	if s.stats == nil && s.history == nil {
 		return
 	}
 	report := stats.Report{Role: stats.RolePlayer}
@@ -40,9 +46,29 @@ func (s *Server) recordReport(c *Client, msg map[string]interface{}) {
 	if ms, ok := msg["setup_ms"].(float64); ok {
 		report.SetupMillis = int(ms)
 	}
-	if report.Normalize() {
+	if !report.Normalize() {
+		return
+	}
+	if s.stats != nil {
 		s.stats.Record(report)
 	}
+	// In the statistics: camera_connected, viewer_path_relay,
+	// viewer_relay_tls, viewer_error_no_path, ...
+	prefix := "viewer_"
+	if report.Role == stats.RoleCamera {
+		prefix = "camera_"
+	}
+	counts := map[string]int64{prefix + report.Result: 1}
+	switch report.Result {
+	case stats.ResultConnected:
+		counts[prefix+"path_"+report.Path] = 1
+		if protocol, _ := msg["relay_protocol"].(string); report.Path == "relay" && relayProtocols[protocol] {
+			counts[prefix+"relay_"+protocol] = 1
+		}
+	case stats.ResultFailed:
+		counts[prefix+"error_"+report.Error] = 1
+	}
+	s.countHistory(counts)
 }
 
 // LocalReport is this node's state as it reports it to Center: the cameras

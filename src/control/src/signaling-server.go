@@ -30,6 +30,7 @@ import (
 	"signaling-server/internal/admission"
 	"signaling-server/internal/center"
 	"signaling-server/internal/fleet"
+	"signaling-server/internal/history"
 	"signaling-server/internal/link"
 	"signaling-server/internal/relay"
 	"signaling-server/internal/sid"
@@ -110,6 +111,7 @@ type Server struct {
 	selfAddress   string             // this node's WSS root as listed in the fleet configuration
 	relayMonitor  *relay.Monitor     // measures the relays of this node's region
 	relayRegistry *relay.Registry    // relays reporting to this server (-relay-dir)
+	history       *history.Store     // the region's statistics (-statistic-dir)
 	// statisticAllow limits /admin/statistic; empty: not served.
 	statisticAllow []netip.Prefix
 }
@@ -268,6 +270,12 @@ func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		s.handleStatistic(w, r)
+	case r.URL.Path == statisticDataPath:
+		if !allowedFrom(r, s.statisticAllow) {
+			http.NotFound(w, r)
+			return
+		}
+		s.handleStatisticData(w, r)
 	case strings.HasPrefix(r.URL.Path, "/downloads/"):
 		s.handleDownloads(w, r)
 	default:
@@ -307,7 +315,7 @@ func (s *Server) handleWebSocket(w http.ResponseWriter, r *http.Request) {
 		case anonymousDemo:
 			tenant = s.demoTenant
 		case queryErr != nil || !hasTicket || len(tickets) != 1 || len(query) != 1 || tickets[0] == "":
-			s.countStat((*stats.Counters).AdmissionRejected)
+			s.countStat("admission_rejected", (*stats.Counters).AdmissionRejected)
 			http.Error(w, "Admission required", http.StatusUnauthorized)
 			return
 		default:
@@ -316,7 +324,7 @@ func (s *Server) handleWebSocket(w http.ResponseWriter, r *http.Request) {
 				if errors.Is(err, admission.ErrUnavailable) {
 					http.Error(w, "Admission temporarily unavailable", http.StatusServiceUnavailable)
 				} else {
-					s.countStat((*stats.Counters).AdmissionRejected)
+					s.countStat("admission_rejected", (*stats.Counters).AdmissionRejected)
 					http.Error(w, "Admission required", http.StatusUnauthorized)
 				}
 				return
@@ -331,7 +339,7 @@ func (s *Server) handleWebSocket(w http.ResponseWriter, r *http.Request) {
 
 	source, limited := s.limitSource(r)
 	if limited && !s.limits.conns.Acquire(source) {
-		s.countStat((*stats.Counters).RateLimited)
+		s.countStat("rate_limited", (*stats.Counters).RateLimited)
 		tooMany(w)
 		return
 	}
@@ -568,7 +576,7 @@ func (s *Server) readPump(c *Client) {
 				if servers := s.relaysFor(dest.ID); len(servers) > 0 {
 					msg["turn"] = servers
 				}
-				s.countStat((*stats.Counters).Request)
+				s.countStat("requests", (*stats.Counters).Request)
 			}
 			if c.Role == admission.RoleCamera && dest.Role == admission.RolePlayer && msg["type"] == "offer" {
 				s.addRelayURLs(msg)
@@ -580,7 +588,7 @@ func (s *Server) readPump(c *Client) {
 			}
 		} else {
 			if isViewerRequest {
-				s.countStat((*stats.Counters).CameraOffline)
+				s.countStat("camera_offline", (*stats.Counters).CameraOffline)
 			}
 			data, _ := json.Marshal(map[string]string{"type": "error", "msg": "Device offline"})
 			select {
@@ -1049,6 +1057,7 @@ func main() {
 	adminSocket := flag.String("admin-socket", "", "Unix socket (created mode 0600) for matrix-fleet: status, statistics, configuration reload")
 	playerAllowText := flag.String("player-allow", "", "comma-separated IPs/CIDRs allowed to load the player and /api/devices (default: everyone)")
 	relayDir := flag.String("relay-dir", "", "directory for the relays reporting to this server (relays.json) and their per-minute statistics; enables POST "+relay.ReportPath+" for relays named in cfg/relay-secrets.json")
+	statisticDir := flag.String("statistic-dir", "", "directory for the statistics of this control server and the relays reporting to it: day/ (per minute, 30 days), month/ (per hour, 12 months), year/ (per day)")
 	statisticAllowText := flag.String("statistic-allow", "", "comma-separated IPs/CIDRs allowed to view "+statisticPath+" (default: nobody; the page is not served)")
 	flag.Parse()
 	if *nodesPath != "" {
@@ -1132,11 +1141,27 @@ func main() {
 		srv.SetPlayerAllow(playerAllow)
 		log.Printf("Player and device list limited to %s", *playerAllowText)
 	}
+	if *statisticDir != "" {
+		store, err := history.Open(*statisticDir)
+		if err != nil {
+			log.Fatalf("-statistic-dir: %v", err)
+		}
+		srv.SetHistory(store)
+		go func() {
+			for range time.Tick(time.Minute) {
+				store.Flush()
+			}
+		}()
+		go srv.sampleControl()
+		log.Printf("Statistics kept in %s", *statisticDir)
+	}
+	go srv.saveOnStop(*statsPath)
 	if *relayDir != "" {
 		registry, err := relay.NewRegistry(*relayDir)
 		if err != nil {
 			log.Fatalf("-relay-dir: %v", err)
 		}
+		registry.History = srv.history
 		srv.relayRegistry = registry
 		go func() {
 			for range time.Tick(time.Minute) {

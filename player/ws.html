@@ -1460,8 +1460,10 @@
             async connected(peer) {
                 const session = this.session;
                 if (!session || session.done) return;
-                const { path } = await connectionPath(peer);
-                this.send({ result: 'connected', path, setup_ms: Math.round(performance.now() - session.startedAt) });
+                const { path, relayProtocol } = await connectionPath(peer);
+                const fields = { result: 'connected', path, setup_ms: Math.round(performance.now() - session.startedAt) };
+                if (relayProtocol) fields.relay_protocol = relayProtocol; // udp, tcp or tls
+                this.send(fields);
             },
             finish() {
                 if (this.session && !this.session.done) this.failed('closed');

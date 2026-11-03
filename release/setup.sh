@@ -39,7 +39,10 @@
 # -control https://<this server> report to it at /v1/relay/report: it keeps
 # them in cfg/sid/relays/ and hands them out by their reported load. Only a
 # relay whose -name has a shared secret in relay-secrets.json is accepted.
-# Their statistics are at /admin/statistic, for the addresses in
+# The statistics of this server and those relays are kept in
+# cfg/sid/statistic/ (day/ per minute for 30 days, month/ per hour for 12
+# months, year/ per day) and shown at /admin/statistic, with the rows for
+# charting tools at /admin/statistic/data (CSV or JSON), to the addresses in
 # STATISTIC_ALLOW= of /etc/matrix/matrix.conf (default: PLAYER_ALLOW).
 #
 # Fleet: sudo matrix-fleet status | stats [DAYS] (installed in /usr/local/bin;
@@ -138,7 +141,7 @@ migrate_fleet_config() {
 # served to STATISTIC_ALLOW (default PLAYER_ALLOW; nobody when both are empty).
 relay_flags() {
     local allow="${STATISTIC_ALLOW:-${PLAYER_ALLOW:-}}"
-    printf ' -relay-dir %s' "$DATA_DIR/relays"
+    printf ' -relay-dir %s -statistic-dir %s' "$DATA_DIR/relays" "$DATA_DIR/statistic"
     [[ -n "$allow" ]] && printf ' -statistic-allow %s' "$allow"
     return 0
 }

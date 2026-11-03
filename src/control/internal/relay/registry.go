@@ -1,8 +1,6 @@
 package relay
 
 import (
-	"bufio"
-	"bytes"
 	"crypto/hmac"
 	"crypto/sha256"
 	"encoding/base64"
@@ -21,6 +19,7 @@ import (
 	"time"
 
 	"signaling-server/internal/fleet"
+	"signaling-server/internal/history"
 )
 
 const (
@@ -37,8 +36,6 @@ const (
 	goneAfter      = 3 * ReportInterval
 	maxReportBytes = 16 << 10
 	maxClockSkew   = time.Minute
-	// StatsDays is how long the per-minute statistics are kept.
-	StatsDays = 90
 	// forgetAfter drops a relay that stopped reporting from the registry.
 	forgetAfter = 30 * 24 * time.Hour
 )
@@ -75,23 +72,6 @@ func (r Report) Relay() fleet.Relay {
 		TCPPort: r.TCPPort, TLSPort: r.TLSPort, TLSHost: r.TLSHost}
 }
 
-// Minute is one relay's statistics over one minute.
-type Minute struct {
-	Minute         string           `json:"minute"` // RFC 3339 UTC, the minute's start
-	Relay          string           `json:"relay"`
-	Reports        int              `json:"reports"`
-	State          string           `json:"state"`
-	AllocationsMax int64            `json:"allocations_max"`
-	AllocationsAvg float64          `json:"allocations_avg"`
-	TransportsMax  map[string]int64 `json:"transports_max,omitempty"`
-	MbpsMax        float64          `json:"mbps_max"`
-	MbpsAvg        float64          `json:"mbps_avg"`
-	RxBytes        int64            `json:"rx_bytes"` // relayed during the minute
-	TxBytes        int64            `json:"tx_bytes"`
-	NewAllocations int64            `json:"new_allocations"`
-	AuthFailures   int64            `json:"auth_failures"`
-}
-
 type entry struct {
 	Report    Report    `json:"report"`
 	FirstSeen time.Time `json:"first_seen"`
@@ -99,16 +79,15 @@ type entry struct {
 
 	signedAt int64
 	lastSig  string
-	minute   *Minute
-	sums     struct{ allocations, mbps float64 }
 }
 
 // Registry keeps the relays that report to this control server: their
-// last report (saved in dir/relays.json, so they are known again after a
-// restart) and per-minute statistics (dir/stats/YYYY-MM-DD.jsonl).
+// last report, saved in dir/relays.json so they are known again after a
+// restart. Each report also goes to History, the region's statistics.
 type Registry struct {
-	dir string
-	Now func() time.Time
+	dir     string
+	Now     func() time.Time
+	History *history.Store
 
 	mu     sync.Mutex
 	relays map[string]*entry
@@ -116,7 +95,7 @@ type Registry struct {
 
 // NewRegistry loads the relays saved in dir.
 func NewRegistry(dir string) (*Registry, error) {
-	if err := os.MkdirAll(filepath.Join(dir, "stats"), 0o700); err != nil {
+	if err := os.MkdirAll(dir, 0o700); err != nil {
 		return nil, err
 	}
 	r := &Registry{dir: dir, relays: map[string]*entry{}}
@@ -235,7 +214,7 @@ func (r *Registry) record(report Report, signedAt int64, sig string) error {
 	if report.State == "stopping" && e.Report.State != "stopping" {
 		log.Printf("relays: %s is stopping", report.Name)
 	}
-	r.addMinute(e, report, now)
+	r.addHistory(e, report)
 	e.Report, e.LastSeen, e.signedAt, e.lastSig = report, now, signedAt, sig
 	if changed {
 		r.saveLocked()
@@ -243,93 +222,46 @@ func (r *Registry) record(report Report, signedAt int64, sig string) error {
 	return nil
 }
 
-// addMinute adds a report to its relay's current minute, writing out the
-// previous minute when this one starts a new one.
-func (r *Registry) addMinute(e *entry, report Report, now time.Time) {
-	start := now.UTC().Truncate(time.Minute).Format(time.RFC3339)
-	if e.minute != nil && e.minute.Minute != start {
-		r.writeMinute(e)
+// addHistory records a report in the statistics: the clients it serves by
+// transport and its bandwidth as samples, its counters as what they grew by
+// since the last report (all of them after the relay restarted).
+func (r *Registry) addHistory(e *entry, report Report) {
+	if r.History == nil {
+		return
 	}
-	if e.minute == nil {
-		e.minute = &Minute{Minute: start, Relay: report.Name, TransportsMax: map[string]int64{}}
-		e.sums.allocations, e.sums.mbps = 0, 0
+	gauges := map[string]float64{"clients": float64(report.Allocations), "mbps": report.Mbps}
+	for _, transport := range []string{"udp", "tcp", "tls"} {
+		gauges["clients_"+transport] = float64(report.ByTransport[transport])
 	}
-	m := e.minute
-	m.Reports++
-	m.State = report.State
-	m.AllocationsMax = max(m.AllocationsMax, report.Allocations)
-	m.MbpsMax = max(m.MbpsMax, report.Mbps)
-	e.sums.allocations += float64(report.Allocations)
-	e.sums.mbps += report.Mbps
-	m.AllocationsAvg = e.sums.allocations / float64(m.Reports)
-	m.MbpsAvg = e.sums.mbps / float64(m.Reports)
-	for transport, n := range report.ByTransport {
-		m.TransportsMax[transport] = max(m.TransportsMax[transport], n)
-	}
-	// Counters only grow while a relay runs; after a restart they start over.
-	delta := func(now, before int64) int64 {
-		if e.Report.StartedAt != report.StartedAt || now < before {
+	r.History.Sample(history.SourceRelay, report.Name, report.Region, gauges)
+	// A relay new here or restarted counts from zero.
+	before := e.Report
+	restarted := before.StartedAt != report.StartedAt
+	grew := func(now, then int64) int64 {
+		if restarted || now < then {
 			return now
 		}
-		return now - before
+		return now - then
 	}
-	if e.Report.Name != "" {
-		m.RxBytes += delta(report.RxBytes, e.Report.RxBytes)
-		m.TxBytes += delta(report.TxBytes, e.Report.TxBytes)
-		m.NewAllocations += delta(report.AllocationsTotal, e.Report.AllocationsTotal)
-		m.AuthFailures += delta(report.AuthFailures, e.Report.AuthFailures)
+	counts := map[string]int64{
+		"reports":       1,
+		"rx_bytes":      grew(report.RxBytes, before.RxBytes),
+		"tx_bytes":      grew(report.TxBytes, before.TxBytes),
+		"new_clients":   grew(report.AllocationsTotal, before.AllocationsTotal),
+		"auth_failures": grew(report.AuthFailures, before.AuthFailures),
+		"quota_rejects": grew(report.QuotaRejects, before.QuotaRejects),
+		"peers_denied":  grew(report.PeersDenied, before.PeersDenied),
 	}
+	r.History.Count(history.SourceRelay, report.Name, report.Region, counts)
 }
 
-func (r *Registry) writeMinute(e *entry) {
-	m := e.minute
-	e.minute = nil
-	line, err := json.Marshal(m)
-	if err != nil {
-		return
-	}
-	day := m.Minute[:10]
-	path := filepath.Join(r.dir, "stats", day+".jsonl")
-	_, statErr := os.Stat(path)
-	f, err := os.OpenFile(path, os.O_CREATE|os.O_APPEND|os.O_WRONLY, 0o600)
-	if err != nil {
-		warnOnce("relays: statistics not saved: %v", err)
-		return
-	}
-	defer f.Close()
-	f.Write(append(line, '\n'))
-	if errors.Is(statErr, os.ErrNotExist) {
-		r.pruneStats(day)
-	}
-}
-
-// pruneStats removes the statistics files older than StatsDays.
-func (r *Registry) pruneStats(today string) {
-	day, err := time.Parse("2006-01-02", today)
-	if err != nil {
-		return
-	}
-	oldest := day.AddDate(0, 0, -StatsDays).Format("2006-01-02")
-	files, _ := filepath.Glob(filepath.Join(r.dir, "stats", "*.jsonl"))
-	for _, file := range files {
-		if strings.TrimSuffix(filepath.Base(file), ".jsonl") < oldest {
-			os.Remove(file)
-		}
-	}
-}
-
-// Flush writes out every minute that has ended, also for relays that went
-// silent, and forgets relays silent for forgetAfter. Run it every minute.
+// Flush forgets relays silent for forgetAfter. Run it every minute.
 func (r *Registry) Flush() {
 	now := r.now()
-	start := now.UTC().Truncate(time.Minute).Format(time.RFC3339)
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	forgot := false
 	for name, e := range r.relays {
-		if e.minute != nil && e.minute.Minute != start {
-			r.writeMinute(e)
-		}
 		if now.Sub(e.LastSeen) > forgetAfter {
 			delete(r.relays, name)
 			forgot = true
@@ -443,36 +375,6 @@ func (r *Registry) FleetStatuses() []fleet.RelayStatus {
 		}
 		out = append(out, status)
 	}
-	return out
-}
-
-// Minutes returns the saved and current per-minute statistics since a
-// time, oldest first.
-func (r *Registry) Minutes(since time.Time) []Minute {
-	var out []Minute
-	since = since.UTC()
-	for day := since.Truncate(24 * time.Hour); !day.After(r.now().UTC()); day = day.AddDate(0, 0, 1) {
-		f, err := os.Open(filepath.Join(r.dir, "stats", day.Format("2006-01-02")+".jsonl"))
-		if err != nil {
-			continue
-		}
-		scanner := bufio.NewScanner(f)
-		for scanner.Scan() {
-			var m Minute
-			if json.Unmarshal(bytes.TrimSpace(scanner.Bytes()), &m) == nil && m.Minute >= since.Format(time.RFC3339) {
-				out = append(out, m)
-			}
-		}
-		f.Close()
-	}
-	r.mu.Lock()
-	for _, e := range r.relays {
-		if e.minute != nil && e.minute.Minute >= since.Format(time.RFC3339) {
-			out = append(out, *e.minute)
-		}
-	}
-	r.mu.Unlock()
-	sort.SliceStable(out, func(i, j int) bool { return out[i].Minute < out[j].Minute })
 	return out
 }
 

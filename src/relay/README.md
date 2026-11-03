@@ -64,15 +64,46 @@ The control server then:
 - picks relays for new sessions by the reported load, skipping one that has
   been silent for 45 s, is stopping, or whose port the control server can't
   reach (it probes UDP, TCP and TLS every 15 s);
-- keeps per-minute statistics for 90 days in `cfg/sid/relays/stats/`, shown at
-  `/admin/statistic` (and `?format=json`) to the addresses of
-  `-statistic-allow` only;
+- records it in the region's statistics (`-statistic-dir`, below);
 - passes the relay's state on to Center over the node link, for
   `matrix-fleet status`.
 
 Relays can still be listed in the fleet configuration instead (`tcp_port`,
 `tls_port`, `tls_host`, `metrics`), and `cfg/turn.conf` stays the fallback
 when no relay is usable.
+
+## Statistics
+
+With `-statistic-dir` (`cfg/sid/statistic/` from `setup.sh`) the control
+server keeps time series of itself and of every relay reporting to it:
+
+| File | Rows | Kept |
+|---|---|---|
+| `day/YYYY-MM-DD.jsonl` | one per source and minute | 30 days, then folded into its month |
+| `month/YYYY-MM.jsonl` | one per source and hour | 12 months, then folded into its year |
+| `year/YYYY.jsonl` | one per source and day | always |
+
+Each row is `{"t", "step", "source": "control"|"relay", "name", "region",
+"minutes", "gauges": {NAME: {"max", "avg"}}, "counts": {NAME: N}}`. Gauges are
+sampled every 15 s; counts are what happened in the step.
+
+- Relay gauges: `clients` and `clients_udp`, `clients_tcp`, `clients_tls` (the
+  clients it serves, by how they reach it), `mbps`. Counts: `rx_bytes`,
+  `tx_bytes`, `new_clients`, `auth_failures`, `quota_rejects`, `peers_denied`,
+  `reports`. `minutes` is the minutes it reported.
+- Control gauges: `cameras`, `viewers` (connected). Counts: `requests`,
+  `camera_offline`, `admission_rejected`, `rate_limited`, and from the reports
+  after each viewing attempt `viewer_connected`, `viewer_failed`,
+  `viewer_path_lan|direct|relay`, `viewer_relay_udp|tcp|tls`,
+  `viewer_error_<code>` (the same with `camera_` for camera reports).
+
+`/admin/statistic` draws them (1 h to 30 days, and a daily table).
+`/admin/statistic/data?from=2026-11-01&to=2026-11-03&step=hour&source=relay&name=relay-sg01&format=csv`
+returns the rows for a charting tool (Grafana with a CSV/JSON data source,
+Excel, pandas): `from`/`to` take RFC 3339 or YYYY-MM-DD (default the last 24
+h), `step` minute, hour or day (older rows stay as coarse as their file),
+`format` csv (one column per gauge `_max`/`_avg` and per count) or json. Both
+are limited to `-statistic-allow`.
 
 ## Building
 

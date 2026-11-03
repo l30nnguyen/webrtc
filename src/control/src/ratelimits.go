@@ -55,7 +55,7 @@ func (s *Server) allowRequest(w http.ResponseWriter, r *http.Request) bool {
 	if limiter.Allow(source) {
 		return true
 	}
-	s.countStat((*stats.Counters).RateLimited)
+	s.countStat("rate_limited", (*stats.Counters).RateLimited)
 	tooMany(w)
 	return false
 }

@@ -234,10 +234,18 @@ func TestStatisticPageOnlyForAllowedAddresses(t *testing.T) {
 	if w := get("203.0.113.9:1000", ""); w.Code != http.StatusNotFound {
 		t.Fatalf("other address: %d", w.Code)
 	}
-	if w := get("115.78.12.186:1000", ""); w.Code != http.StatusOK || !strings.Contains(w.Body.String(), "Relay stream servers") {
+	if w := get("115.78.12.186:1000", ""); w.Code != http.StatusOK || !strings.Contains(w.Body.String(), "Relay stream servers") || !strings.Contains(w.Body.String(), "Statistics are off") {
 		t.Fatalf("allowed address: %d", w.Code)
 	}
-	if w := get("115.78.12.186:1000", "?format=json"); w.Code != http.StatusOK || !strings.Contains(w.Body.String(), `"hours":24`) {
-		t.Fatalf("json: %d %s", w.Code, w.Body)
+	srv.statisticAllow = nil
+	data := func(remote string) int {
+		req := httptest.NewRequest(http.MethodGet, statisticDataPath, nil)
+		req.RemoteAddr = remote
+		w := httptest.NewRecorder()
+		srv.ServeHTTP(w, req)
+		return w.Code
+	}
+	if code := data("115.78.12.186:1000"); code != http.StatusNotFound {
+		t.Fatalf("data without -statistic-allow: %d", code)
 	}
 }
