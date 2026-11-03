@@ -31,10 +31,46 @@ Add to every row:
   so with R regions the minimum is R of each, whatever the camera count.
 
 The money is in the relay egress, not in the servers: 1.1 GB per camera a
-month. DigitalOcean pools the 1 TB included with each droplet; above that,
-outbound transfer is billed (about $0.01/GB at the time of writing; check the
-current price). At 1M cameras that is about 1.1 PB, minus about 0.3 PB included
-with ~275 droplets.
+month. See [Cost](#cost).
+
+## Cost
+
+DigitalOcean prices on 2026-11-03 ([droplets](https://www.digitalocean.com/pricing/droplets),
+[bandwidth](https://docs.digitalocean.com/platform/billing/bandwidth/)):
+
+| | Price a month | Outbound transfer included |
+|---|---:|---:|
+| Basic, 1 vCPU / 1 GB (sg00) | $6 | 1,000 GiB |
+| Basic, 1 vCPU / 2 GB | $12 | 2,000 GiB |
+| Basic, 2 vCPU / 4 GB | $24 | 4,000 GiB |
+| Outbound transfer above the included | $0.01 a GiB | the allowance of all droplets in the team is pooled |
+| Inbound transfer | free | — |
+
+The price is the same in every region. Each row below counts the table
+above plus one spare control node, one spare relay and the Center with a
+standby (two 2 GB droplets), in one region. Egress is 1.1 GB (1.02 GiB) per
+camera a month; control traffic is a few KB a session and left out.
+
+| Cameras | Droplets | Droplets a month | Transfer included | Transfer above it | Total a month | **Per camera a month** | Per camera a year |
+|---:|---|---:|---:|---:|---:|---:|---:|
+| 1,000 | 2 control + 2 relays + 2 Center | $48 | 8,000 GiB | $0 | $48 | **$0.048** | $0.58 |
+| 50,000 | 11 + 4 + 2 | $114 | 19,000 GiB | $322 | $436 | **$0.0087** | $0.10 |
+| 100,000 | 21 + 6 + 2 | $186 | 31,000 GiB | $714 | $900 | **$0.0090** | $0.11 |
+| 500,000 | 101 + 26 + 2 | $786 | 131,000 GiB | $3,812 | $4,598 | **$0.0092** | $0.11 |
+| 1,000,000 | 201 + 51 + 2 | $1,536 | 256,000 GiB | $7,685 | $9,221 | **$0.0092** | $0.11 |
+
+- **About $0.01 per camera a month** from 50,000 cameras on: $0.0015 of
+  droplets and about $0.008 of transfer. At 1,000 cameras the fixed droplets
+  dominate ($0.05).
+- **1 GB control nodes are cheaper than 4 GB ones** even though they cost
+  more per camera in droplets: each brings 1,000 GiB into the pool. With
+  4 GB / 2 vCPU control nodes, 1M cameras cost $9,609 ($0.0096 a camera).
+- **Each extra region** adds at least a control node, a relay and their
+  spares: $24 a month, minus the transfer they bring.
+- **The cost follows the assumptions**: twice the relay share (40%), twice
+  the viewing (30 minutes a day) or twice the bitrate (3.2 Mbps) doubles the
+  egress, so about $0.018 per camera a month. Every GiB above the pool is
+  $0.01, so one more relayed camera costs about $0.01 a month at the margin.
 
 ## One server's capacity
 
@@ -129,6 +165,6 @@ benchmark (5 s); no load was put on production.
 
 ## Tracking
 
-| Date | Server | Control (sg00) | Relay (sg00) | Notes |
-|---|---|---|---|---|
-| 2026-11-03 | 2.4.0 / relay 1.1.0 | 56 KB a connection, 5,000 cameras planned; 711 sessions/s | **33,000 pps, 137 sessions, ~20,000 cameras** | first measurement; relay estimated from the test PC |
+| Date | Server | Control (sg00) | Relay (sg00) | Cost (1M cameras) | Notes |
+|---|---|---|---|---|---|
+| 2026-11-03 | 2.4.0 / relay 1.1.0 | 56 KB a connection, 5,000 cameras planned; 711 sessions/s | **33,000 pps, 137 sessions, ~20,000 cameras** | $9,221 a month, $0.0092 a camera | first measurement; relay estimated from the test PC; DO prices of 2026-11-03 |
