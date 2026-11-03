@@ -90,6 +90,17 @@ func (s *stats) events() turn.EventHandler {
 	}
 }
 
+// transports counts the current allocations by the client's transport.
+func (s *stats) transports() map[string]int64 {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	out := map[string]int64{"udp": 0, "tcp": 0, "tls": 0}
+	for p, n := range s.byProto {
+		out[p] = int64(n)
+	}
+	return out
+}
+
 // handler serves the counters as Prometheus text. turn_total_* are the names
 // the node monitor reads (as from coturn); the rest are for people.
 func (s *stats) handler() http.Handler {

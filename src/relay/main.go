@@ -45,6 +45,14 @@ type options struct {
 	maxPerUser     int
 	metricsListen  string
 	allowPrivate   bool
+
+	// Reporting to a control server (off without -control).
+	control      string
+	name         string
+	region       string
+	host         string
+	tlsHost      string
+	capacityMbps int
 }
 
 func parseFlags(args []string) (options, error) {
@@ -64,6 +72,12 @@ func parseFlags(args []string) (options, error) {
 	fs.IntVar(&o.maxPerUser, "max-per-user", 16, "allocations per camera with minted credentials (0: no limit); fixed users count only toward -max")
 	fs.StringVar(&o.metricsListen, "metrics", "127.0.0.1:9641", "metrics address (off when empty)")
 	fs.BoolVar(&o.allowPrivate, "allow-private-peers", false, "relay to loopback, private and link-local addresses")
+	fs.StringVar(&o.control, "control", "", "control server to report to, https://host[:port]: it then hands this relay out by its load and keeps its statistics (no reports when empty)")
+	fs.StringVar(&o.name, "name", "", "with -control: this relay's name, [a-z0-9-] (a key in the control server's relay-secrets.json)")
+	fs.StringVar(&o.region, "region", "", "with -control: the region this relay serves first, as in the fleet configuration")
+	fs.StringVar(&o.host, "host", "", "with -control: the address cameras and viewers use (default -public-ip)")
+	fs.StringVar(&o.tlsHost, "tls-host", "", "with -control: the name viewers check the TLS certificate for (default: its first DNS name)")
+	fs.IntVar(&o.capacityMbps, "capacity-mbps", 1000, "with -control: relayed bandwidth this relay is filled to")
 	if err := fs.Parse(args); err != nil {
 		return o, err
 	}
@@ -81,6 +95,12 @@ func parseFlags(args []string) (options, error) {
 	}
 	if o.udpListen == "" && o.tcpListen == "" && o.tlsListen == "" {
 		return o, errors.New("no listener: -udp, -tcp and -tls (with -cert) are all off")
+	}
+	if o.host == "" {
+		o.host = o.publicIP
+	}
+	if o.capacityMbps <= 0 {
+		return o, errors.New("-capacity-mbps must be positive")
 	}
 	if o.relayMin < 1024 || o.relayMax > 65535 || o.relayMin > o.relayMax {
 		return o, errors.New("relay ports must satisfy 1024 <= -relay-min <= -relay-max <= 65535")
@@ -202,6 +222,18 @@ func main() {
 	if err != nil {
 		log.Fatalf("relay: %v", err)
 	}
+	ctx, stopReports := context.WithCancel(context.Background())
+	reported := make(chan struct{})
+	if o.control != "" {
+		reports, err := newReporter(o, r.stats, r.secrets)
+		if err != nil {
+			log.Fatalf("relay: %v", err)
+		}
+		go func() { reports.run(ctx); close(reported) }()
+	} else {
+		close(reported)
+		log.Print("relay: no -control: not reporting to a control server")
+	}
 	if o.metricsListen != "" {
 		metrics := &http.Server{Addr: o.metricsListen, Handler: r.stats.handler(), ReadHeaderTimeout: 5 * time.Second}
 		go func() {
@@ -234,5 +266,7 @@ func main() {
 		break
 	}
 	log.Print("relay: stopping with " + strconv.FormatInt(r.stats.allocations.Load(), 10) + " allocations")
+	stopReports()
+	<-reported
 	r.close()
 }

@@ -48,13 +48,33 @@ func (s *Server) fleetConfig() (fleet.Config, bool) {
 	return fleet.Config{}, false
 }
 
+// candidateRelays are the relays this server may hand out: those of the
+// fleet configuration and those reporting to it now (a configured name wins).
+func (s *Server) candidateRelays(config fleet.Config) []fleet.Relay {
+	out := append([]fleet.Relay(nil), config.Relays...)
+	if s.relayRegistry == nil {
+		return out
+	}
+	configured := map[string]bool{}
+	for _, r := range config.Relays {
+		configured[r.Name] = true
+	}
+	for _, r := range s.relayRegistry.Relays() {
+		if !configured[r.Name] {
+			out = append(out, r)
+		}
+	}
+	return out
+}
+
 // relaysFor returns the relay stream servers handed to a camera for one
 // viewing session, with credentials minted for it: the relays of the fleet
-// configuration when it lists any this node has secrets for, else
-// cfg/turn.conf as before.
+// configuration and the relays reporting to this server, when this node
+// has secrets for any, else cfg/turn.conf as before.
 func (s *Server) relaysFor(cameraID string) []map[string]interface{} {
-	config, ok := s.fleetConfig()
-	if !ok || len(config.Relays) == 0 {
+	config, _ := s.fleetConfig()
+	candidates := s.candidateRelays(config)
+	if len(candidates) == 0 {
 		return s.turnConfForCamera()
 	}
 	secrets, err := s.loadRelaySecrets()
@@ -63,7 +83,7 @@ func (s *Server) relaysFor(cameraID string) []map[string]interface{} {
 		return s.turnConfForCamera()
 	}
 	var usable []fleet.Relay
-	for _, r := range config.Relays {
+	for _, r := range candidates {
 		if _, ok := secrets[r.Name]; ok {
 			usable = append(usable, r)
 		} else {
@@ -120,10 +140,13 @@ type relayAddress struct {
 
 func (s *Server) relayAddresses() []relayAddress {
 	var out []relayAddress
-	if config, ok := s.fleetConfig(); ok {
-		for _, r := range config.Relays {
-			out = append(out, relayAddress{name: r.Name, host: r.Host, port: r.Port, tcp: r.TCPPort, tls: r.TLSPort, tlsHost: r.CertificateHost()})
-		}
+	config, _ := s.fleetConfig()
+	known := config.Relays
+	if s.relayRegistry != nil {
+		known = append(append([]fleet.Relay(nil), known...), s.relayRegistry.Known()...)
+	}
+	for _, r := range known {
+		out = append(out, relayAddress{name: r.Name, host: r.Host, port: r.Port, tcp: r.TCPPort, tls: r.TLSPort, tlsHost: r.CertificateHost()})
 	}
 	for _, server := range s.loadTurnConfig() {
 		number := func(key string) int {
@@ -256,27 +279,74 @@ func (s *Server) loadRelaySecrets() (map[string]relaySecret, error) {
 	return secrets, nil
 }
 
-// relayLoad is a relay's measured load (relays of this node's region).
-func (s *Server) relayLoad(name string) (float64, bool, bool) {
-	if s.relayMonitor == nil {
-		return 0, false, false
+// relaySharedSecret is the shared secret of a relay in relay-secrets.json;
+// only relays with one may report to this server.
+func (s *Server) relaySharedSecret(name string) ([]byte, bool) {
+	secrets, err := s.loadRelaySecrets()
+	if err != nil {
+		return nil, false
 	}
-	return s.relayMonitor.Load(name)
+	secret, ok := secrets[name]
+	if !ok || secret.Shared == "" {
+		return nil, false
+	}
+	return []byte(secret.Shared), true
 }
 
-// relayStatuses are this node's recent relay measurements.
-func (s *Server) relayStatuses() []fleet.RelayStatus {
-	if s.relayMonitor == nil {
-		return nil
+// relayLoad is a relay's load: what it reports when it reports to this
+// server (and down when this node's probe of it failed), else this node's
+// measurement (relays of its region).
+func (s *Server) relayLoad(name string) (float64, bool, bool) {
+	var measured, healthy, known bool
+	var fraction float64
+	if s.relayMonitor != nil {
+		fraction, healthy, measured = s.relayMonitor.Load(name)
+		known = measured
 	}
-	return s.relayMonitor.Statuses()
+	if s.relayRegistry != nil {
+		if reported, up, ok := s.relayRegistry.Load(name); ok {
+			return reported, up && (healthy || !measured), true
+		}
+	}
+	return fraction, healthy, known
+}
+
+// relayStatuses are this node's relay measurements and the relays
+// reporting to it, with the TCP and TLS state this node probed.
+func (s *Server) relayStatuses() []fleet.RelayStatus {
+	var out []fleet.RelayStatus
+	probed := map[string]fleet.RelayStatus{}
+	if s.relayMonitor != nil {
+		for _, status := range s.relayMonitor.Statuses() {
+			probed[status.Name] = status
+		}
+	}
+	reporting := map[string]bool{}
+	if s.relayRegistry != nil {
+		for _, status := range s.relayRegistry.FleetStatuses() {
+			reporting[status.Name] = true
+			if p, ok := probed[status.Name]; ok {
+				status.TCP, status.TLS = p.TCP, p.TLS
+				if !p.Healthy && status.Healthy {
+					status.Healthy, status.Error = false, "reports, but its port did not answer this node: "+p.Error
+				}
+			}
+			out = append(out, status)
+		}
+	}
+	for name, status := range probed {
+		if !reporting[name] {
+			out = append(out, status)
+		}
+	}
+	return out
 }
 
 // measureRelays measures the relays of this node's region every
 // relay.MeasureInterval, following configuration changes.
 func (s *Server) measureRelays() {
-	s.relayMonitor = &relay.Monitor{}
 	for {
+		var mine []fleet.Relay
 		if config, ok := s.fleetConfig(); ok {
 			region := ""
 			for _, n := range config.Nodes {
@@ -284,17 +354,21 @@ func (s *Server) measureRelays() {
 					region = n.Region
 				}
 			}
-			var mine []fleet.Relay
 			for _, r := range config.Relays {
 				if region != "" && r.Region == region {
 					mine = append(mine, r)
 				}
 			}
-			if len(mine) > 0 {
-				ctx, cancel := context.WithTimeout(context.Background(), relay.MeasureInterval)
-				s.relayMonitor.Measure(ctx, mine)
-				cancel()
-			}
+		}
+		// The relays reporting here are probed too, for their TCP and TLS
+		// ports and to catch one that reports but can't be reached.
+		if s.relayRegistry != nil {
+			mine = append(mine, s.relayRegistry.Relays()...)
+		}
+		if len(mine) > 0 {
+			ctx, cancel := context.WithTimeout(context.Background(), relay.MeasureInterval)
+			s.relayMonitor.Measure(ctx, mine)
+			cancel()
 		}
 		time.Sleep(relay.MeasureInterval)
 	}

@@ -13,7 +13,7 @@ High-performance WebSocket signaling server for WebRTC peer connections with HTT
 ## Installation
 
 ```bash
-cd src/go
+cd src/control
 go mod download
 ```
 

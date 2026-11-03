@@ -1,18 +1,23 @@
 package main
 
 import (
+	"context"
 	"crypto/ecdsa"
 	"crypto/elliptic"
 	"crypto/hmac"
 	"crypto/rand"
 	"crypto/sha1"
+	"crypto/sha256"
 	"crypto/tls"
 	"crypto/x509"
 	"crypto/x509/pkix"
 	"encoding/base64"
+	"encoding/json"
 	"encoding/pem"
+	"io"
 	"math/big"
 	"net"
+	"net/http"
 	"net/http/httptest"
 	"os"
 	"path/filepath"
@@ -316,5 +321,51 @@ func TestTLSCertificateReload(t *testing.T) {
 	second, _ := c.get(nil)
 	if first == second {
 		t.Fatal("renewed certificate not loaded")
+	}
+}
+
+func TestReporterSignsWhatTheControlServerChecks(t *testing.T) {
+	r, o := startTest(t, true)
+	var got report
+	var header string
+	control := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, req *http.Request) {
+		body, _ := io.ReadAll(req.Body)
+		header = req.Header.Get(signatureHeader)
+		json.Unmarshal(body, &got)
+		// The control server's check (internal/relay/registry.go verify).
+		parts := strings.Split(header, ",")
+		stamp, sig := strings.TrimPrefix(parts[0], "t="), strings.TrimPrefix(parts[1], "sig=")
+		mac := hmac.New(sha256.New, []byte(testSecret))
+		mac.Write([]byte("matrix-relay-report\n" + stamp + "\n"))
+		mac.Write(body)
+		if sig != base64.RawURLEncoding.EncodeToString(mac.Sum(nil)) || req.URL.Path != "/v1/relay/report" {
+			w.WriteHeader(http.StatusForbidden)
+			return
+		}
+		w.WriteHeader(http.StatusNoContent)
+	}))
+	defer control.Close()
+	o.control, o.name, o.region, o.host, o.capacityMbps = control.URL, "relay-test", "SG", "203.0.113.10", 500
+	rep, err := newReporter(o, r.stats, r.secrets)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := rep.send(context.Background(), "up"); err != nil {
+		t.Fatalf("report refused: %v", err)
+	}
+	if got.Name != "relay-test" || got.TLSHost != "relay.test" || got.TCPPort == 0 || got.TLSPort == 0 || got.State != "up" || got.CapacityMbps != 500 {
+		t.Fatalf("report %+v", got)
+	}
+	for name, mutate := range map[string]func(*options){
+		"plain http":  func(o *options) { o.control = "http://control.example.test" },
+		"no name":     func(o *options) { o.name = "" },
+		"no region":   func(o *options) { o.region = "" },
+		"with a path": func(o *options) { o.control = "https://control.example.test/x" },
+	} {
+		bad := o
+		mutate(&bad)
+		if _, err := newReporter(bad, r.stats, r.secrets); err == nil {
+			t.Errorf("%s accepted", name)
+		}
 	}
 }

@@ -35,6 +35,13 @@
 # or {"turn-eu00": "<shared secret>"} for coturn (minted per session; README):
 #   sudo ./setup.sh relay-secrets /path/to/relay-secrets.json
 #
+# Relay stream servers (src/relay, matrix-relay) started with
+# -control https://<this server> report to it at /v1/relay/report: it keeps
+# them in cfg/sid/relays/ and hands them out by their reported load. Only a
+# relay whose -name has a shared secret in relay-secrets.json is accepted.
+# Their statistics are at /admin/statistic, for the addresses in
+# STATISTIC_ALLOW= of /etc/matrix/matrix.conf (default: PLAYER_ALLOW).
+#
 # Fleet: sudo matrix-fleet status | stats [DAYS] (installed in /usr/local/bin;
 # it talks to the server over /run/matrix/admin.sock, no network port).
 # /opt/matrix/cfg/config.json (optional) lists the control server nodes and the
@@ -127,6 +134,15 @@ migrate_fleet_config() {
     fi
 }
 
+# relay_flags: relays may report to this server; their statistics page is
+# served to STATISTIC_ALLOW (default PLAYER_ALLOW; nobody when both are empty).
+relay_flags() {
+    local allow="${STATISTIC_ALLOW:-${PLAYER_ALLOW:-}}"
+    printf ' -relay-dir %s' "$DATA_DIR/relays"
+    [[ -n "$allow" ]] && printf ' -statistic-allow %s' "$allow"
+    return 0
+}
+
 write_unit() {
     if [[ "${ROLE:-center}" == node ]]; then
         write_node_unit
@@ -143,6 +159,7 @@ write_unit() {
     # Nodes link to the main port; LINK_LISTEN (host:port) adds a private one.
     [[ -f "$FLEET_CONFIG" && -n "${LINK_LISTEN:-}" ]] && discovery+=" -link-listen $LINK_LISTEN"
     discovery+=" -stats-file $DATA_DIR/stats.json -admin-socket /run/matrix/admin.sock"
+    discovery+="$(relay_flags)"
     cat > "$UNIT" <<EOF
 [Unit]
 Description=Matrix control server
@@ -185,6 +202,7 @@ write_node_unit() {
     [[ -n "${DISCOVERY_TENANT:-}" ]] && extra+=" -discovery-tenant $DISCOVERY_TENANT"
     [[ -n "${PLAYER_ALLOW:-}" ]] && extra+=" -player-allow $PLAYER_ALLOW"
     [[ -f "$DATA_DIR/link-ca.pem" ]] && extra+=" -link-ca $DATA_DIR/link-ca.pem"
+    extra+="$(relay_flags)"
     cat > "$UNIT" <<EOF
 [Unit]
 Description=Matrix control node

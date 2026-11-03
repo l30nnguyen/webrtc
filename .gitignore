@@ -145,9 +145,9 @@ cfg/turn.conf
 cfg/sid/
 *.sid
 *.priv
-src/go/sidctl
-src/go/center
-src/go/signaling-server
+src/control/sidctl
+src/control/center
+src/control/signaling-server
 **/sid-batches/
 .DS_Store
 design/._*

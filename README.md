@@ -92,31 +92,17 @@ To increase capacity:
 
 ## Usage
 
-### Python Version
+### Control server (`src/control`)
 
 ```bash
-cd src/python
-python src/signaling-server.py [ws_port] [http_port] [ssl_cert]
-```
-
-Example:
-```bash
-python src/signaling-server.py 8000 8080 cert.pem
-```
-
-See [src/python/README.md](src/python/README.md) for details.
-
-### Go Version (Recommended)
-
-```bash
-cd src/go
+cd src/control
 go mod download
 go run src/signaling-server.go -port 8000 -cert cert.pem -player ../../player/ws.html
 ```
 
 Build binary:
 ```bash
-cd src/go
+cd src/control
 go build -o signaling-server src/signaling-server.go
 ./signaling-server -port 8000 -cert cert.pem -player ../../player/ws.html
 ```
@@ -126,7 +112,11 @@ Flags:
 - `-cert`: TLS cert+key PEM file (optional, enables WSS)
 - `-player`: Path to ws.html (default: player/ws.html)
 
-See [src/go/README.md](src/go/README.md) for details.
+See [src/control/README.md](src/control/README.md) for details.
+
+### Relay stream server (`src/relay`)
+
+See [src/relay/README.md](src/relay/README.md).
 
 ## PM2 Integration
 
@@ -148,7 +138,7 @@ one release package with `release/make_release.sh`
 ./deploy.sh prod   # matrix.5gen.care VPS: setup.sh upgrade (systemd matrix.service); asks you to type "prod"
 ```
 
-- The build refuses uncommitted changes in `src/go`, `player/ws.html`, `cfg/version` or `release/`, uses the toolchain pinned in `src/go/go.mod`, and stops on a build failure.
+- The build refuses uncommitted changes in `src/control`, `player/ws.html`, `cfg/version` or `release/`, uses the toolchain pinned in `src/control/go.mod`, and stops on a build failure.
 - The package is uploaded to `~/releases/` on the VPS and its checksum is verified before anything changes.
 - **dev** installs the package's binary and player, backs up the old ones to `backups/release-<version>-<commit>-<time>/`, writes `release.json`, and restarts only `webrtc_dev` with the arguments already registered in PM2 (`pm2_start.json` is not reapplied).
 - **prod** runs the package's `setup.sh upgrade`, which keeps `/etc/matrix/matrix.conf`, keys and data, backs up to `/opt/matrix/backups/<time>/`, and restarts `matrix.service`.

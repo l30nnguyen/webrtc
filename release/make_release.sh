@@ -14,9 +14,9 @@ set -euo pipefail
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 
 DIRTY=false
-if [[ -n "$(git -C "$ROOT" status --porcelain -- src/go player/ws.html cfg/version release)" ]]; then
+if [[ -n "$(git -C "$ROOT" status --porcelain -- src/control player/ws.html cfg/version release)" ]]; then
     if [[ "${ALLOW_DIRTY:-}" != 1 ]]; then
-        echo "Uncommitted changes in src/go, player/ws.html, cfg/version or release; commit them first (or ALLOW_DIRTY=1 for a test build)." >&2
+        echo "Uncommitted changes in src/control, player/ws.html, cfg/version or release; commit them first (or ALLOW_DIRTY=1 for a test build)." >&2
         exit 1
     fi
     DIRTY=true
@@ -34,7 +34,7 @@ mkdir -p "$PKG/bin" "$PKG/player" "$PKG/cfg"
 BINARY="$PKG/bin/matrix_cc_$VERSION"
 
 echo "Building $NAME..."
-(cd "$ROOT/src/go" && CGO_ENABLED=0 GOOS=linux GOARCH=amd64 go build -trimpath -o "$BINARY" ./src)
+(cd "$ROOT/src/control" && CGO_ENABLED=0 GOOS=linux GOARCH=amd64 go build -trimpath -o "$BINARY" ./src)
 cp "$ROOT/player/ws.html" "$PKG/player/ws.html"
 cp "$ROOT/cfg/version" "$PKG/cfg/version"
 cp "$ROOT/release/setup.sh" "$ROOT/release/README.md" "$PKG/"

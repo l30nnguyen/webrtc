@@ -388,3 +388,31 @@ func ParsePrefix(text string) (netip.Prefix, error) {
 	}
 	return prefix.Masked(), nil
 }
+
+// ValidRelayIdentity checks the name, region and addresses a relay reports
+// for itself, with the rules of the configuration file.
+func ValidRelayIdentity(r Relay) error {
+	c := Config{Relays: []Relay{r}}
+	if !validName(r.Name) {
+		return fmt.Errorf("relay name %q must be 1-32 characters of [a-z0-9-]", r.Name)
+	}
+	if !validName(strings.ToLower(r.Region)) {
+		return fmt.Errorf("relay %s: region %q must be 1-32 characters of [A-Za-z0-9-]", r.Name, r.Region)
+	}
+	if !validHost(r.Host) {
+		return fmt.Errorf("relay %s: host %q must be a host name or IP address", r.Name, r.Host)
+	}
+	if r.Port < 1 || r.Port > 65535 || r.TCPPort < 0 || r.TCPPort > 65535 || r.TLSPort < 0 || r.TLSPort > 65535 {
+		return fmt.Errorf("relay %s: a port is out of range", r.Name)
+	}
+	if r.TLSHost != "" && (r.TLSPort == 0 || !validHost(r.TLSHost)) {
+		return fmt.Errorf("relay %s: tls_host %q needs tls_port and must be a host name", r.Name, r.TLSHost)
+	}
+	if _, err := netip.ParseAddr(c.Relays[0].CertificateHost()); r.TLSPort != 0 && err == nil {
+		return fmt.Errorf("relay %s: tls_port needs a host name for the certificate", r.Name)
+	}
+	if r.CapacityMbps < 1 || r.CapacityMbps > 1000000 {
+		return fmt.Errorf("relay %s: capacity_mbps is out of range", r.Name)
+	}
+	return nil
+}

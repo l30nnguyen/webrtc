@@ -195,6 +195,8 @@ The role (camera or viewer) comes from the ticket. Reports feed `matrix-fleet st
 | `GET /` | Plain text `OK` (no page) |
 | `GET /demo/<tenant>` | Web player (`ws.html`), only when `-discovery-tenant <tenant>` is set; limited to `-player-allow` IPs when that is set (Center: `/demo/test01`, `115.78.12.186`) |
 | `GET /api/devices[?type=producer]` | Cameras online in the discovery tenant: `{"count":N,"devices":[{"id","nickname","tenant","connected_at","path","type","rtt","sid"}]}`. Only with `-discovery-tenant` or `-demo-tenant`; limited by `-player-allow`. |
+| `POST /v1/relay/report` | With `-relay-dir`: a relay stream server (`matrix-relay -control`) reports its addresses and load every 15 s. Accepted only for a name with a shared secret in `cfg/relay-secrets.json`, signed with it (`X-Relay-Signature`), within a minute of this server's clock; `204` when taken, `403` otherwise |
+| `GET /admin/statistic` | Relay stream servers reporting here: state, load, last 24 h per minute, daily for 30 days (`?hours=1..168`, `?format=json`). Only for `-statistic-allow` IPs; `404` for everyone else, and for everyone when it is not set |
 | `GET /api/health` | `{"status":"ok","clients":N,"version":"2.1.1","ticket_admission":true}`; a control node adds `"center":"https://matrix.5gen.care"`, which its player page uses for `/v1/view` |
 | `GET /downloads/<path>` | Files under `/opt/matrix/downloads/` (firmware) |
 | `GET /v1/demo/resolve?ref=<64 hex>` | Center only, only with `-demo-tenant` (development): unauthenticated 2.2 for the demo tenant |
@@ -238,7 +240,7 @@ Without the token: `401`. With no token configured: `404`.
 
 ### 4.2 Control node ↔ Center link (`wss://matrix.5gen.care/v1/link`)
 
-The node opens the connection and keeps it open. TLS is checked against the Center's name (`-link-server-name`). The full protocol is in `src/go/internal/link/link.go`.
+The node opens the connection and keeps it open. TLS is checked against the Center's name (`-link-server-name`). The full protocol is in `src/control/internal/link/link.go`.
 
 Before anything is upgraded, Center answers `404` (the same as any unknown path) unless all of these hold:
 

@@ -110,6 +110,13 @@ func (s *secrets) password(username string, now time.Time) (userID, password str
 	return id, base64.StdEncoding.EncodeToString(mac.Sum(nil)), true
 }
 
+// sharedSecret is the secret minted credentials and reports are keyed with.
+func (s *secrets) sharedSecret() []byte {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	return s.shared
+}
+
 func authHandler(s *secrets, st *stats, now func() time.Time) turn.AuthHandler {
 	return func(ra *turn.RequestAttributes) (string, []byte, bool) {
 		userID, password, ok := s.password(ra.Username, now())

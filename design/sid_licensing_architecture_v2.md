@@ -163,7 +163,7 @@ The `nickname` setting supplies display metadata only. It does not change the ke
 Build from the Go module directory. This produces the one server binary used for Center APIs, WSS signaling, and player hosting:
 
 ```sh
-cd server/src/go
+cd server/src/control
 go build -o sidctl ./cmd/sidctl
 go build -o matrix_cc ./src   # release packages name it matrix_cc_<version>
 ```
@@ -194,10 +194,10 @@ In the demo player, select a camera card, enter its camera-local password, and p
 
 ## Issuance, key rotation, development, and rollback
 
-Use `sidctl` for issuance and offline verification from `server/src/go`. Generate the SID issuer key pair once in a controlled environment, keep the private key offline/restricted, and distribute only the public key through the camera build and Center configuration. Generate a separate Center ticket key pair; the Center private key signs admission tickets and the public key is used by ticket verifiers. Issue a distinct random-nonce SID for each camera:
+Use `sidctl` for issuance and offline verification from `server/src/control`. Generate the SID issuer key pair once in a controlled environment, keep the private key offline/restricted, and distribute only the public key through the camera build and Center configuration. Generate a separate Center ticket key pair; the Center private key signs admission tickets and the public key is used by ticket verifiers. Issue a distinct random-nonce SID for each camera:
 
 ```sh
-cd server/src/go
+cd server/src/control
 go build -o sidctl ./cmd/sidctl
 ./sidctl keygen --private /secure/sid-issuer.key.pem --public /secure/sid-issuer.pub.pem
 ./sidctl keygen --private /secure/center-ticket.key.pem --public /secure/center-ticket.pub.pem

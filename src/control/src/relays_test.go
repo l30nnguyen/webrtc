@@ -1,12 +1,17 @@
 package main
 
 import (
+	"bytes"
 	"context"
 	"crypto/hmac"
 	"crypto/sha1"
+	"crypto/sha256"
 	"encoding/base64"
+	"encoding/json"
 	"fmt"
 	"net"
+	"net/http"
+	"net/http/httptest"
 	"os"
 	"path/filepath"
 	"strconv"
@@ -160,5 +165,79 @@ func TestTurnConfViewerKeysStayOnTheServer(t *testing.T) {
 	want := "[turn:relay.example.test:3478?transport=udp turn:relay.example.test:3478?transport=tcp turns:relay.example.test:5349?transport=tcp]"
 	if fmt.Sprint(urls) != want {
 		t.Fatalf("urls %v", urls)
+	}
+}
+
+func TestReportingRelayIsHandedOutWithItsURLs(t *testing.T) {
+	dir := t.TempDir()
+	os.MkdirAll(filepath.Join(dir, "cfg"), 0o755)
+	os.WriteFile(filepath.Join(dir, "cfg", "turn.conf"), []byte(`[{"host":"old.example.test","port":3478,"username":"u","password":"p"}]`), 0o600)
+	os.WriteFile(filepath.Join(dir, relaySecretsFile), []byte(`{"relay-dev":"dev-shared-secret-0123456789"}`), 0o600)
+	srv := NewServer("", dir+"/")
+	registry, err := relay.NewRegistry(filepath.Join(dir, "relays"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	srv.relayRegistry = registry
+
+	// Before any report: cfg/turn.conf as before.
+	if servers := srv.relaysFor("camera1"); servers[0]["host"] != "old.example.test" {
+		t.Fatalf("before reports: %v", servers)
+	}
+	report := relay.Report{Name: "relay-dev", Region: "US", Host: "3.95.228.203", Port: 3478, TCPPort: 3478, TLSPort: 5349,
+		TLSHost: "webrtc.5gen.care", CapacityMbps: 1000, Version: "1.1.0", StartedAt: "2026-11-03T08:00:00Z", State: "up"}
+	body, _ := json.Marshal(report)
+	stamp := strconv.FormatInt(time.Now().Unix(), 10)
+	mac := hmac.New(sha256.New, []byte("dev-shared-secret-0123456789"))
+	mac.Write([]byte("matrix-relay-report\n" + stamp + "\n"))
+	mac.Write(body)
+	req := httptest.NewRequest(http.MethodPost, relay.ReportPath, bytes.NewReader(body))
+	req.Header.Set(relay.SignatureHeader, "t="+stamp+",sig="+base64.RawURLEncoding.EncodeToString(mac.Sum(nil)))
+	req.RemoteAddr = "3.95.228.203:50000"
+	w := httptest.NewRecorder()
+	srv.ServeHTTP(w, req)
+	if w.Code != http.StatusNoContent {
+		t.Fatalf("report: %d %s", w.Code, w.Body)
+	}
+
+	servers := srv.relaysFor("camera1")
+	if len(servers) != 1 || servers[0]["host"] != "3.95.228.203" || servers[0]["port"] != 3478 || !strings.HasSuffix(servers[0]["username"].(string), ":camera1") {
+		t.Fatalf("servers %v", servers)
+	}
+	urls := offerURLs(t, srv, []interface{}{map[string]interface{}{"url": "3.95.228.203:3478?transport=udp"}})
+	want := "[turn:3.95.228.203:3478?transport=udp turn:3.95.228.203:3478?transport=tcp turns:webrtc.5gen.care:5349?transport=tcp]"
+	if fmt.Sprint(urls) != want {
+		t.Fatalf("urls %v", urls)
+	}
+	if s := srv.relayStatuses(); len(s) != 1 || s[0].Name != "relay-dev" || !s[0].Healthy {
+		t.Fatalf("statuses %+v", s)
+	}
+}
+
+func TestStatisticPageOnlyForAllowedAddresses(t *testing.T) {
+	dir := t.TempDir()
+	srv := NewServer("", dir+"/")
+	registry, _ := relay.NewRegistry(filepath.Join(dir, "relays"))
+	srv.relayRegistry = registry
+	get := func(remote, query string) *httptest.ResponseRecorder {
+		req := httptest.NewRequest(http.MethodGet, statisticPath+query, nil)
+		req.RemoteAddr = remote
+		w := httptest.NewRecorder()
+		srv.ServeHTTP(w, req)
+		return w
+	}
+	if w := get("115.78.12.186:1000", ""); w.Code != http.StatusNotFound {
+		t.Fatalf("without -statistic-allow: %d", w.Code)
+	}
+	allow, _ := parsePlayerAllow("115.78.12.186")
+	srv.statisticAllow = allow
+	if w := get("203.0.113.9:1000", ""); w.Code != http.StatusNotFound {
+		t.Fatalf("other address: %d", w.Code)
+	}
+	if w := get("115.78.12.186:1000", ""); w.Code != http.StatusOK || !strings.Contains(w.Body.String(), "Relay stream servers") {
+		t.Fatalf("allowed address: %d", w.Code)
+	}
+	if w := get("115.78.12.186:1000", "?format=json"); w.Code != http.StatusOK || !strings.Contains(w.Body.String(), `"hours":24`) {
+		t.Fatalf("json: %d %s", w.Code, w.Body)
 	}
 }

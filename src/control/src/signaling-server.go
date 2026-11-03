@@ -109,6 +109,9 @@ type Server struct {
 	limits        *publicLimits      // per-source limits on the public port; nil: off
 	selfAddress   string             // this node's WSS root as listed in the fleet configuration
 	relayMonitor  *relay.Monitor     // measures the relays of this node's region
+	relayRegistry *relay.Registry    // relays reporting to this server (-relay-dir)
+	// statisticAllow limits /admin/statistic; empty: not served.
+	statisticAllow []netip.Prefix
 }
 
 func NewServer(playerPath string, rootDir string) *Server {
@@ -143,17 +146,20 @@ func (s *Server) SetDiscoveryTenant(tenant string) { s.discoveryTenant = tenant 
 func (s *Server) SetPlayerAllow(prefixes []netip.Prefix) { s.playerAllow = prefixes }
 
 // playerAllowed reports whether r may load the player page and device list.
-// The listener terminates TLS itself, so RemoteAddr is the real client.
 func (s *Server) playerAllowed(r *http.Request) bool {
-	if len(s.playerAllow) == 0 {
-		return true
-	}
+	return len(s.playerAllow) == 0 || allowedFrom(r, s.playerAllow)
+}
+
+// allowedFrom reports whether r comes from an address in prefixes (none:
+// false). The listener terminates TLS itself, so RemoteAddr is the real
+// client.
+func allowedFrom(r *http.Request, prefixes []netip.Prefix) bool {
 	addrPort, err := netip.ParseAddrPort(r.RemoteAddr)
 	if err != nil {
 		return false
 	}
 	addr := addrPort.Addr().Unmap()
-	for _, prefix := range s.playerAllow {
+	for _, prefix := range prefixes {
 		if prefix.Contains(addr) {
 			return true
 		}
@@ -254,6 +260,14 @@ func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		s.handleDevices(w, r)
 	case r.URL.Path == "/api/health":
 		s.handleHealth(w, r)
+	case r.URL.Path == relay.ReportPath && s.relayRegistry != nil:
+		s.relayRegistry.Handle(w, r, s.relaySharedSecret)
+	case r.URL.Path == statisticPath:
+		if !allowedFrom(r, s.statisticAllow) {
+			http.NotFound(w, r)
+			return
+		}
+		s.handleStatistic(w, r)
 	case strings.HasPrefix(r.URL.Path, "/downloads/"):
 		s.handleDownloads(w, r)
 	default:
@@ -1034,6 +1048,8 @@ func main() {
 	rateExempt := flag.String("rate-exempt", "", "comma-separated IPs/CIDRs the -rate-* and -conns-per-source limits skip (for example a TLS proxy in front)")
 	adminSocket := flag.String("admin-socket", "", "Unix socket (created mode 0600) for matrix-fleet: status, statistics, configuration reload")
 	playerAllowText := flag.String("player-allow", "", "comma-separated IPs/CIDRs allowed to load the player and /api/devices (default: everyone)")
+	relayDir := flag.String("relay-dir", "", "directory for the relays reporting to this server (relays.json) and their per-minute statistics; enables POST "+relay.ReportPath+" for relays named in cfg/relay-secrets.json")
+	statisticAllowText := flag.String("statistic-allow", "", "comma-separated IPs/CIDRs allowed to view "+statisticPath+" (default: nobody; the page is not served)")
 	flag.Parse()
 	if *nodesPath != "" {
 		if *configPath != "" && *configPath != *nodesPath {
@@ -1116,7 +1132,28 @@ func main() {
 		srv.SetPlayerAllow(playerAllow)
 		log.Printf("Player and device list limited to %s", *playerAllowText)
 	}
-	if srv.fleet != nil || srv.nodeLink != nil {
+	if *relayDir != "" {
+		registry, err := relay.NewRegistry(*relayDir)
+		if err != nil {
+			log.Fatalf("-relay-dir: %v", err)
+		}
+		srv.relayRegistry = registry
+		go func() {
+			for range time.Tick(time.Minute) {
+				registry.Flush()
+			}
+		}()
+		log.Printf("Relay stream servers may report to %s (saved in %s)", relay.ReportPath, *relayDir)
+	}
+	statisticAllow, err := parsePlayerAllow(*statisticAllowText)
+	if err != nil {
+		log.Fatal(strings.Replace(err.Error(), "-player-allow", "-statistic-allow", 1))
+	}
+	if len(statisticAllow) > 0 {
+		srv.statisticAllow = statisticAllow
+		log.Printf("%s served to %s", statisticPath, *statisticAllowText)
+	}
+	if srv.fleet != nil || srv.nodeLink != nil || srv.relayRegistry != nil {
 		srv.relayMonitor = &relay.Monitor{}
 		go srv.measureRelays()
 	}

@@ -1,7 +1,7 @@
 # Matrix server release package
 
 `release/make_release.sh` builds `dist/matrix-server-<version>-<commit>.tar.gz`
-(linux/amd64 binary built with the toolchain pinned in `src/go/go.mod`, the
+(linux/amd64 binary built with the toolchain pinned in `src/control/go.mod`, the
 player, `cfg/version`, `setup.sh`, and `RELEASE` with the commit and hashes).
 
 ## Fresh install (Ubuntu)
