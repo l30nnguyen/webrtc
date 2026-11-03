@@ -39,6 +39,21 @@ type Relay struct {
 	// Metrics is the server's Prometheus endpoint, read by the nodes of its
 	// region for its load (optional).
 	Metrics string `json:"metrics,omitempty"`
+	// TCPPort and TLSPort are the relay's TCP and TLS ports, handed to
+	// viewers that can't reach it over UDP (0: the relay has none). TLSHost
+	// is the name its certificate is for; it defaults to Host, which must
+	// then be a host name.
+	TCPPort int    `json:"tcp_port,omitempty"`
+	TLSPort int    `json:"tls_port,omitempty"`
+	TLSHost string `json:"tls_host,omitempty"`
+}
+
+// CertificateHost is the name viewers check the relay's TLS certificate for.
+func (r Relay) CertificateHost() string {
+	if r.TLSHost != "" {
+		return r.TLSHost
+	}
+	return r.Host
 }
 
 const (
@@ -176,8 +191,14 @@ func (c Config) Validate(self string) error {
 		if !validHost(r.Host) {
 			return fmt.Errorf("relay %s: host %q must be a host name or IP address", r.Name, r.Host)
 		}
-		if r.Port < 0 || r.Port > 65535 {
-			return fmt.Errorf("relay %s: port %d is out of range", r.Name, r.Port)
+		if r.Port < 0 || r.Port > 65535 || r.TCPPort < 0 || r.TCPPort > 65535 || r.TLSPort < 0 || r.TLSPort > 65535 {
+			return fmt.Errorf("relay %s: a port is out of range", r.Name)
+		}
+		if r.TLSHost != "" && (r.TLSPort == 0 || !validHost(r.TLSHost)) {
+			return fmt.Errorf("relay %s: tls_host %q needs tls_port and must be a host name", r.Name, r.TLSHost)
+		}
+		if _, err := netip.ParseAddr(r.CertificateHost()); r.TLSPort != 0 && err == nil {
+			return fmt.Errorf("relay %s: tls_port needs a host name for the certificate: set tls_host", r.Name)
 		}
 		if r.CapacityMbps < 0 {
 			return fmt.Errorf("relay %s has a negative capacity", r.Name)
@@ -328,6 +349,12 @@ func Diff(old, new Config) []string {
 
 func describeRelay(r Relay) string {
 	s := fmt.Sprintf("%s %s:%d region=%s capacity=%dMbps", r.Name, r.Host, r.Port, r.Region, r.CapacityMbps)
+	if r.TCPPort != 0 {
+		s += fmt.Sprintf(" tcp=%d", r.TCPPort)
+	}
+	if r.TLSPort != 0 {
+		s += fmt.Sprintf(" tls=%s:%d", r.CertificateHost(), r.TLSPort)
+	}
 	if r.Metrics != "" {
 		s += " metrics=" + r.Metrics
 	}

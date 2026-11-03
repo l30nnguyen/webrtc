@@ -127,6 +127,15 @@ func TestValidate(t *testing.T) {
 		"region with a space":  func(c *Config) { c.Nodes[1].Region = "D E" },
 		"bad link_from":        func(c *Config) { c.Nodes[1].LinkFrom = []string{"10.0.0.0/33"} },
 		"link_from on Center":  func(c *Config) { c.Nodes[0].LinkFrom = []string{"10.0.0.1"} },
+		"tls on an IP relay": func(c *Config) {
+			c.Relays = []Relay{{Name: "r", Region: "US", Host: "3.95.228.203", TLSPort: 443}}
+		},
+		"tls_host without tls_port": func(c *Config) {
+			c.Relays = []Relay{{Name: "r", Region: "US", Host: "3.95.228.203", TLSHost: "relay.example.test"}}
+		},
+		"tcp port out of range": func(c *Config) {
+			c.Relays = []Relay{{Name: "r", Region: "US", Host: "relay.example.test", TCPPort: 70000}}
+		},
 	}
 	for name, mutate := range cases {
 		c := routedConfig(nil)
@@ -137,6 +146,10 @@ func TestValidate(t *testing.T) {
 	}
 	valid := routedConfig(map[string]string{"IT": "DE", "*": "US"})
 	valid.Nodes[1].LinkFrom = []string{"152.42.232.159", "10.104.0.0/20", "2001:db8::/64"}
+	valid.Relays = []Relay{
+		{Name: "r1", Region: "US", Host: "3.95.228.203", TCPPort: 80, TLSPort: 443, TLSHost: "relay.example.test"},
+		{Name: "r2", Region: "US", Host: "relay2.example.test", TCPPort: 80, TLSPort: 443},
+	}
 	if err := valid.Validate(self); err != nil {
 		t.Fatalf("valid config rejected: %v", err)
 	}

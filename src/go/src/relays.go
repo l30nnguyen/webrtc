@@ -8,7 +8,10 @@ import (
 	"io/fs"
 	"log"
 	"math/rand"
+	"net"
 	"os"
+	"strconv"
+	"strings"
 	"sync"
 	"time"
 
@@ -52,12 +55,12 @@ func (s *Server) fleetConfig() (fleet.Config, bool) {
 func (s *Server) relaysFor(cameraID string) []map[string]interface{} {
 	config, ok := s.fleetConfig()
 	if !ok || len(config.Relays) == 0 {
-		return s.loadTurnConfig()
+		return s.turnConfForCamera()
 	}
 	secrets, err := s.loadRelaySecrets()
 	if err != nil {
 		warnOnce("relays: %s: %v; using cfg/turn.conf", relaySecretsFile, err)
-		return s.loadTurnConfig()
+		return s.turnConfForCamera()
 	}
 	var usable []fleet.Relay
 	for _, r := range config.Relays {
@@ -68,7 +71,7 @@ func (s *Server) relaysFor(cameraID string) []map[string]interface{} {
 		}
 	}
 	if len(usable) == 0 {
-		return s.loadTurnConfig()
+		return s.turnConfForCamera()
 	}
 	region := ""
 	for _, n := range config.Nodes {
@@ -87,6 +90,120 @@ func (s *Server) relaysFor(cameraID string) []map[string]interface{} {
 		servers = append(servers, map[string]interface{}{"host": r.Host, "port": r.Port, "username": user, "password": password})
 	}
 	return servers
+}
+
+// turnConfForCamera is cfg/turn.conf as a camera takes it: the viewer-only
+// keys (tcp_port, tls_port, tls_host) stay on the server.
+func (s *Server) turnConfForCamera() []map[string]interface{} {
+	servers := s.loadTurnConfig()
+	for i, server := range servers {
+		camera := map[string]interface{}{}
+		for _, key := range []string{"host", "port", "username", "password"} {
+			if value, ok := server[key]; ok {
+				camera[key] = value
+			}
+		}
+		servers[i] = camera
+	}
+	return servers
+}
+
+// relayAddress is where viewers reach one relay: its UDP address, which
+// the camera names in its offer, and its TCP and TLS ports (0: none).
+type relayAddress struct {
+	name     string // in the fleet configuration; "" for cfg/turn.conf
+	host     string
+	port     int
+	tcp, tls int
+	tlsHost  string
+}
+
+func (s *Server) relayAddresses() []relayAddress {
+	var out []relayAddress
+	if config, ok := s.fleetConfig(); ok {
+		for _, r := range config.Relays {
+			out = append(out, relayAddress{name: r.Name, host: r.Host, port: r.Port, tcp: r.TCPPort, tls: r.TLSPort, tlsHost: r.CertificateHost()})
+		}
+	}
+	for _, server := range s.loadTurnConfig() {
+		number := func(key string) int {
+			n, _ := server[key].(float64)
+			return int(n)
+		}
+		host, _ := server["host"].(string)
+		tlsHost, _ := server["tls_host"].(string)
+		if tlsHost == "" {
+			tlsHost = host
+		}
+		out = append(out, relayAddress{host: host, port: number("port"), tcp: number("tcp_port"), tls: number("tls_port"), tlsHost: tlsHost})
+	}
+	return out
+}
+
+// addRelayURLs gives each relay a camera's offer names the URLs a viewer
+// uses for it, in the order to prefer them: UDP, TCP, TLS. A viewer passes
+// them all as one ICE server; ICE then prefers UDP over TCP over TLS by
+// itself, so a viewer that can't use UDP falls back without waiting. The
+// camera knows only the UDP address: TCP and TLS come from the relay
+// configuration, leaving out a port the monitor last found down.
+func (s *Server) addRelayURLs(msg map[string]interface{}) {
+	var candidates []interface{}
+	switch value := msg["candidates"].(type) {
+	case []interface{}:
+		candidates = value
+	case map[string]interface{}:
+		candidates = []interface{}{value}
+	default:
+		return
+	}
+	var known []relayAddress
+	for _, item := range candidates {
+		candidate, ok := item.(map[string]interface{})
+		if !ok {
+			continue
+		}
+		delete(candidate, "urls") // only the server names them
+		raw, _ := candidate["url"].(string)
+		address, query, _ := strings.Cut(raw, "?")
+		if query != "" && query != "transport=udp" {
+			continue
+		}
+		host, portText, err := net.SplitHostPort(address)
+		if err != nil {
+			continue
+		}
+		port, err := strconv.Atoi(portText)
+		if err != nil {
+			continue
+		}
+		if known == nil {
+			known = s.relayAddresses()
+		}
+		for _, r := range known {
+			if r.host != host || r.port != port {
+				continue
+			}
+			urls := []interface{}{"turn:" + net.JoinHostPort(host, portText) + "?transport=udp"}
+			if r.tcp != 0 && s.relayTransportUsable(r.name, "tcp") {
+				urls = append(urls, "turn:"+net.JoinHostPort(host, strconv.Itoa(r.tcp))+"?transport=tcp")
+			}
+			if r.tls != 0 && s.relayTransportUsable(r.name, "tls") {
+				urls = append(urls, "turns:"+net.JoinHostPort(r.tlsHost, strconv.Itoa(r.tls))+"?transport=tcp")
+			}
+			candidate["urls"] = urls
+			break
+		}
+	}
+}
+
+// relayTransportUsable is false only when this node measured the relay's
+// TCP or TLS port down recently; relays it doesn't measure are handed out.
+func (s *Server) relayTransportUsable(name, transport string) bool {
+	if s.relayMonitor == nil || name == "" {
+		return true
+	}
+	up, known := s.relayMonitor.Transport(name, transport)
+	return up || !known
 }
 
 // relaySecret is a relay's credentials on this node: a shared secret to mint

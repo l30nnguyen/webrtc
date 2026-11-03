@@ -2,8 +2,10 @@ package relay
 
 import (
 	"context"
+	"crypto/tls"
 	"encoding/binary"
 	"fmt"
+	"io"
 	"net"
 	"net/http"
 	"net/http/httptest"
@@ -110,5 +112,79 @@ func TestMonitorMeasuresBandwidthAndHealth(t *testing.T) {
 	now = now.Add(time.Hour)
 	if _, _, known := m.Load("de1"); known {
 		t.Fatal("stale measurement still known")
+	}
+}
+
+// streamResponder answers binding requests over TCP, or TLS with config.
+func streamResponder(t *testing.T, config *tls.Config) int {
+	t.Helper()
+	l, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if config != nil {
+		l = tls.NewListener(l, config)
+	}
+	t.Cleanup(func() { l.Close() })
+	go func() {
+		for {
+			conn, err := l.Accept()
+			if err != nil {
+				return
+			}
+			go func() {
+				defer conn.Close()
+				request := make([]byte, 20)
+				if _, err := io.ReadFull(conn, request); err != nil {
+					return
+				}
+				answer := make([]byte, 20)
+				binary.BigEndian.PutUint16(answer[0:], 0x0101)
+				copy(answer[4:20], request[4:20])
+				conn.Write(answer)
+			}()
+		}
+	}()
+	return l.Addr().(*net.TCPAddr).Port
+}
+
+func TestProbeStream(t *testing.T) {
+	if err := ProbeStream(context.Background(), "127.0.0.1", streamResponder(t, nil), "", nil); err != nil {
+		t.Fatalf("tcp: %v", err)
+	}
+	server := httptest.NewUnstartedServer(nil)
+	server.StartTLS() // only for its certificate, valid for "example.com"
+	defer server.Close()
+	tlsPort := streamResponder(t, server.TLS)
+	roots := &tls.Config{RootCAs: server.Client().Transport.(*http.Transport).TLSClientConfig.RootCAs}
+	if err := ProbeStream(context.Background(), "127.0.0.1", tlsPort, "example.com", roots); err != nil {
+		t.Fatalf("tls: %v", err)
+	}
+	if err := ProbeStream(context.Background(), "127.0.0.1", tlsPort, "other.test", roots); err == nil {
+		t.Fatal("certificate for another name accepted")
+	}
+	if err := ProbeStream(context.Background(), "127.0.0.1", tlsPort, "example.com", nil); err == nil {
+		t.Fatal("untrusted certificate accepted")
+	}
+}
+
+func TestMonitorMeasuresTCPAndTLS(t *testing.T) {
+	host, port := stunResponder(t)
+	m := &Monitor{}
+	silent, _ := net.Listen("tcp", "127.0.0.1:0")
+	silent.Close()
+	m.Measure(context.Background(), []fleet.Relay{{Name: "r", Host: host, Port: port, TCPPort: streamResponder(t, nil), TLSPort: silent.Addr().(*net.TCPAddr).Port, TLSHost: "localhost"}})
+	if up, known := m.Transport("r", "tcp"); !up || !known {
+		t.Fatalf("tcp %v %v", up, known)
+	}
+	if up, known := m.Transport("r", "tls"); up || !known {
+		t.Fatalf("tls %v %v", up, known)
+	}
+	if s := m.Statuses(); len(s) != 1 || s[0].TCP != "up" || s[0].TLS != "down" || !s[0].Healthy {
+		t.Fatalf("statuses %+v", s)
+	}
+	m.Measure(context.Background(), []fleet.Relay{{Name: "u", Host: host, Port: port}})
+	if _, known := m.Transport("u", "tcp"); known {
+		t.Fatal("a relay without a TCP port has a TCP state")
 	}
 }

@@ -556,6 +556,9 @@ func (s *Server) readPump(c *Client) {
 				}
 				s.countStat((*stats.Counters).Request)
 			}
+			if c.Role == admission.RoleCamera && dest.Role == admission.RolePlayer && msg["type"] == "offer" {
+				s.addRelayURLs(msg)
+			}
 			data, _ := json.Marshal(msg)
 			select {
 			case dest.Send <- data:

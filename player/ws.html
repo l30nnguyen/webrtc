@@ -1460,18 +1460,7 @@
             async connected(peer) {
                 const session = this.session;
                 if (!session || session.done) return;
-                let path = 'direct';
-                try {
-                    const stats = await peer.getStats();
-                    const kinds = {};
-                    let pair = null;
-                    stats.forEach(r => { if (r.type === 'local-candidate' || r.type === 'remote-candidate') kinds[r.id] = r.candidateType; });
-                    stats.forEach(r => { if (r.type === 'candidate-pair' && r.state === 'succeeded' && r.nominated) pair = r; });
-                    if (pair) {
-                        const local = kinds[pair.localCandidateId], remote = kinds[pair.remoteCandidateId];
-                        path = local === 'relay' || remote === 'relay' ? 'relay' : local === 'host' && remote === 'host' ? 'lan' : 'direct';
-                    }
-                } catch (_) {}
+                const { path } = await connectionPath(peer);
                 this.send({ result: 'connected', path, setup_ms: Math.round(performance.now() - session.startedAt) });
             },
             finish() {
@@ -1479,6 +1468,40 @@
                 this.session = null;
             }
         };
+
+        // connectionPath reads the selected candidate pair: path is relay, lan
+        // or direct; relayProtocol is how this viewer reaches the relay stream
+        // server (udp, tcp or tls), or '' when its own side is not relayed.
+        async function connectionPath(peer) {
+            const result = { path: 'direct', relayProtocol: '', viaCamera: false };
+            try {
+                const stats = await peer.getStats();
+                let pair = null;
+                stats.forEach(r => { if (r.type === 'candidate-pair' && r.state === 'succeeded' && r.nominated) pair = r; });
+                if (!pair) {
+                    stats.forEach(r => { if (r.type === 'transport' && r.selectedCandidatePairId) pair = stats.get(r.selectedCandidatePairId); });
+                }
+                if (pair) {
+                    const local = stats.get(pair.localCandidateId) || {}, remote = stats.get(pair.remoteCandidateId) || {};
+                    if (local.candidateType === 'relay' || remote.candidateType === 'relay') {
+                        result.path = 'relay';
+                        if (local.candidateType === 'relay') result.relayProtocol = (local.relayProtocol || 'udp').toLowerCase();
+                        else result.viaCamera = true;
+                    } else if (local.candidateType === 'host' && remote.candidateType === 'host') {
+                        result.path = 'lan';
+                    }
+                }
+            } catch (_) {}
+            return result;
+        }
+
+        function describePath(info) {
+            if (info.path === 'relay') {
+                return info.relayProtocol ? 'relay stream server over ' + info.relayProtocol.toUpperCase()
+                    : 'relay stream server (camera side)';
+            }
+            return info.path === 'lan' ? 'local network' : 'direct';
+        }
 
         function createPeerConnection(offer) {
             const config = {
@@ -1490,14 +1513,17 @@
             if (candidates.length > 0) {
                 const firstCandidate = candidates[0];
                 const turnHost = firstCandidate.url.split('?')[0];
+                // The control server adds the relay's TCP and TLS URLs after UDP;
+                // ICE prefers UDP, then TCP, then TLS, so all go in together.
+                const urls = Array.isArray(firstCandidate.urls) && firstCandidate.urls.length > 0
+                    ? firstCandidate.urls
+                    : ['turn:' + turnHost + '?transport=udp'];
                 config.iceServers.push({
-                    urls: [
-                        'turn:' + turnHost + '?transport=udp',
-                    ],
+                    urls,
                     username: firstCandidate.username,
                     credential: firstCandidate.password
                 });
-                log('Relay stream server configured: ' + turnHost, 'info');
+                log('Relay stream server configured: ' + turnHost + ' (' + urls.map(u => u.startsWith('turns:') ? 'tls' : u.split('transport=')[1]).join(', ') + ')', 'info');
                 if (viewReport.session) viewReport.session.relayOffered = true;
             } else {
                 log('No relay stream server received from the camera', 'warn');
@@ -1528,6 +1554,12 @@
                 if (pc.iceConnectionState === 'failed') viewReport.failed('no_path');
                 if (pc.iceConnectionState === 'connected' || pc.iceConnectionState === 'completed') {
                     viewReport.connected(pc);
+                    const state = pc.iceConnectionState;
+                    connectionPath(pc).then(info => {
+                        if (pc.iceConnectionState !== state) return;
+                        iceConnectionLog.textContent = state + ' · ' + describePath(info);
+                        log('Connected through ' + describePath(info), 'info');
+                    });
                     // Track previous bytes for speed calculation
                     window._prevBytesSent = 0;
                     window._prevBytesRecv = 0;

@@ -471,6 +471,13 @@ func (c fleetCLI) status() error {
 			if r.Error != "" && r.Healthy {
 				state = "up (" + r.Error + ")"
 			}
+			for _, port := range []struct{ name, state string }{{"tcp", r.TCP}, {"tls", r.TLS}} {
+				if port.state == "down" {
+					state += " " + port.name + ":DOWN"
+				} else if port.state != "" {
+					state += " " + port.name + ":" + port.state
+				}
+			}
 			if r.Measured {
 				mbps = fmt.Sprintf("%.1f/%d", r.Mbps, r.CapacityMbps)
 				load = fmt.Sprintf("%.0f%%", 100*r.Mbps/float64(max(r.CapacityMbps, 1)))

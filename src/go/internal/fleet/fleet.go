@@ -83,6 +83,10 @@ type RelayStatus struct {
 	At           string  `json:"at"` // RFC 3339, UTC
 	Error        string  `json:"error,omitempty"`
 	MeasuredBy   string  `json:"measured_by,omitempty"`
+	// TCP and TLS are the health of the relay's TCP and TLS ports: "up",
+	// "down", or empty when it has none.
+	TCP string `json:"tcp,omitempty"`
+	TLS string `json:"tls,omitempty"`
 }
 
 // MaxRelayStatuses bounds the relay measurements one node reports.

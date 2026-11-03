@@ -5,6 +5,7 @@ import (
 	"bytes"
 	"context"
 	"crypto/rand"
+	"crypto/tls"
 	"encoding/binary"
 	"errors"
 	"fmt"
@@ -33,7 +34,8 @@ const (
 type Status = fleet.RelayStatus
 
 // Monitor measures relays: health by asking the relay port itself (a STUN
-// binding request, which violet and coturn answer without credentials), load
+// binding request, which violet, coturn and matrix-relay answer without
+// credentials; over TCP and TLS too when the relay has those ports), load
 // from the relay's metrics endpoint. Violet has no metrics of its own, so run
 // node_exporter on the relay host: bandwidth comes from its network counters
 // (node_network_*_bytes_total), which move as traffic flows. coturn's own
@@ -43,6 +45,8 @@ type Status = fleet.RelayStatus
 type Monitor struct {
 	Client *http.Client
 	Now    func() time.Time
+	// TLSConfig checks relay certificates (nil: the system roots).
+	TLSConfig *tls.Config
 
 	mu      sync.Mutex
 	last    map[string]sample
@@ -82,6 +86,12 @@ func (m *Monitor) measure(ctx context.Context, r fleet.Relay) {
 		status.Error = err.Error()
 	} else {
 		status.Healthy = true
+	}
+	if r.TCPPort != 0 {
+		status.TCP = upDown(ProbeStream(ctx, r.Host, r.TCPPort, "", nil))
+	}
+	if r.TLSPort != 0 {
+		status.TLS = upDown(ProbeStream(ctx, r.CertificateHost(), r.TLSPort, r.CertificateHost(), m.TLSConfig))
 	}
 	if r.Metrics != "" {
 		if metrics, err := m.fetch(ctx, r.Metrics); err != nil {
@@ -129,6 +139,29 @@ func (m *Monitor) Load(name string) (fraction float64, healthy, known bool) {
 		fraction = status.Mbps / float64(status.CapacityMbps)
 	}
 	return fraction, status.Healthy, true
+}
+
+// Transport reports whether a relay's TCP or TLS port ("tcp", "tls") was
+// last measured up. known is false without a recent measurement of it.
+func (m *Monitor) Transport(name, transport string) (up, known bool) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	status, ok := m.results[name]
+	if !ok || m.now().Sub(m.when[name]) > staleAfter {
+		return false, false
+	}
+	state := status.TCP
+	if transport == "tls" {
+		state = status.TLS
+	}
+	return state == "up", state != ""
+}
+
+func upDown(err error) string {
+	if err != nil {
+		return "down"
+	}
+	return "up"
 }
 
 // Statuses returns the recent measurements.
@@ -261,10 +294,8 @@ func Probe(ctx context.Context, host string, port int) error {
 	if deadline, ok := ctx.Deadline(); ok {
 		conn.SetDeadline(deadline)
 	}
-	request := make([]byte, 20)
-	binary.BigEndian.PutUint16(request[0:], 0x0001) // binding request
-	binary.BigEndian.PutUint32(request[4:], 0x2112A442)
-	if _, err := rand.Read(request[8:20]); err != nil {
+	request, err := bindingRequest()
+	if err != nil {
 		return err
 	}
 	if _, err := conn.Write(request); err != nil {
@@ -276,8 +307,69 @@ func Probe(ctx context.Context, host string, port int) error {
 		if err != nil {
 			return errors.New("no answer from the relay port")
 		}
-		if n >= 20 && binary.BigEndian.Uint16(answer[0:]) == 0x0101 && bytes.Equal(answer[8:20], request[8:20]) {
+		if isBindingSuccess(answer[:n], request) {
 			return nil
 		}
 	}
+}
+
+// ProbeStream sends a STUN binding request over TCP, or over TLS when
+// serverName is set (the certificate must be valid for it), and waits for
+// the matching success answer.
+func ProbeStream(ctx context.Context, host string, port int, serverName string, config *tls.Config) error {
+	ctx, cancel := context.WithTimeout(ctx, probeTimeout)
+	defer cancel()
+	var conn net.Conn
+	var err error
+	address := net.JoinHostPort(host, strconv.Itoa(port))
+	if serverName != "" {
+		if config == nil {
+			config = &tls.Config{}
+		}
+		config = config.Clone()
+		config.ServerName, config.MinVersion = serverName, tls.VersionTLS12
+		conn, err = (&tls.Dialer{Config: config}).DialContext(ctx, "tcp", address)
+	} else {
+		conn, err = (&net.Dialer{}).DialContext(ctx, "tcp", address)
+	}
+	if err != nil {
+		return err
+	}
+	defer conn.Close()
+	if deadline, ok := ctx.Deadline(); ok {
+		conn.SetDeadline(deadline)
+	}
+	request, err := bindingRequest()
+	if err != nil {
+		return err
+	}
+	if _, err := conn.Write(request); err != nil {
+		return err
+	}
+	// Over a stream a STUN message is its 20-byte header and the length it names.
+	for {
+		header := make([]byte, 20)
+		if _, err := io.ReadFull(conn, header); err != nil {
+			return errors.New("no answer from the relay port")
+		}
+		body := make([]byte, binary.BigEndian.Uint16(header[2:]))
+		if _, err := io.ReadFull(conn, body); err != nil {
+			return errors.New("no answer from the relay port")
+		}
+		if isBindingSuccess(header, request) {
+			return nil
+		}
+	}
+}
+
+func bindingRequest() ([]byte, error) {
+	request := make([]byte, 20)
+	binary.BigEndian.PutUint16(request[0:], 0x0001) // binding request
+	binary.BigEndian.PutUint32(request[4:], 0x2112A442)
+	_, err := rand.Read(request[8:20])
+	return request, err
+}
+
+func isBindingSuccess(answer, request []byte) bool {
+	return len(answer) >= 20 && binary.BigEndian.Uint16(answer[0:]) == 0x0101 && bytes.Equal(answer[8:20], request[8:20])
 }
