@@ -1503,27 +1503,105 @@
             return info.path === 'lan' ? 'local network' : 'direct';
         }
 
-        function createPeerConnection(offer) {
+        const RELAY_PROBE_STAGGER_MS = 1000; // TCP and TLS are tried only when UDP is this slow
+        const RELAY_PROBE_BETTER_MS = 2000;  // a working lower choice is taken once better ones had this long
+        const RELAY_PROBE_LIMIT_MS = 5000;
+
+        function relayProtocol(url) {
+            return url.startsWith('turns:') ? 'TLS' : (url.split('transport=')[1] || 'udp').toUpperCase();
+        }
+
+        // pickRelayURL finds the one relay URL a session should use, in the
+        // order the control server gives them (UDP, TCP, TLS): each is tried on
+        // a throwaway connection, UDP first and TCP/TLS only if UDP is slow or
+        // fails, and the best that answers wins. The throwaway connections are
+        // closed, so the session keeps a single relay allocation instead of one
+        // per transport. Resolves null when none answers.
+        function pickRelayURL(urls, username, credential) {
+            if (urls.length < 2) return Promise.resolve(urls[0] || null);
+            return new Promise(resolve => {
+                const state = urls.map(() => 'idle'); // idle, pending, ok, failed
+                const probes = [];
+                const timers = [];
+                let done = false;
+                const startedAt = performance.now();
+                const best = () => state.indexOf('ok');
+                const finish = url => {
+                    if (done) return;
+                    done = true;
+                    timers.forEach(clearTimeout);
+                    probes.forEach(probe => { try { probe.close(); } catch (_) {} });
+                    resolve(url);
+                };
+                const decide = () => {
+                    // The best working URL is taken once every better one failed.
+                    for (let i = 0; i < urls.length; i++) {
+                        if (state[i] === 'ok') return finish(urls[i]);
+                        if (state[i] !== 'failed') break;
+                    }
+                    if (state.every(s => s === 'failed')) return finish(null);
+                    if (state[0] === 'failed') startRest();
+                    if (best() >= 0 && timers.length < 3) {
+                        const wait = Math.max(0, startedAt + RELAY_PROBE_BETTER_MS - performance.now());
+                        timers.push(setTimeout(() => finish(urls[best()]), wait));
+                    }
+                };
+                const start = i => {
+                    if (state[i] !== 'idle') return;
+                    state[i] = 'pending';
+                    try {
+                        const probe = new RTCPeerConnection({
+                            iceServers: [{ urls: [urls[i]], username, credential }], iceTransportPolicy: 'relay' });
+                        probes.push(probe);
+                        probe.onicecandidate = event => {
+                            if (state[i] !== 'pending') return;
+                            if (event.candidate && event.candidate.candidate.includes(' typ relay')) state[i] = 'ok';
+                            else if (!event.candidate) state[i] = 'failed';
+                            else return;
+                            decide();
+                        };
+                        probe.createDataChannel('probe');
+                        probe.createOffer().then(o => probe.setLocalDescription(o)).catch(() => { state[i] = 'failed'; decide(); });
+                    } catch (_) {
+                        state[i] = 'failed';
+                        decide();
+                    }
+                };
+                const startRest = () => { for (let i = 1; i < urls.length; i++) start(i); };
+                start(0);
+                timers.push(setTimeout(startRest, RELAY_PROBE_STAGGER_MS));
+                timers.push(setTimeout(() => finish(best() >= 0 ? urls[best()] : null), RELAY_PROBE_LIMIT_MS));
+            });
+        }
+
+        // chooseRelay returns the ICE server for this session from the offer's
+        // first relay: its one best URL, or null when the offer names none.
+        async function chooseRelay(offer) {
+            const candidates = Array.isArray(offer.candidates) ? offer.candidates : [offer.candidates];
+            const first = candidates[0];
+            if (!first || typeof first.url !== 'string') return null;
+            const turnHost = first.url.split('?')[0];
+            const urls = Array.isArray(first.urls) && first.urls.length > 0 ? first.urls : ['turn:' + turnHost + '?transport=udp'];
+            if (urls.length > 1) log('Relay stream server ' + turnHost + ': testing ' + urls.map(relayProtocol).join(', '), 'info');
+            const chosen = await pickRelayURL(urls, first.username, first.password);
+            if (chosen) {
+                log('Relay stream server ' + turnHost + ': using ' + relayProtocol(chosen), 'info');
+            } else {
+                log('Relay stream server ' + turnHost + ' did not answer', 'warn');
+            }
+            // With no answer, offer them all: the session may still connect direct.
+            return { urls: chosen ? [chosen] : urls, username: first.username, credential: first.password, host: turnHost };
+        }
+
+        function createPeerConnection(offer, relay) {
             const config = {
                 bundlePolicy: "max-bundle",
             };
                     
             config.iceServers = [];
-            const candidates = Array.isArray(offer.candidates) ? offer.candidates : [offer.candidates];
-            if (candidates.length > 0) {
-                const firstCandidate = candidates[0];
-                const turnHost = firstCandidate.url.split('?')[0];
-                // The control server adds the relay's TCP and TLS URLs after UDP;
-                // ICE prefers UDP, then TCP, then TLS, so all go in together.
-                const urls = Array.isArray(firstCandidate.urls) && firstCandidate.urls.length > 0
-                    ? firstCandidate.urls
-                    : ['turn:' + turnHost + '?transport=udp'];
-                config.iceServers.push({
-                    urls,
-                    username: firstCandidate.username,
-                    credential: firstCandidate.password
-                });
-                log('Relay stream server configured: ' + turnHost + ' (' + urls.map(u => u.startsWith('turns:') ? 'tls' : u.split('transport=')[1]).join(', ') + ')', 'info');
+            if (relay) {
+                config.iceServers.push({ urls: relay.urls, username: relay.username, credential: relay.credential });
+                log('Relay stream server configured: ' + relay.host, 'info');
                 if (viewReport.session) viewReport.session.relayOffered = true;
             } else {
                 log('No relay stream server received from the camera', 'warn');
@@ -1895,12 +1973,18 @@
             log('📤 Answer sent to camera', 'success');
         }
 
+        let offerGeneration = 0;
+
         async function handleOffer(offer) {
             talkback.reset();
             recording.reset();
             lens.reset();
             if (pc) pc.close();
-            const peer = createPeerConnection(offer);
+            pc = null;
+            const generation = ++offerGeneration;
+            const relay = await chooseRelay(offer);
+            if (generation !== offerGeneration) return; // a newer offer took over
+            const peer = createPeerConnection(offer, relay);
             pc = peer;
             await peer.setRemoteDescription(offer);
             if (pc !== peer) return;
@@ -2087,6 +2171,7 @@
         }
 
         function stop() {
+            offerGeneration++; // an offer still testing relays is dropped
             viewReport.finish();
             talkback.reset();
             recording.reset();

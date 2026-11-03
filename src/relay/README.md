@@ -53,7 +53,7 @@ through, the control server adds `urls` to each relay it names:
 `turn:host:port?transport=udp`, `turn:host:tcp_port?transport=tcp`, then
 `turns:tls_host:tls_port?transport=tcp`. It leaves out a port that the
 node's monitor last found down; the TLS probe checks the certificate.
-Viewers use the URLs together, and ICE prefers UDP, then TCP, then TLS.
+A viewer tests them on throwaway connections and keeps the best one that answers (UDP, then TCP, then TLS) for the session, so it holds one relay allocation, not three.
 `cfg/turn.conf` entries take the same `tcp_port`, `tls_port` and `tls_host`
 keys, which are kept from cameras.
 
