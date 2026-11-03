@@ -1,0 +1,33 @@
+# Relay stream server (TURN). Copy to /etc/systemd/system/, write
+# /etc/matrix-relay/env (see env.example), then: systemctl enable --now matrix-relay
+[Unit]
+Description=matrix relay stream server
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+User=matrix-relay
+Group=matrix-relay
+EnvironmentFile=/etc/matrix-relay/env
+ExecStart=/usr/local/bin/matrix-relay -secrets /etc/matrix-relay/secrets.json $RELAY_FLAGS
+ExecReload=/bin/kill -HUP $MAINPID
+Restart=always
+RestartSec=2
+LimitNOFILE=65536
+# Ports 80 and 443 without root.
+AmbientCapabilities=CAP_NET_BIND_SERVICE
+CapabilityBoundingSet=CAP_NET_BIND_SERVICE
+MemoryMax=128M
+NoNewPrivileges=yes
+ProtectSystem=strict
+ProtectHome=yes
+PrivateTmp=yes
+PrivateDevices=yes
+ProtectKernelTunables=yes
+ProtectKernelModules=yes
+ProtectControlGroups=yes
+RestrictAddressFamilies=AF_INET AF_INET6 AF_UNIX AF_NETLINK
+ReadOnlyPaths=/etc/matrix-relay
+
+[Install]
+WantedBy=multi-user.target
