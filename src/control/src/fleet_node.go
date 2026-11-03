@@ -8,6 +8,7 @@ import (
 	"time"
 
 	"signaling-server/internal/admission"
+	"signaling-server/internal/events"
 	"signaling-server/internal/fleet"
 	"signaling-server/internal/stats"
 )
@@ -31,7 +32,7 @@ var relayProtocols = map[string]bool{"udp": true, "tcp": true, "tls": true}
 // attempt as the camera or the viewer app saw it. The role comes from the
 // client's ticket, never from the message. Reports are never forwarded.
 func (s *Server) recordReport(c *Client, msg map[string]interface{}) {
-	if s.stats == nil && s.history == nil {
+	if s.stats == nil && s.history == nil && s.events == nil {
 		return
 	}
 	report := stats.Report{Role: stats.RolePlayer}
@@ -69,6 +70,20 @@ func (s *Server) recordReport(c *Client, msg map[string]interface{}) {
 		counts[prefix+"error_"+report.Error] = 1
 	}
 	s.countHistory(counts)
+
+	// In the connection log, with the camera it was about: the reporting
+	// camera itself, or the camera the viewer's ticket was for.
+	e := events.Event{Type: events.Report, Role: "viewer", Result: report.Result, Error: report.Error, Path: report.Path,
+		SetupMillis: report.SetupMillis, RelayOffered: &report.RelayOffered, RelayReady: &report.RelayReady}
+	if report.Role == stats.RoleCamera {
+		e.Role, e.Camera = "camera", c.ID
+	} else {
+		e.Viewer, e.Camera = c.ID, c.CameraIDScope
+	}
+	if protocol, _ := msg["relay_protocol"].(string); report.Path == "relay" && relayProtocols[protocol] {
+		e.RelayProtocol = protocol
+	}
+	s.addEvent(e)
 }
 
 // LocalReport is this node's state as it reports it to Center: the cameras

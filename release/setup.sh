@@ -40,10 +40,14 @@
 # them in cfg/sid/relays/ and hands them out by their reported load. Only a
 # relay whose -name has a shared secret in relay-secrets.json is accepted.
 # The statistics of this server and those relays are kept in
-# cfg/sid/statistic/ (day/ per minute for 30 days, month/ per hour for 12
-# months, year/ per day) and shown at /admin/statistic, with the rows for
-# charting tools at /admin/statistic/data (CSV or JSON), to the addresses in
-# STATISTIC_ALLOW= of /etc/matrix/matrix.conf (default: PLAYER_ALLOW).
+# cfg/sid/statistic/ (one row per source and 30 minutes, STATISTIC_STEP=hour
+# for hourly: day/ files for 30 days, month/ files for 12 months, then year/
+# per day), and every connection (request, outcome and cause, refusals,
+# cameras online/offline, relay changes) in cfg/sid/events/ for EVENT_DAYS=
+# (default 30). /admin/statistic shows both; /admin/statistic/data and
+# /admin/statistic/events serve them as CSV or JSON for other tools. Only the
+# addresses in STATISTIC_ALLOW= of /etc/matrix/matrix.conf (default:
+# PLAYER_ALLOW) get them.
 #
 # Fleet: sudo matrix-fleet status | stats [DAYS] (installed in /usr/local/bin;
 # it talks to the server over /run/matrix/admin.sock, no network port).
@@ -141,7 +145,8 @@ migrate_fleet_config() {
 # served to STATISTIC_ALLOW (default PLAYER_ALLOW; nobody when both are empty).
 relay_flags() {
     local allow="${STATISTIC_ALLOW:-${PLAYER_ALLOW:-}}"
-    printf ' -relay-dir %s -statistic-dir %s' "$DATA_DIR/relays" "$DATA_DIR/statistic"
+    printf ' -relay-dir %s -statistic-dir %s -statistic-step %s -event-dir %s -event-days %s' \
+        "$DATA_DIR/relays" "$DATA_DIR/statistic" "${STATISTIC_STEP:-30m}" "$DATA_DIR/events" "${EVENT_DAYS:-30}"
     [[ -n "$allow" ]] && printf ' -statistic-allow %s' "$allow"
     return 0
 }

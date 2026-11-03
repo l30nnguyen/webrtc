@@ -2,13 +2,19 @@ package main
 
 import (
 	"log"
+	"net"
+	"net/http"
 	"net/url"
 	"os"
 	"os/signal"
+	"strconv"
+	"strings"
+	"sync"
 	"syscall"
 	"time"
 
 	"signaling-server/internal/admission"
+	"signaling-server/internal/events"
 	"signaling-server/internal/history"
 )
 
@@ -57,6 +63,9 @@ func (s *Server) saveOnStop(statsPath string) {
 	if s.history != nil {
 		s.history.Close()
 	}
+	if s.events != nil {
+		s.events.Close()
+	}
 	if s.stats != nil && statsPath != "" {
 		if err := s.stats.Save(statsPath); err != nil {
 			log.Printf("stats: %v", err)
@@ -86,4 +95,85 @@ func (s *Server) sampleControl() {
 		})
 		time.Sleep(controlSampleInterval)
 	}
+}
+
+// addEvent records an event in the connection log (-event-dir).
+func (s *Server) addEvent(e events.Event) {
+	if s.events != nil {
+		s.events.Add(e)
+	}
+}
+
+// refusalLimiter keeps one refusal event per source address and reason a
+// minute, so a flood of refused connections can't crowd the log.
+type refusalLimiter struct {
+	mu   sync.Mutex
+	last map[string]time.Time
+}
+
+func (l *refusalLimiter) allow(key string, now time.Time) bool {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	if l.last == nil || len(l.last) > 10000 {
+		l.last = map[string]time.Time{}
+	}
+	if at, ok := l.last[key]; ok && now.Sub(at) < time.Minute {
+		return false
+	}
+	l.last[key] = now
+	return true
+}
+
+// refusalEvent records a connection turned away: why, from where, and the
+// client ID it asked for.
+func (s *Server) refusalEvent(r *http.Request, clientID, reason, detail string) {
+	if s.events == nil {
+		return
+	}
+	from := r.RemoteAddr
+	if host, _, err := net.SplitHostPort(from); err == nil {
+		from = host
+	}
+	if !s.refusals.allow(from+"\x00"+reason, time.Now()) {
+		return
+	}
+	e := events.Event{Type: events.Refused, Result: reason, From: from, Detail: detail}
+	if strings.HasPrefix(clientID, "Player") {
+		e.Viewer = clientID
+	} else if admission.ValidDeviceID(clientID) {
+		e.Camera = clientID
+	}
+	s.addEvent(e)
+}
+
+// admissionReason is a ticket check's error, which never carries ticket
+// contents (the checks only say "invalid ticket" and the like).
+func admissionReason(err error) string {
+	text := err.Error()
+	if len(text) > 64 {
+		text = text[:64]
+	}
+	return text
+}
+
+// relayNames names the relays handed out for a request: the relay's name
+// when this server knows it, else host:port.
+func (s *Server) relayNames(servers []map[string]interface{}) []string {
+	var names []string
+	known := s.relayAddresses()
+	for _, server := range servers {
+		host, _ := server["host"].(string)
+		port, _ := server["port"].(int)
+		if f, ok := server["port"].(float64); ok {
+			port = int(f)
+		}
+		name := net.JoinHostPort(host, strconv.Itoa(port))
+		for _, r := range known {
+			if r.name != "" && r.host == host && r.port == port {
+				name = r.name
+			}
+		}
+		names = append(names, name)
+	}
+	return names
 }

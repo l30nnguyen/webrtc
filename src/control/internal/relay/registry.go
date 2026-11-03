@@ -79,6 +79,7 @@ type entry struct {
 
 	signedAt int64
 	lastSig  string
+	silent   bool // reported as silent; its next report is "back"
 }
 
 // Registry keeps the relays that report to this control server: their
@@ -88,6 +89,9 @@ type Registry struct {
 	dir     string
 	Now     func() time.Time
 	History *history.Store
+	// OnChange, when set, hears a relay registered, restarted, stopping,
+	// silent (no report for 45 s) or back.
+	OnChange func(name, change, detail string)
 
 	mu     sync.Mutex
 	relays map[string]*entry
@@ -204,15 +208,22 @@ func (r *Registry) record(report Report, signedAt int64, sig string) error {
 	}
 	changed := e == nil || e.Report.Relay() != report.Relay() || e.Report.Version != report.Version ||
 		e.Report.StartedAt != report.StartedAt
+	detail := fmt.Sprintf("%s %s:%d version %s", report.Region, report.Host, report.Port, report.Version)
 	if e == nil {
 		e = &entry{FirstSeen: now}
 		r.relays[report.Name] = e
-		log.Printf("relays: %s registered (%s, %s:%d)", report.Name, report.Region, report.Host, report.Port)
+		log.Printf("relays: %s registered (%s)", report.Name, detail)
+		r.change(report.Name, "registered", detail)
 	} else if changed {
-		log.Printf("relays: %s changed or restarted (%s, %s:%d, version %s)", report.Name, report.Region, report.Host, report.Port, report.Version)
+		log.Printf("relays: %s changed or restarted (%s)", report.Name, detail)
+		r.change(report.Name, "restarted", detail)
+	} else if e.silent || e.Report.State == "stopping" && report.State == "up" {
+		r.change(report.Name, "back", "")
 	}
+	e.silent = false
 	if report.State == "stopping" && e.Report.State != "stopping" {
 		log.Printf("relays: %s is stopping", report.Name)
+		r.change(report.Name, "stopping", "")
 	}
 	r.addHistory(e, report)
 	e.Report, e.LastSeen, e.signedAt, e.lastSig = report, now, signedAt, sig
@@ -262,6 +273,10 @@ func (r *Registry) Flush() {
 	defer r.mu.Unlock()
 	forgot := false
 	for name, e := range r.relays {
+		if !e.silent && e.Report.State == "up" && now.Sub(e.LastSeen) > goneAfter {
+			e.silent = true
+			r.change(name, "silent", "no report since "+e.LastSeen.UTC().Format(time.RFC3339))
+		}
 		if now.Sub(e.LastSeen) > forgetAfter {
 			delete(r.relays, name)
 			forgot = true
@@ -269,6 +284,12 @@ func (r *Registry) Flush() {
 	}
 	if forgot {
 		r.saveLocked()
+	}
+}
+
+func (r *Registry) change(name, change, detail string) {
+	if r.OnChange != nil {
+		r.OnChange(name, change, detail)
 	}
 }
 

@@ -72,38 +72,59 @@ Relays can still be listed in the fleet configuration instead (`tcp_port`,
 `tls_port`, `tls_host`, `metrics`), and `cfg/turn.conf` stays the fallback
 when no relay is usable.
 
-## Statistics
+## Statistics and the connection log
 
-With `-statistic-dir` (`cfg/sid/statistic/` from `setup.sh`) the control
-server keeps time series of itself and of every relay reporting to it:
+The control server keeps two things about its region, itself and the relays
+reporting to it, both shown at `/admin/statistic` to `-statistic-allow`
+addresses only.
+
+**Statistics** (`-statistic-dir`, `cfg/sid/statistic/` from `setup.sh`): one
+row per source and step (`-statistic-step`, 30 minutes, or `hour`).
 
 | File | Rows | Kept |
 |---|---|---|
-| `day/YYYY-MM-DD.jsonl` | one per source and minute | 30 days, then folded into its month |
-| `month/YYYY-MM.jsonl` | one per source and hour | 12 months, then folded into its year |
+| `day/YYYY-MM-DD.jsonl` | one per source and step | 30 days, then moved into its month |
+| `month/YYYY-MM.jsonl` | the same rows | 12 months, then summed into days in its year |
 | `year/YYYY.jsonl` | one per source and day | always |
 
-Each row is `{"t", "step", "source": "control"|"relay", "name", "region",
-"minutes", "gauges": {NAME: {"max", "avg"}}, "counts": {NAME: N}}`. Gauges are
-sampled every 15 s; counts are what happened in the step.
+A row is `{"t", "step", "source": "control"|"relay", "name", "region",
+"minutes", "gauges": {NAME: {"max", "avg"}}, "counts": {NAME: N}}`: gauges are
+sampled every 15 s, counts are what happened in the step, `minutes` the
+minutes with data (a relay's minutes up). At most about 600 bytes, so one
+source takes about 10.5 MB a year at 30 minutes.
 
 - Relay gauges: `clients` and `clients_udp`, `clients_tcp`, `clients_tls` (the
   clients it serves, by how they reach it), `mbps`. Counts: `rx_bytes`,
   `tx_bytes`, `new_clients`, `auth_failures`, `quota_rejects`, `peers_denied`,
-  `reports`. `minutes` is the minutes it reported.
+  `reports`.
 - Control gauges: `cameras`, `viewers` (connected). Counts: `requests`,
   `camera_offline`, `admission_rejected`, `rate_limited`, and from the reports
   after each viewing attempt `viewer_connected`, `viewer_failed`,
   `viewer_path_lan|direct|relay`, `viewer_relay_udp|tcp|tls`,
   `viewer_error_<code>` (the same with `camera_` for camera reports).
 
-`/admin/statistic` draws them (1 h to 30 days, and a daily table).
 `/admin/statistic/data?from=2026-11-01&to=2026-11-03&step=hour&source=relay&name=relay-sg01&format=csv`
-returns the rows for a charting tool (Grafana with a CSV/JSON data source,
-Excel, pandas): `from`/`to` take RFC 3339 or YYYY-MM-DD (default the last 24
-h), `step` minute, hour or day (older rows stay as coarse as their file),
-`format` csv (one column per gauge `_max`/`_avg` and per count) or json. Both
-are limited to `-statistic-allow`.
+returns rows for a charting tool (Grafana with a CSV/JSON data source, Excel,
+pandas): `from`/`to` take RFC 3339 or YYYY-MM-DD (default the last 24 h),
+`step` 30m, hour or day (rows older than 12 months stay daily), `format` csv
+(one column per gauge `_max`/`_avg` and per count) or json.
+
+**Connection log** (`-event-dir`, `cfg/sid/events/`, `-event-days`, default
+30): one JSON line per event, one file per UTC day, so a viewing attempt at a
+given time can be looked up with its outcome and cause.
+
+| Event | Result | With |
+|---|---|---|
+| `request` | `forwarded`, `camera_offline` | camera, viewer, relays handed out |
+| `report` | `connected`, `failed` | role (camera or viewer), camera, viewer, error (the cause), path, relay_protocol, relay offered/ready, setup_ms |
+| `refused` | `no_ticket`, `bad_ticket`, `too_many_connections` | source address, the client ID asked for (at most one a minute per address and reason) |
+| `camera` | `online`, `offline` | camera |
+| `relay` | `registered`, `restarted`, `stopping`, `silent`, `back` | relay, detail |
+
+About 1 KB per viewing attempt; a day's file is capped at 512 MB.
+`/admin/statistic` searches it by time, camera, viewer, event and result;
+`/admin/statistic/events?from=2026-11-03T08:00&to=2026-11-03T09:00&camera=ID&result=failed&format=csv`
+serves the same search (at most 5000 events, newest first).
 
 ## Building
 

@@ -7,11 +7,13 @@ import (
 	"html/template"
 	"math"
 	"net/http"
+	"net/url"
 	"sort"
 	"strconv"
 	"strings"
 	"time"
 
+	"signaling-server/internal/events"
 	"signaling-server/internal/fleet"
 	"signaling-server/internal/history"
 	"signaling-server/internal/relay"
@@ -21,8 +23,10 @@ import (
 // relay stream servers reporting to it, to the -statistic-allow addresses
 // only; statisticDataPath serves the same rows for charting tools.
 const (
-	statisticPath     = "/admin/statistic"
-	statisticDataPath = "/admin/statistic/data"
+	statisticPath       = "/admin/statistic"
+	statisticDataPath   = "/admin/statistic/data"
+	statisticEventsPath = "/admin/statistic/events"
+	pageEvents          = 200
 )
 
 // series is one line of a chart.
@@ -74,6 +78,11 @@ type statisticPage struct {
 	Generated string
 	Hours     int
 	Step      string
+	// The connection log search and what it found.
+	Search    eventSearch
+	Events    []events.Event
+	More      bool
+	EventsOff bool
 	Control   []source
 	Relays    []statisticRelay
 	RelayData []source
@@ -83,12 +92,56 @@ type statisticPage struct {
 	Error     string
 }
 
+// eventSearch is the connection log form: times in UTC, as the
+// datetime-local input sends them (2026-11-03T08:00).
+type eventSearch struct {
+	From, To, Camera, Viewer, Type, Result string
+}
+
+func (q eventSearch) query(now time.Time) (events.Query, error) {
+	parse := func(text string, fallback time.Time) (time.Time, error) {
+		if text == "" {
+			return fallback, nil
+		}
+		for _, layout := range []string{"2006-01-02T15:04", "2006-01-02T15:04:05", time.RFC3339, "2006-01-02"} {
+			if t, err := time.Parse(layout, text); err == nil {
+				return t, nil
+			}
+		}
+		return time.Time{}, fmt.Errorf("%q is not a time (2026-11-03T08:00, UTC)", text)
+	}
+	from, err := parse(q.From, now.Add(-24*time.Hour))
+	if err != nil {
+		return events.Query{}, err
+	}
+	to, err := parse(q.To, now.Add(time.Minute))
+	if err != nil {
+		return events.Query{}, err
+	}
+	return events.Query{From: from, To: to, Camera: q.Camera, Viewer: q.Viewer, Type: q.Type, Result: q.Result}, nil
+}
+
+func searchFrom(r *http.Request) eventSearch {
+	v := r.URL.Query()
+	clip := func(s string) string {
+		if len(s) > 128 {
+			return s[:128]
+		}
+		return s
+	}
+	return eventSearch{From: clip(v.Get("from")), To: clip(v.Get("to")), Camera: clip(v.Get("camera")),
+		Viewer: clip(v.Get("viewer")), Type: clip(v.Get("type")), Result: clip(v.Get("result"))}
+}
+
 // pageStep is the row step a chart over hours uses.
 func pageStep(hours int) string {
-	if hours <= 48 {
-		return history.Minute
+	switch {
+	case hours <= 24*7:
+		return history.HalfHour
+	case hours <= 24*31:
+		return history.Hour
 	}
-	return history.Hour
+	return history.Day
 }
 
 func (s *Server) handleStatistic(w http.ResponseWriter, r *http.Request) {
@@ -97,7 +150,7 @@ func (s *Server) handleStatistic(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	hours := 24
-	if n, err := strconv.Atoi(r.URL.Query().Get("hours")); err == nil && n >= 1 && n <= 24*31 {
+	if n, err := strconv.Atoi(r.URL.Query().Get("hours")); err == nil && n >= 1 && n <= 24*366 {
 		hours = n
 	}
 	now := time.Now().UTC()
@@ -164,6 +217,15 @@ func (s *Server) handleStatistic(w http.ResponseWriter, r *http.Request) {
 		days, _ := s.history.Rows(history.Query{From: now.AddDate(0, 0, -30), To: now.Add(time.Minute), Step: history.Day})
 		sort.SliceStable(days, func(i, j int) bool { return days[i].T > days[j].T })
 		page.Days = days
+	}
+	page.Search = searchFrom(r)
+	if s.events == nil {
+		page.EventsOff = true
+	} else if q, err := page.Search.query(now); err != nil {
+		page.Error = err.Error()
+	} else {
+		q.Limit = pageEvents
+		page.Events, page.More = s.events.Find(q)
 	}
 	w.Header().Set("Cache-Control", "no-store")
 	w.Header().Set("Content-Type", "text/html; charset=utf-8")
@@ -244,9 +306,9 @@ func lineChart(rows []history.Row, from, to time.Time, lines []series) template.
 				continue
 			}
 			// A gap of more than two steps breaks the line: no data then.
-			gap := 2 * time.Minute
-			if row.Step == history.Hour {
-				gap = 2 * time.Hour
+			gap := map[string]time.Duration{history.HalfHour: time.Hour, history.Hour: 2 * time.Hour}[row.Step]
+			if gap == 0 {
+				gap = 48 * time.Hour
 			}
 			if lastAt.IsZero() || at.Sub(lastAt) > gap {
 				d.WriteString(" M")
@@ -288,8 +350,8 @@ func parseTime(text string, fallback time.Time) (time.Time, error) {
 //
 //	/admin/statistic/data?from=2026-11-01&to=2026-11-03&step=hour&source=relay&name=relay-sg01&format=csv
 //
-// from defaults to a day ago, to to now; step to minute (rows already
-// coarser, older than 30 days or 12 months, stay hour or day); format to
+// from defaults to a day ago, to to now; step to 30m (rows already
+// coarser, older than 12 months or kept per hour, stay so); format to
 // json (an array of rows); csv has one column per gauge (_max, _avg) and count.
 func (s *Server) handleStatisticData(w http.ResponseWriter, r *http.Request) {
 	if s.history == nil {
@@ -310,10 +372,10 @@ func (s *Server) handleStatisticData(w http.ResponseWriter, r *http.Request) {
 	}
 	step := q.Get("step")
 	if step == "" {
-		step = history.Minute
+		step = history.HalfHour
 	}
-	if step != history.Minute && step != history.Hour && step != history.Day {
-		http.Error(w, "step must be minute, hour or day", http.StatusBadRequest)
+	if step != history.HalfHour && step != history.Hour && step != history.Day {
+		http.Error(w, "step must be 30m, hour or day", http.StatusBadRequest)
 		return
 	}
 	rows, err := s.history.Rows(history.Query{From: from, To: to, Step: step, Source: q.Get("source"), Name: q.Get("name")})
@@ -363,6 +425,57 @@ func (s *Server) handleStatisticData(w http.ResponseWriter, r *http.Request) {
 	out.Flush()
 }
 
+// handleStatisticEvents serves the connection log for tools:
+//
+//	/admin/statistic/events?from=2026-11-03T08:00&to=2026-11-03T09:00&camera=ID&result=failed&format=csv
+//
+// with the page's search fields (from, to in UTC; camera, viewer, type,
+// result), newest first, at most 5000 events; format json (default) or csv.
+func (s *Server) handleStatisticEvents(w http.ResponseWriter, r *http.Request) {
+	if s.events == nil {
+		http.Error(w, "the connection log is off on this server", http.StatusNotFound)
+		return
+	}
+	q, err := searchFrom(r).query(time.Now().UTC())
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusBadRequest)
+		return
+	}
+	found, more := s.events.Find(q)
+	w.Header().Set("Cache-Control", "no-store")
+	if more {
+		w.Header().Set("X-More-Events", "true")
+	}
+	if r.URL.Query().Get("format") != "csv" {
+		w.Header().Set("Content-Type", "application/json")
+		if found == nil {
+			found = []events.Event{}
+		}
+		json.NewEncoder(w).Encode(found)
+		return
+	}
+	w.Header().Set("Content-Type", "text/csv; charset=utf-8")
+	w.Header().Set("Content-Disposition", `attachment; filename="events.csv"`)
+	out := csv.NewWriter(w)
+	out.Write([]string{"time", "type", "result", "error", "camera", "viewer", "role", "path", "relay_protocol",
+		"relay_offered", "relay_ready", "setup_ms", "relays", "relay", "from", "detail"})
+	flag := func(b *bool) string {
+		if b == nil {
+			return ""
+		}
+		return strconv.FormatBool(*b)
+	}
+	for _, e := range found {
+		setup := ""
+		if e.SetupMillis > 0 {
+			setup = strconv.Itoa(e.SetupMillis)
+		}
+		out.Write([]string{e.T, e.Type, e.Result, e.Error, e.Camera, e.Viewer, e.Role, e.Path, e.RelayProtocol,
+			flag(e.RelayOffered), flag(e.RelayReady), setup, strings.Join(e.Relays, " "), e.Relay, e.From, e.Detail})
+	}
+	out.Flush()
+}
+
 func sortedKeys(m map[string]bool) []string {
 	out := make([]string, 0, len(m))
 	for k := range m {
@@ -384,6 +497,23 @@ var statisticTemplate = template.Must(template.New("statistic").Funcs(template.F
 	"gb":    func(b int64) string { return fmt.Sprintf("%.2f", float64(b)/1e9) },
 	"day":   func(t string) string { return t[:10] },
 	"isCtl": func(r history.Row) bool { return r.Source == history.SourceControl },
+	"eventTypes": func() []string {
+		return []string{events.Request, events.Report, events.Refused, events.Camera, events.Relay}
+	},
+	"eventResults": func() []string {
+		return []string{"connected", "failed", "forwarded", "camera_offline", "online", "offline",
+			"no_ticket", "bad_ticket", "too_many_connections", "registered", "restarted", "stopping", "silent", "back"}
+	},
+	"eventsLink": func(q eventSearch, format string) string {
+		v := url.Values{}
+		for key, value := range map[string]string{"from": q.From, "to": q.To, "camera": q.Camera, "viewer": q.Viewer, "type": q.Type, "result": q.Result} {
+			if value != "" {
+				v.Set(key, value)
+			}
+		}
+		v.Set("format", format)
+		return statisticEventsPath + "?" + v.Encode()
+	},
 }).Parse(`<!doctype html>
 <html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1">
 <title>Region statistics</title>
@@ -401,13 +531,34 @@ th{color:var(--muted);font-weight:600;font-size:12px}td.n,th.n{text-align:right}
 .chart .s1{stroke:var(--s1)}.chart .s2{stroke:var(--s2)}.chart .s3{stroke:var(--s3)}.chart .s4{stroke:var(--s4)}.chart .s5{stroke:var(--s5);opacity:.35}
 .legend{display:flex;flex-wrap:wrap;gap:4px 16px;color:var(--muted);font-size:12px;margin-top:4px}.legend .k:before{content:"";display:inline-block;width:14px;height:3px;margin-right:6px;vertical-align:middle}
 .legend .s1:before{background:var(--s1)}.legend .s2:before{background:var(--s2)}.legend .s3:before{background:var(--s3)}.legend .s4:before{background:var(--s4)}.legend .s5:before{background:var(--s5);opacity:.35}
+.search{display:flex;flex-wrap:wrap;gap:8px 12px;align-items:end;margin-bottom:12px}.search label{display:flex;flex-direction:column;font-size:12px;color:var(--muted);gap:2px}
+.search input,.search select,.search button{font:inherit;color:var(--fg);background:var(--bg);border:1px solid var(--line);border-radius:6px;padding:4px 6px}.search button{cursor:pointer}
+table.events td{font-size:13px}tr.bad td:nth-child(3),tr.bad td:nth-child(4){color:var(--down);font-weight:600}
 .legend .range{margin-left:auto}.empty{color:var(--muted);margin:0}a{color:var(--s1)}nav a{margin-right:10px}
 </style></head><body><main>
 <h1>Region statistics</h1>
 <p class="sub">This control server and the relay stream servers reporting to it. {{.Generated}}.<br>
-<nav>Period: <a href="?hours=1">1 h</a><a href="?hours=24">24 h</a><a href="?hours=168">7 days</a><a href="?hours=720">30 days</a>
+<nav>Period: <a href="?hours=24">24 h</a><a href="?hours=168">7 days</a><a href="?hours=720">30 days</a><a href="?hours=8784">1 year</a>
 · Data for charting tools: <a href="{{.DataLink}}&amp;format=csv">CSV</a><a href="{{.DataLink}}&amp;format=json">JSON</a></nav></p>
 {{with .Error}}<div class="card"><p class="empty">{{.}}</p></div>{{end}}
+
+<h2 id="events">Connections</h2>
+{{if .EventsOff}}<div class="card"><p class="empty">The connection log is off on this server (no -event-dir).</p></div>{{else}}
+<div class="card"><form method="get" action="#events" class="search">
+<label>From (UTC)<input type="datetime-local" name="from" value="{{.Search.From}}"></label>
+<label>To (UTC)<input type="datetime-local" name="to" value="{{.Search.To}}"></label>
+<label>Camera<input name="camera" value="{{.Search.Camera}}" size="24"></label>
+<label>Viewer<input name="viewer" value="{{.Search.Viewer}}" size="16"></label>
+<label>Event<select name="type"><option value="">any</option>{{range $t := eventTypes}}<option{{if eq $t $.Search.Type}} selected{{end}}>{{$t}}</option>{{end}}</select></label>
+<label>Result<select name="result"><option value="">any</option>{{range $r := eventResults}}<option{{if eq $r $.Search.Result}} selected{{end}}>{{$r}}</option>{{end}}</select></label>
+<input type="hidden" name="hours" value="{{.Hours}}"><button>Search</button>
+<a href="{{eventsLink .Search "csv"}}">CSV</a><a href="{{eventsLink .Search "json"}}">JSON</a></form>
+{{if .Events}}<table class="events">
+<tr><th>Time (UTC)</th><th>Event</th><th>Result</th><th>Cause</th><th>Camera</th><th>Viewer</th><th>Path</th><th class="n">Setup</th><th>Relays / from</th></tr>
+{{range .Events}}<tr class="{{if or (eq .Result "failed") (eq .Result "camera_offline") (eq .Result "silent") (eq .Type "refused")}}bad{{end}}"><td>{{.T}}</td><td>{{.Type}}{{with .Role}} ({{.}}){{end}}</td><td>{{.Result}}</td><td>{{.Error}}{{.Detail}}</td>
+<td>{{.Camera}}</td><td>{{.Viewer}}</td><td>{{.Path}}{{with .RelayProtocol}} over {{.}}{{end}}</td><td class="n">{{if .SetupMillis}}{{.SetupMillis}} ms{{end}}</td><td>{{range .Relays}}{{.}} {{end}}{{.Relay}}{{.From}}</td></tr>{{end}}
+</table>{{if .More}}<p class="empty">Showing the newest {{len .Events}}; narrow the search or use the CSV for more.</p>{{end}}
+{{else}}<p class="empty">No events match.</p>{{end}}</div>{{end}}
 
 <h2>Control server, last {{.Hours}} hours</h2>
 {{range .Control}}<div class="card"><div class="head"><b>{{.Name}}</b><span>{{.Region}}</span></div>

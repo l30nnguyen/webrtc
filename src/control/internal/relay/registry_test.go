@@ -113,7 +113,7 @@ func TestRegistryKeepsRelaysAndStatistics(t *testing.T) {
 	dir := t.TempDir()
 	now := time.Date(2026, 11, 3, 8, 0, 5, 0, time.UTC)
 	clock := func() time.Time { return now }
-	store, err := history.Open(filepath.Join(dir, "statistic"))
+	store, err := history.Open(filepath.Join(dir, "statistic"), history.HalfHour)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -129,13 +129,13 @@ func TestRegistryKeepsRelaysAndStatistics(t *testing.T) {
 		now = now.Add(15 * time.Second)
 	}
 	// The relay restarts: its counters start over.
-	report.StartedAt, report.RxBytes, report.TxBytes, report.AllocationsTotal = "2026-11-03T08:01:00Z", 1e6, 1e6, 1
-	now = time.Date(2026, 11, 3, 8, 1, 10, 0, time.UTC)
+	report.StartedAt, report.RxBytes, report.TxBytes, report.AllocationsTotal = "2026-11-03T08:31:00Z", 1e6, 1e6, 1
+	now = time.Date(2026, 11, 3, 8, 31, 10, 0, time.UTC)
 	post(r, signed(t, report, testKey, now))
-	now = now.Add(time.Minute)
+	now = now.Add(30 * time.Minute)
 	store.Flush()
 
-	rows, err := store.Rows(history.Query{From: now.Add(-time.Hour), To: now, Step: history.Minute, Source: history.SourceRelay})
+	rows, err := store.Rows(history.Query{From: now.Add(-2 * time.Hour), To: now, Step: history.HalfHour, Source: history.SourceRelay})
 	if err != nil || len(rows) != 2 {
 		t.Fatalf("rows %+v %v", rows, err)
 	}

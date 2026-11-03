@@ -2,13 +2,14 @@
 // server itself and the relays reporting to it, as time series a person or
 // a charting tool can read:
 //
-//	DIR/day/YYYY-MM-DD.jsonl   one row per source and minute, the last 30 days
-//	DIR/month/YYYY-MM.jsonl    one row per source and hour, then 12 months
+//	DIR/day/YYYY-MM-DD.jsonl   one row per source and step (30 minutes), 30 days
+//	DIR/month/YYYY-MM.jsonl    the same rows, then 12 months
 //	DIR/year/YYYY.jsonl        one row per source and day, kept
 //
-// A day file older than 30 days is folded into its month file, and a month
-// file older than 12 months into its year file. Folding is idempotent: a row
-// already in the coarser file is replaced, not added twice.
+// A day file older than 30 days is moved into its month file, and a month
+// file older than 12 months is summed into days in its year file. So a full
+// year keeps the step's resolution. Folding is idempotent: a row already in
+// the coarser file is replaced, not added twice.
 package history
 
 import (
@@ -28,10 +29,29 @@ import (
 
 // Steps a row may cover.
 const (
-	Minute = "minute"
-	Hour   = "hour"
-	Day    = "day"
+	HalfHour = "30m"
+	Hour     = "hour"
+	Day      = "day"
 )
+
+// stepRank orders the steps, finest first.
+var stepRank = map[string]int{HalfHour: 0, Hour: 1, Day: 2}
+
+// ValidStep reports whether a store can keep rows of step.
+func ValidStep(step string) bool { return step == HalfHour || step == Hour }
+
+// slotStart is the start of the step that holds t.
+func slotStart(t time.Time, step string) time.Time {
+	t = t.UTC()
+	switch step {
+	case HalfHour:
+		return t.Truncate(30 * time.Minute)
+	case Hour:
+		return t.Truncate(time.Hour)
+	default:
+		return time.Date(t.Year(), t.Month(), t.Day(), 0, 0, 0, 0, time.UTC)
+	}
+}
 
 // Sources of rows.
 const (
@@ -69,29 +89,35 @@ type Row struct {
 
 func (r Row) key() string { return r.T + "\x00" + r.Source + "\x00" + r.Name }
 
-// open is the current minute of one source.
+// open is the current step of one source.
 type open struct {
 	row     Row
 	samples map[string]struct{ sum, n float64 }
+	minutes map[int64]bool // minutes with data
 }
 
 // Store keeps rows in dir.
 type Store struct {
 	dir string
 	Now func() time.Time
+	// Step is the rows' step, HalfHour (default) or Hour.
+	Step string
 
 	mu      sync.Mutex
 	current map[string]*open // by source and name
 }
 
-// Open creates dir's folders and folds what is due.
-func Open(dir string) (*Store, error) {
+// Open creates dir's folders and folds what is due. step is HalfHour or Hour.
+func Open(dir, step string) (*Store, error) {
+	if !ValidStep(step) {
+		return nil, fmt.Errorf("step %q: use %s or %s", step, HalfHour, Hour)
+	}
 	for _, sub := range []string{"day", "month", "year"} {
 		if err := os.MkdirAll(filepath.Join(dir, sub), 0o700); err != nil {
 			return nil, err
 		}
 	}
-	s := &Store{dir: dir, current: map[string]*open{}}
+	s := &Store{dir: dir, Step: step, current: map[string]*open{}}
 	s.fold()
 	return s, nil
 }
@@ -103,9 +129,10 @@ func (s *Store) now() time.Time {
 	return time.Now()
 }
 
-// minute returns the source's open minute, writing out the one before.
-func (s *Store) minute(source, name, region string) *open {
-	start := s.now().UTC().Truncate(time.Minute).Format(time.RFC3339)
+// slot returns the source's open step, writing out the one before.
+func (s *Store) slot(source, name, region string) *open {
+	now := s.now().UTC()
+	start := slotStart(now, s.Step).Format(time.RFC3339)
 	id := source + "\x00" + name
 	o := s.current[id]
 	if o != nil && o.row.T != start {
@@ -113,13 +140,16 @@ func (s *Store) minute(source, name, region string) *open {
 		o = nil
 	}
 	if o == nil {
-		o = &open{row: Row{T: start, Step: Minute, Source: source, Name: name, Minutes: 1,
-			Gauges: map[string]Gauge{}, Counts: map[string]int64{}}, samples: map[string]struct{ sum, n float64 }{}}
+		o = &open{row: Row{T: start, Step: s.Step, Source: source, Name: name,
+			Gauges: map[string]Gauge{}, Counts: map[string]int64{}},
+			samples: map[string]struct{ sum, n float64 }{}, minutes: map[int64]bool{}}
 		s.current[id] = o
 	}
 	if region != "" {
 		o.row.Region = region
 	}
+	o.minutes[now.Unix()/60] = true
+	o.row.Minutes = len(o.minutes)
 	return o
 }
 
@@ -128,7 +158,7 @@ func (s *Store) minute(source, name, region string) *open {
 func (s *Store) Sample(source, name, region string, gauges map[string]float64) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	o := s.minute(source, name, region)
+	o := s.slot(source, name, region)
 	for gauge, v := range gauges {
 		sample := o.samples[gauge]
 		sample.sum, sample.n = sample.sum+v, sample.n+1
@@ -143,7 +173,7 @@ func (s *Store) Sample(source, name, region string, gauges map[string]float64) {
 func (s *Store) Count(source, name, region string, counts map[string]int64) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	o := s.minute(source, name, region)
+	o := s.slot(source, name, region)
 	for counter, n := range counts {
 		if n != 0 {
 			o.row.Counts[counter] += n
@@ -151,10 +181,10 @@ func (s *Store) Count(source, name, region string, counts map[string]int64) {
 	}
 }
 
-// Flush writes out every minute that has ended and folds old files. Run it
+// Flush writes out every step that has ended and folds old files. Run it
 // every minute.
 func (s *Store) Flush() {
-	start := s.now().UTC().Truncate(time.Minute).Format(time.RFC3339)
+	start := slotStart(s.now(), s.Step).Format(time.RFC3339)
 	s.mu.Lock()
 	for id, o := range s.current {
 		if o.row.T != start {
@@ -166,7 +196,8 @@ func (s *Store) Flush() {
 	s.fold()
 }
 
-// Close writes out the open minutes too, for a clean shutdown.
+// Close writes out the open steps too, for a clean shutdown. A step written
+// early is completed by a second row of the same time, which Rows adds up.
 func (s *Store) Close() {
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -191,8 +222,8 @@ func (s *Store) write(row Row) {
 	f.Write(append(line, '\n'))
 }
 
-// fold moves day files older than DayFiles days into month files (as hours)
-// and month files older than MonthFiles months into year files (as days).
+// fold moves day files older than DayFiles days into month files (same
+// step) and month files older than MonthFiles months into year files (days).
 func (s *Store) fold() {
 	now := s.now().UTC()
 	oldestDay := now.AddDate(0, 0, -DayFiles).Format("2006-01-02")
@@ -204,7 +235,7 @@ func (s *Store) fold() {
 		if day >= oldestDay {
 			break
 		}
-		if err := s.foldFile(file, filepath.Join(s.dir, "month", day[:7]+".jsonl"), Hour); err != nil {
+		if err := s.foldFile(file, filepath.Join(s.dir, "month", day[:7]+".jsonl"), HalfHour); err != nil {
 			warnOnce("statistics: %s not folded: %v", file, err)
 			return
 		}
@@ -282,7 +313,7 @@ func readFile(path string) ([]Row, error) {
 // Query selects rows.
 type Query struct {
 	From, To time.Time // To is exclusive
-	Step     string    // minute, hour or day; rows already coarser stay so
+	Step     string    // 30m, hour or day; rows already coarser stay so
 	Source   string    // "" for every source
 	Name     string    // "" for every name
 }
@@ -334,14 +365,12 @@ func (s *Store) Rows(q Query) ([]Row, error) {
 	return Aggregate(rows, q.Step), nil
 }
 
-var stepRank = map[string]int{Minute: 0, Hour: 1, Day: 2}
-
 // Aggregate sums rows to step: gauges keep the peak and the average
 // weighted by minutes with data; counts and minutes add up. Rows already
 // coarser than step are kept as they are.
 func Aggregate(rows []Row, step string) []Row {
 	if _, ok := stepRank[step]; !ok {
-		step = Minute
+		step = HalfHour
 	}
 	type acc struct {
 		row           Row
@@ -357,13 +386,7 @@ func Aggregate(rows []Row, step string) []Row {
 		if err != nil {
 			continue
 		}
-		start := at.UTC()
-		switch target {
-		case Hour:
-			start = start.Truncate(time.Hour)
-		case Day:
-			start = time.Date(start.Year(), start.Month(), start.Day(), 0, 0, 0, 0, time.UTC)
-		}
+		start := slotStart(at, target)
 		out := Row{T: start.Format(time.RFC3339), Step: target, Source: row.Source, Name: row.Name}
 		a := byKey[out.key()]
 		if a == nil {
