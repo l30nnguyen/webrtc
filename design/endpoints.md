@@ -15,7 +15,7 @@ Both server roles run the same binary:
 | `/run/matrix/admin.sock` (Unix socket) | Center and every node | `matrix-fleet` on that machine, through sudo |
 | 3478/udp, 80/tcp, 443/tcp (TLS), relay range 49152–65535/udp | Relay hosts (`matrix-relay`; a host that also runs a control server uses TCP 3478 and TLS 5349) | Cameras and apps |
 | 127.0.0.1:9641 `/metrics` | `matrix-relay` hosts | The relay host itself |
-| 9100 (node_exporter) | Relay hosts of a fleet-listed relay (violet) | That region's control node only |
+| 9100 (node_exporter) | Relay hosts of a fleet-listed relay without metrics (violet, coturn); not used by production since 2026-11-04 | That region's control node only |
 
 All JSON bodies are `Content-Type: application/json`, one strict object, at most 4 KB on Center calls. Unknown fields are rejected. Errors come back as `{"error": "..."}`.
 
@@ -99,7 +99,7 @@ Messages the camera receives:
 
 | Message | From |
 | --- | --- |
-| `{"id":"<viewer id>","type":"request","password":"...","sid_digest":"<hex>","turn":[{"host":"relay-sg01.5gen.care","port":3478,"username":"...","password":"..."}]}` | A viewer, with fields added by the server. `sid_digest` comes from the viewer's ticket, never from the viewer. `turn` lists the relay stream servers for this session: the relay of the node's region first, then a backup from another region. For `matrix-relay` (and coturn) the credentials are minted per session and valid 24 h; for violet they are its fixed ones. |
+| `{"id":"<viewer id>","type":"request","password":"...","sid_digest":"<hex>","turn":[{"host":"mx-relay-us00.5gen.care","port":3478,"username":"...","password":"..."}]}` | A viewer, with fields added by the server. `sid_digest` comes from the viewer's ticket, never from the viewer. `turn` lists the relay stream servers for this session: the least loaded relay reporting to this node first, then, for relays listed in `config.json`, a backup from another region. For `matrix-relay` (and coturn) the credentials are minted per session and valid 24 h; for violet they are its fixed ones. |
 | `{"id":"<viewer id>","type":"answer","sdp":"..."}` and other viewer messages | A viewer |
 | `{"type":"error","msg":"Device offline"}` | The server: the viewer this message was for is not connected |
 

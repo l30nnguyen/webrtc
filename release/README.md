@@ -147,7 +147,7 @@ sudo matrix-fleet -json stats 7 # the same as JSON
 
 ## Relay stream servers per region
 
-**Reporting relays (`matrix-relay`, the replacement for violet).** A relay
+**Reporting relays (`matrix-relay`, in production since 2026-11-04: `mx-relay-us00` reports to the Center, `mx-relay-sg00` to sg00).** A relay
 started with `-control https://<its region's node> -name relay-xx01 -region XX`
 reports to that node every 15 s (addresses, load, version, machine load). It
 needs no entry in config.json, only its shared secret under its name in the
@@ -172,7 +172,7 @@ Every server that hands a relay out keeps its credentials in
 `/opt/matrix/cfg/relay-secrets.json` (owner `matrix`, mode 0600;
 `sudo ./setup.sh relay-secrets FILE`), read on each viewing request:
 
-- **violet** (production until `matrix-relay` takes over) has fixed credentials only:
+- **violet** (retired 2026-11-04; matrix-relay accepts its fixed login as a fixed user) has fixed credentials only:
   `{"turn-vn00": {"username": "matrix", "password": "<the --credentials password>"}}`.
   The same pair goes to every session, as with `cfg/turn.conf`; change it in
   violet's config and in this file together to rotate it.
@@ -181,7 +181,9 @@ Every server that hands a relay out keeps its credentials in
   password, valid 24 hours.
 
 A relay without credentials on a server is not handed out by that server;
-with none at all the server keeps using `cfg/turn.conf`.
+with none at all the server keeps using `cfg/turn.conf`. A reporting relay is
+known only to the control server it reports to: it is never another region's
+backup unless it is also listed in `config.json`.
 
 **Health and load.** Each node checks the relays of its own region every 15 s
 by asking the relay port itself (a STUN request; no credentials needed) and, if

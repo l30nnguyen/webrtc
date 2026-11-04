@@ -42,7 +42,7 @@ the systemd unit from `/etc/matrix/matrix.conf`.
 ```bash
 ./deploy.sh prod   # Control Center matrix.5gen.care (DO nyc3); asks you to type "prod"
 ./deploy.sh sg     # control node matrix-sg00.5gen.care (DO sgp1)
-./deploy.sh dev    # the dev VPS (PM2 webrtc_dev, 8443; stopped since 2026-10-27)
+./deploy.sh dev    # the AWS dev VPS (PM2 webrtc_dev, 8443; stopped since 2026-10-27; to become the license server)
 ```
 
 - Each target builds the package and refuses uncommitted changes in
@@ -56,7 +56,9 @@ New droplets: `release/README.md`, and `server/INSTALL.md` in the release
 folder.
 
 `webrtc_prod` on the dev VPS is a separate process under tester evaluation.
-It is not a deploy target; don't touch it.
+It is not a deploy target; don't touch it. The AWS dev VPS (`webrtc.5gen.care`)
+is no longer part of the matrix fleet or its relays: it will become the
+license server, the machine that holds the keys.
 
 ## Legacy
 

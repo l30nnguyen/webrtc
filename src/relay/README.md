@@ -15,15 +15,21 @@ the control server need no change.
 ## Run
 
 ```
-matrix-relay -public-ip 3.95.228.203 -secrets /etc/matrix-relay/secrets.json \
+matrix-relay -public-ip 45.55.167.162 -secrets /etc/matrix-relay/secrets.json \
   -cert fullchain.pem -key privkey.pem
 ```
 
 This listens on UDP 3478, TCP 80 and TLS 443, the ports captive networks
 and VPNs pass most often. `-udp`, `-tcp` and `-tls` move them, and an empty
 value turns one off; TLS is on only with `-cert` and `-key`. On a host that
-already serves 80 and 443 (the dev VPS runs a control server there), use
+already serves 80 and 443 (a control server), use
 `-tcp 0.0.0.0:3478 -tls 0.0.0.0:5349`.
+
+In production (2026-11-04): `mx-relay-us00.5gen.care` (UDP, TCP, TLS;
+reports to the Center) and `mx-relay-sg00` on 188.166.244.220 (UDP and TCP,
+no TLS until it has a DNS name; reports to sg00; also accepts violet's fixed
+login). Measurements, including violet against matrix-relay:
+[capacity.md](../../design/capacity.md#droplet-measurement-2026-11-04).
 
 `secrets.json` must be owner-only (0600). SIGHUP rereads it:
 
@@ -43,7 +49,7 @@ relay reports to that control server when it starts, every 15 s, and once
 more when it stops:
 
 ```
-matrix-relay ... -control https://matrix-sg00.5gen.care -name relay-sg01 -region SG -capacity-mbps 1000
+matrix-relay ... -control https://matrix-sg00.5gen.care -name mx-relay-sg00 -region SG -capacity-mbps 1000
 ```
 
 Each report (`POST /v1/relay/report`) carries the relay's name, region,
@@ -109,7 +115,7 @@ minutes.
   of every interface but loopback), read from `/proc`. The relay sends them in
   each report as `"machine"`; the page charts them as "Machine %".
 
-`/admin/statistic/data?from=2026-11-01&to=2026-11-03&step=hour&source=relay&name=relay-sg01&format=csv`
+`/admin/statistic/data?from=2026-11-01&to=2026-11-03&step=hour&source=relay&name=mx-relay-sg00&format=csv`
 returns rows for a charting tool (Grafana with a CSV/JSON data source, Excel,
 pandas): `from`/`to` take RFC 3339 or YYYY-MM-DD (default the last 24 h),
 `step` 30m, hour or day (rows older than 12 months stay daily), `format` csv

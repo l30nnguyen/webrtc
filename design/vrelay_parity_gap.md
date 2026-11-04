@@ -40,7 +40,7 @@ stream server on one or more other machines.
 | Part | Target | Status 2026-11-04 |
 | --- | --- | --- |
 | Main program | One binary, one port | **Done.** `matrix_cc` serves the Center APIs, control connections, the node link, downloads and statistics on 443 |
-| Relay stream server | Separate, one or more machines | **Done in code.** `matrix-relay` (UDP, TCP, TLS) reports to its region's node. Production still uses violet |
+| Relay stream server | Separate, one or more machines | **Done.** `matrix-relay` (UDP, TCP, TLS) reports to its region's control server: `mx-relay-us00` to the Center, `mx-relay-sg00` to sg00 (2026-11-04). violet is stopped |
 | SID issuing tool (`sidctl`) | On the administrator's machine, not on the server | **Done.** The issuer private key never goes on a server |
 
 Where "one port" is not met yet:

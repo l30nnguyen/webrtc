@@ -21,13 +21,35 @@ sheet `todo` (Google Drive, matrix docs folder).
 | --- | --- | --- | --- |
 | Control server `matrix_cc` | 2.5.0 | `a091483` (tag `release_2.5.0`) | Running on the Center `matrix.5gen.care` (DO nyc3) and node `matrix-sg00` (DO sgp1) since 2026-11-04 |
 | Control server `matrix_cc` | 2.6.0 | `9808bcf` | Committed, **not deployed**. It adds machine load (CPU, memory, disk, network) and the server version to `matrix-fleet status` and `/admin/statistic`. 2.5.0 and 2.6.0 run together without problems |
-| Relay stream server `matrix-relay` | 1.1.0 (release 2.5.0), 1.2.0 (`9808bcf`, sends its machine load) | | Dev VPS only. Production still uses violet, and sg00's `turn.conf` points at the dev relay for a test |
+| Relay stream server `matrix-relay` | 1.2.0 | `9808bcf` (sends its machine load) | Production since 2026-11-04 on `mx-relay-us00` (nyc3, reports to the Center) and `mx-relay-sg00` (sgp1, the former violet droplet, reports to sg00). See [Relay stream servers](#relay-stream-servers-2026-11-04) |
 | Camera `matrix` (HCX130) | 2.1.3 published; 2.1.4 in release 2.5.0 | `libdatachannel_c14` `062c4228` | 2.1.4 is **not published**: test it on one camera, then run `publish_firmware.sh` |
 
 Camera 2.1.4 is 2.1.3 plus the UDP bind address (`IPv4:PORT` media sources).
 That feature was pushed to `origin/main` from another worktree on
 2026-10-22 and was missing from local `main`; it was merged on 2026-11-04,
 keeping both sides.
+
+### Relay stream servers (2026-11-04)
+
+| Relay | Droplet | Reports to | Transports | Logins |
+|---|---|---|---|---|
+| `mx-relay-us00.5gen.care` | DO nyc3, 45.55.167.162, 1 vCPU / 1 GB (`vps.sh relay_us`) | Center `matrix.5gen.care`, region US | UDP 3478, TCP 80, TLS 443 (Let's Encrypt, certbot stops the relay a few seconds every 60 days) | per session only |
+| `mx-relay-sg00` (no DNS name yet) | DO sgp1, 188.166.244.220, 1 vCPU / 1 GB (`vps.sh relay_sg`) | node `matrix-sg00.5gen.care`, region SG | UDP 3478, TCP 80; **TLS off** until a DNS name exists | per session, plus violet's fixed login (copied on the box) for clients still configured with it |
+
+- violet on the SG droplet is stopped and kept: container `violet-turn`,
+  restart policy `no`.
+- The SG droplet sits behind a DigitalOcean cloud firewall: UDP 3478 and
+  49152–65535, TCP 22, 80 and 443 pass; TCP 3478 and other UDP ports don't.
+  `mx-relay-us00` uses ufw with the same ports.
+- Each control server gets its relay's shared secret in
+  `cfg/relay-secrets.json` (`scratchpad` script `control-add-relays.sh`,
+  merged with a backup `relay-secrets.json.bak-20261104`). Until then the
+  relay logs `403 unknown relay` and the node keeps using `cfg/turn.conf`.
+- The AWS dev VPS (`webrtc.5gen.care`, 3.95.228.203) is no longer part of
+  the relay plan. It will become the license server (the machine that holds
+  the keys); its old dev relay and PM2 apps are not used by production.
+- Tests and measurements: [capacity.md](capacity.md#droplet-measurement-2026-11-04),
+  including violet against matrix-relay on the same droplet.
 
 ## 2. Code review (2026-11-04)
 
@@ -44,7 +66,8 @@ keeping both sides.
 **Not run:**
 - staticcheck and govulncheck (not installed here; govulncheck ran on
   2026-10-14, see `server_security.md`)
-- a load test on a DigitalOcean droplet
+- a control-server load test on a droplet (the relay was measured on
+  `mx-relay-us00` on 2026-11-04, capacity.md)
 - failure tests (Center down, node down, relay down during a stream)
 
 | # | Severity | Finding | What to do | Status |
@@ -59,6 +82,9 @@ keeping both sides.
 | R8 | Medium | **A takeover's revocation stays on the Center.** The blocklist is not pushed over the link, so on sg00 the old key's current ticket stays valid until it expires (impact low: the old camera was offline) | Push revocations over the link, or copy the blocklist with `setup.sh blocklist` | Open |
 | R9 | Low | **Revoke happens before replace.** If `Activations.Replace` fails with an I/O error after `RevokeDevice`, the camera still holding the SID is blocklisted until the revocation expires | Replace first and revoke after, or undo on failure | Open |
 | R10 | Low | **Hand-made host setup.** `ufw` was set by hand on each droplet, `setup.sh` does not set it, and journald keeps its default retention (vrelay's `export_log.sh` keeps 30 days of gzip) | `setup.sh install`/`install-node` open 22, 80 and 443 in ufw; set `SystemMaxUse=` for journald | Open |
+| R12 | High | **One relay per region, no backup.** A reporting relay is known only to the control server it reports to, so the Center hands out only `mx-relay-us00` and sg00 only `mx-relay-sg00`. The cross-region backup exists only for relays listed in `config.json`. While a region's relay is down, relayed sessions there fail (direct and LAN still work); `cfg/turn.conf` is not used as a fallback once a reporting relay is configured | A second relay per region (N+1), or list the other region's relay in `config.json` with its secret on every node, or let a relay report to several control servers | Open |
+| R13 | Medium | **No TLS on the SG relay.** `mx-relay-sg00` has no DNS name, so viewers on networks that pass only 443 with TLS can't use it | Create `mx-relay-sg00.5gen.care` → 188.166.244.220, then certbot and `-tls 0.0.0.0:443` as on the US relay | Open (DNS) |
+| R14 | Medium | **UDP quality is not verified from a real viewer network.** The office line lets in only about 100–150 UDP packets a second from outside (about 1.2 Mbps), so office tests of relayed UDP show heavy loss that the relays don't cause (their counters show every packet forwarded) | Check relayed UDP from a phone on 4G and from a home line | Open |
 | R11 | Low | **`LimitNOFILE=65536`** in `matrix.service`, while a 4 GB node is rated at 62,500 connections (capacity.md) | Raise to 262144 (as vrelay) when 4 GB nodes are used | Open |
 
 Takeover itself worked as designed in the unit tests and in a local
@@ -81,7 +107,7 @@ ran no load, runtime or chaos tests. Its findings, with today's status:
 | P1 | **Registry ownership.** Shared storage, atomic epochs, compare-and-set, fencing of a partitioned old node | **Resolved for one Center.** Center is the only registry, fed by the node links. One link per node, with link generations so a replaced link's late messages are ignored. A node whose link is down counts as unhealthy (no assignments, and takeover waits for it). Several Centers would need this again (deferred) |
 | P1 | **Legacy rollout behind a Center-only load balancer** | **No longer applies.** There is no load balancer. Old cameras on the legacy service are a separate system (vrelay_parity_gap.md decision A); old matrix cameras (proto 2) are served on their configured server |
 | P1 | **Regional recovery capacity.** The emergency capacity in the plan conflicted with the admission cap | **Open, smaller.** If a region is down or full its cameras go to the least loaded node anywhere. If every node is full, Center sends cameras to its own fallback address, which can overload it. Plan N+1 control nodes per region with capacity.md's numbers (5,000 cameras per 1 GB node at 70%), and test a node loss once on droplets (phase 3) |
-| P2 | **Relay recovery.** A live stream on a failed relay is not moved; ICE restart and new credentials are needed, and relay choice needs bandwidth and allocation load | **Load done, recovery open.** Relays report allocations and Mbps and are chosen by load, with a backup from another region in every offer. A stream on a relay that dies still drops: the app and the camera reconnect (new request, new offer). ICE restart is not built |
+| P2 | **Relay recovery.** A live stream on a failed relay is not moved; ICE restart and new credentials are needed, and relay choice needs bandwidth and allocation load | **Load done, recovery open.** Relays report allocations and Mbps and are chosen by load. A backup from another region is offered only for relays listed in `config.json`; the reporting relays of 2026-11-04 have none (R12). A stream on a relay that dies still drops: the app and the camera reconnect (new request, new offer). ICE restart is not built |
 | — | **Blind spot:** a healthy WebSocket and a successful assignment don't prove playable video | **Partly done.** Every viewing attempt reports connected or failed, the path, the relay protocol and the setup time (the web player and the camera; the mobile app not yet). First-frame time and forced-relay recovery are not measured |
 
 ## 4. Parity with vrelay
@@ -94,7 +120,7 @@ ran no load, runtime or chaos tests. Its findings, with today's status:
 | `all-server.sh`, `all-check.sh` (version per server), `all-update.sh`, `all-reload.sh`, `all-command.sh` | `deploy.sh dev/prod/sg`; `matrix-fleet status` with versions and machine load (2.6.0) | **Gap** for deploy-all (R6); the version check is covered |
 | Region routing from MySQL `geoip` and `relay` tables | `config.json` routes and the DB-IP CSV, `matrix-fleet check/apply/rollback` without a restart | Better (no database) |
 | Managed MySQL: `server`, `relay`, `connection_log` | Files per server: activations (Center), statistics and the connection log per region, `/admin/statistic` with CSV/JSON | At parity per region; no single place holds every region's log |
-| `do_server_monitor.py` (adds a droplet above 90 Mbps, emails), `magic_server_monitor.sh` from cron | Relay load reports; full or silent relays are skipped; machine load in status and statistics (2.6.0) | **Gap** for alerts (R5). Autoscaling not needed yet (one 1 GB relay is about 20,000 cameras) |
+| `do_server_monitor.py` (adds a droplet above 90 Mbps, emails), `magic_server_monitor.sh` from cron | Relay load reports; full or silent relays are skipped; machine load in status and statistics (2.6.0) | **Gap** for alerts (R5). Autoscaling not needed yet (one 1 GB relay is about 10,000 cameras, measured 2026-11-04) |
 | `grafana-dashboard.json`, `do_server_metrics.py` | `/admin/statistic` charts (including "Machine %"), `/admin/statistic/data` for Grafana | Optional |
 | `export_log.sh` (daily journal gzip, 30 days) | journald; events kept 30 days | Small gap (R10) |
 | Stress scripts (`tcpkali`) and results | `cmd/loadtest` for control and relay, `tools/capacity/`, capacity.md | Run once on a droplet |
@@ -108,8 +134,8 @@ ran no load, runtime or chaos tests. Its findings, with today's status:
 1. Stop and delete the old AWS node (R2).
 2. Set up the Center backup and restore it once on a scratch droplet (R3).
 3. Decide the takeover policy (R1). At least alert on `sid_takeover`.
-4. Decide sg00's relay: put `turn.conf` back to violet, or move it to a
-   production `matrix-relay` (phase 1, step 2).
+4. sg00's relay: done 2026-11-04, `mx-relay-sg00` on the former violet
+   droplet (waits for its secret on sg00).
 5. Deploy 2.6.0 to the Center and sg00 (machine load in status).
 6. Push and tag `release_2.5.0`. Done 2026-11-04.
 
@@ -120,8 +146,11 @@ ran no load, runtime or chaos tests. Its findings, with today's status:
      RTSP or UDP `IPv4:PORT` source
    - publish it
    - keep 2.1.3 for rollback
-2. A production `matrix-relay` per region, `relay-sg01` first (INSTALL.md
-   section 3). Retire violet after a week without relay errors.
+2. A production `matrix-relay` per region: `mx-relay-us00` and
+   `mx-relay-sg00` installed 2026-11-04. Remove the violet container after a
+   week without relay errors; then drop violet's fixed login from the SG
+   relay once nothing uses it. Add the SG DNS name and TLS (R13), and a
+   backup relay (R12).
 3. The mobile app sends its connection report (application_todo.md, step 7).
 4. Watch for 7 days on `/admin/statistic` and `matrix-fleet status`:
    - verify success
@@ -165,5 +194,5 @@ ran no load, runtime or chaos tests. Its findings, with today's status:
 | Control server | `/opt/matrix/backups/<time>/` holds the previous binary and player: copy it back as `/opt/matrix/matrix_cc` and run `systemctl restart matrix`, or run `setup.sh upgrade` from the previous package. 2.5.0 and 2.6.0 change no data format; a takeover writes ordinary activation records (2.4.0 reads them); 2.6.0's extra statistics gauges are ignored by older versions |
 | Fleet configuration | `sudo matrix-fleet rollback [VERSION]` |
 | Takeover only | Per tenant: `"no_takeover": true` in `tenants.json`. For the whole server there is no flag yet: set `TakeoverAfter: -1` in the Center config and rebuild, or roll back to 2.4.0 |
-| Relay | Point `turn.conf` / `relay-secrets.json` back at violet, or replace the binary and restart |
+| Relay | On the SG droplet: `systemctl disable --now matrix-relay; docker update --restart=always violet-turn; docker start violet-turn`. On a control server: copy `cfg/relay-secrets.json.bak-20261104` back, or remove the file if there was none before (read per request, no restart); it then uses `cfg/turn.conf` again. A new relay binary: replace `/usr/local/bin/matrix-relay`, `systemctl restart matrix-relay` |
 | Camera | Publish the previous binary to the download URL; cameras take it at their next boot |

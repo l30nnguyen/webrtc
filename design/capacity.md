@@ -13,10 +13,16 @@ be checked against real droplets under real load.
 
 ## Result
 
+> **Measured on a droplet, 2026-11-04 ([below](#droplet-measurement-2026-11-04)):**
+> a 1 GB relay does about **half** the estimate: about 67 relayed sessions at
+> 70% CPU, not 137, so **about 10,000 cameras per relay**. Double the relay
+> column below. The cost barely changes: each extra relay costs $6 a month
+> but brings 1,000 GiB more transfer into the pool.
+
 Planned at 70% of what one server can do. **Bold** numbers are estimates until
 they are measured on a real droplet (see [Limits of the test](#limits-of-the-test)).
 
-| Cameras | Control nodes, 1 GB (sg00) | or control nodes, 4 GB / 2 vCPU | Relays, 1 GB (sg00) | Peak relayed sessions | Peak relay traffic | Relay egress a month |
+| Cameras | Control nodes, 1 GB (sg00) | or control nodes, 4 GB / 2 vCPU | Relays, 1 GB (estimate; measured: double these) | Peak relayed sessions | Peak relay traffic | Relay egress a month |
 |---:|---:|---:|---:|---:|---:|---:|
 | 1,000 | 1 | 1 | **1** | 6 | 10 Mbps | 1.1 TB |
 | 50,000 | 10 | 2 | **3** | 312 | 0.5 Gbps | 55 TB |
@@ -148,6 +154,53 @@ CPU numbers were scaled by 0.55 (control) and 0.71 (relay). Memory is the
 same binary on both, so it was not scaled. sg00 itself ran only the
 benchmark (5 s); no load was put on production.
 
+## Droplet measurement (2026-11-04)
+
+`mx-relay-us00` (DigitalOcean nyc3, Basic 1 vCPU / 1 GB, matrix-relay 1.2.0,
+default socket buffers), loaded from the office PC in Vietnam over the
+internet. Steady 10 s windows, CPU from `/proc/stat` (busy includes the
+kernel's network work and 6–8% steal):
+
+| Viewer side | Sessions | Packets/s in and out | CPU busy | RSS |
+|---|---:|---:|---:|---:|
+| UDP | 25 | 4,780 | 36% | 15 MB |
+| UDP | 34 | 8,680 | 53% | 15 MB |
+| TCP | 50 | 8,330 | 47% | 15 MB |
+| TCP | 100 | 17,320 | 75% | 16 MB |
+
+- **UDP: about 16,000 packets a second at 100% CPU, so about 11,500 at
+  70%: 67 sessions of 1.6 Mbps.** That's half the 33,000 estimated from the
+  test PC. TCP costs less per packet (the kernel batches writes).
+- The relay forwarded every packet: its kernel counters showed as many UDP
+  packets out as in, and no receive-buffer errors. The office line, though,
+  dropped nearly all inbound UDP above about 25 sessions (40 Mbps) and some
+  STUN replies, while TCP carried 80 Mbps with 0.04% loss. Long UDP paths
+  from Vietnam to the US are a risk for real viewers too: relay Asian
+  viewers from an Asian relay.
+- The benchmark on this droplet: ECDSA 20,319/s, AES-GCM 1,372,916/s, UDP
+  161,330/s (sg00: 18,286, 1,549,215, 113,114).
+- **SG relay (`mx-relay-sg00`, the former violet droplet), 2026-11-04:** violet's
+  fixed login works on matrix-relay (2 sessions, both sides relayed, run on
+  the droplet: 0% lost). From the office, TCP: 5 sessions, 0.01% lost. UDP
+  from the office lost 29% at 1 session and 90% at 5, while the relay's
+  counters showed every packet forwarded (in = out, no buffer errors): **this
+  office line lets in only about 100–150 UDP packets a second from outside**
+  (about 1.2 Mbps). Office tests of relayed UDP are therefore not meaningful;
+  check from a phone on 4G or a home line (roll-out.md R14).
+- Not measured here: raised socket buffers (no buffer errors showed at this
+  load).
+- **violet against matrix-relay**, same droplet, port, image of production
+  violet (`fecd3895336d`) and load, one after the other. Relay process CPU per
+  1,000 UDP packets/s forwarded, at about 7,400 packets/s: violet 3.1–3.4%,
+  matrix-relay 3.7–4.0%, so violet is about 10–20% cheaper a packet. Total
+  busy CPU (with the kernel's work) was 42–47% for violet and 41–44% for
+  matrix-relay at similar rates; steal varied 5–18%, so the gap is within the
+  noise of a shared vCPU. RSS: violet about 1 MB, matrix-relay about 15 MB
+  (neither matters). Both stop at 1,000 allocations by default (`--max`,
+  `-max`). Violet serves UDP only. The office path lost most packets and
+  some allocations, so neither relay was taken to its limit; a load generator
+  in the same region is needed for that.
+
 ## Limits of the test
 
 - **Relay CPU on sg00 is an estimate.** On the test PC the network work of
@@ -171,3 +224,4 @@ benchmark (5 s); no load was put on production.
 | Date | Server | Control (sg00) | Relay (sg00) | Cost (1M cameras) | Notes |
 |---|---|---|---|---|---|
 | 2026-11-03 | 2.4.0 / relay 1.1.0 | 56 KB a connection, 5,000 cameras planned; 711 sessions/s | **33,000 pps, 137 sessions, ~20,000 cameras** | $9,221 a month, $0.0092 a camera | first measurement; relay estimated from the test PC; DO prices of 2026-11-03 |
+| 2026-11-04 | relay 1.2.0 | (unchanged) | 16,000 pps at 100% (UDP), 67 sessions planned, ~10,000 cameras | about the same (more relays, more pooled transfer) | measured on `mx-relay-us00` (nyc3) from the office; UDP path loss Vietnam → US above ~40 Mbps |
