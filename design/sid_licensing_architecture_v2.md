@@ -1,16 +1,35 @@
 # SID licensing and camera viewing architecture
 
-Status: **Current architecture and integration contract** (2026-10-13). This is the single authoritative SID contract. It consolidates the current format and camera-password viewing flow with applicable issuance, deployment, and future entitlement/revocation planning. Older 107-character SID details are historical; LicenseServer remains a separate future entitlement service, not a component of the signaling-server binary.
+Status: **current architecture and integration contract**, checked against
+the code on 2026-11-04: control server 2.6.0 (`9808bcf`), camera 2.1.4
+(`libdatachannel_c14` `062c4228`), relay stream server `matrix-relay` 1.2.0.
+This is the single authoritative SID contract. Older 107-character SID
+details (`sid_licensing_v2_changelog.xlsx`) are historical. LicenseServer is a
+separate future entitlement service, not part of the `matrix_cc` binary.
+
+User-facing names: the signaling server is the **control server**, TURN is the
+**relay stream server**.
 
 ## Product and deployment model
 
-Center is a normal signaling-server instance behind the load balancer. It uses the same `signaling-server` binary as other instances. Its single TLS listener is configured on port **8443** in the current deployment and serves `POST /v1/challenge`, `POST /verify`, `POST /v1/view`, WebSocket signaling (WSS), the player page, health, and other existing HTTP routes. The CLI's default listen port remains 8000, so deployments must pass `-port 8443`. There is no standalone Center executable, service, or port 9443. The `-center` option enables Center APIs on that server process; it does not select a different binary or listener.
+One binary, `matrix_cc` (release packages name it `matrix_cc_<version>`), runs
+every server role on one HTTPS/WSS listener:
 
-The load balancer presents the stable HTTPS/WSS origin and forwards traffic to signaling-server instances. A Center response returns the configured MainServer WSS root; the camera and viewer use that address and the ticket audience must match it exactly. Deployments may direct clients to the same instance or an assigned signaling instance, but cross-node camera/player routing requires fleet routing and shared registry work described below; this document does not claim that capability is deployed.
+| Role | Host (2026-11-04) | Installed with | Serves |
+| --- | --- | --- | --- |
+| Control Center | `matrix.5gen.care`, DigitalOcean nyc3 | `setup.sh install` | Center APIs (`/v1/challenge`, `/verify`, `/v1/view`, `/v1/resolve`, pairing-system admin), its own control node, the node link (`/v1/link`), downloads |
+| Control node | `matrix-sg00.5gen.care`, DigitalOcean sgp1 | `setup.sh install-node` | Camera and viewer WSS, relay reports, statistics, downloads; links to Center |
+| Relay stream server | dev VPS (`matrix-relay`); production still uses violet | manual (`server/src/relay/deploy/`) | TURN over UDP 3478, TCP 80 and TLS 443 |
+
+`setup.sh` runs the server on port 443 under systemd (`matrix.service`, user
+`matrix`); the CLI default `-port` is 8000. `-center` turns the Center APIs on
+in the same process. There is no separate Center executable or port.
+Endpoint by endpoint: [endpoints.md](endpoints.md).
 
 ## Credential model and trust boundaries
 
-The SID remains the canonical **118-character**, unpadded Base64URL Ed25519-signed value. The 88 decoded bytes are laid out as follows; the signature covers exactly the first 24 payload bytes:
+The SID is the canonical **118-character**, unpadded Base64URL Ed25519-signed
+value. The 88 decoded bytes; the signature covers exactly the first 24 bytes:
 
 | Byte offsets | Size | Field | Encoding / rule |
 | --- | ---: | --- | --- |
@@ -21,423 +40,304 @@ The SID remains the canonical **118-character**, unpadded Base64URL Ed25519-sign
 | 15–23 | 9 | Nonce | Fresh cryptographically random bytes |
 | 24–87 | 64 | Ed25519 signature | Full signature over bytes 0–23 |
 
-The 24-byte payload plus 64-byte signature is 88 bytes; canonical unpadded Base64URL encodes it in 118 characters. The SID is a bearer license credential. It is tenant/role-bearing and does not itself prove device identity. Each SID is single-seat: first activation binds it to a camera's device key. Replacing a camera requires a new SID; there is no transfer workflow.
+The SID is a bearer licence credential. It carries tenant and role and does
+not prove device identity. **One SID is bound to one device key at a time**;
+the seat moves to another device by a release from the pairing system or, for
+cameras, by takeover after the holder has been offline for 3 minutes (see
+*SID pool*).
 
 Viewing uses two shared credentials:
 
-- The camera's activated `publisher` SID obtains a short-lived, camera-scoped player ticket from Center.
-- A separate camera password is supplied by the viewer in the first WSS signaling request and checked by the camera before peer-connection or media setup.
+- The camera's activated `publisher` SID obtains a short-lived, camera-scoped
+  player ticket from Center.
+- The camera password, which the viewer sends in the first WSS request and the
+  camera checks before any peer connection or media.
 
-There is no viewer SID, viewer account, camera-ref lookup, pair-grant database, or ownership/password-change API in this approved flow. Pairing is external credential delivery. Anyone with both the camera SID and password can view while the SID remains accepted; anyone with the password can try viewing a known camera but still needs a scoped ticket derived from an activated camera SID. These are shared credentials, not individual user identity or proof-of-possession.
+There is no viewer account, pair-grant database or ownership/password-change
+API. Pairing is external credential delivery. Anyone with both the camera SID
+and the password can view while the SID is accepted.
 
 | Secret/material | Trusted holder and use | Must not be sent to |
 | --- | --- | --- |
-| SID issuer private key | Controlled issuer; signs SID payloads | Cameras, Center, MainServer, viewers, repository |
-| SID issuer public key | Center verifies SID; raw 32-byte key is embedded in provisioned camera builds | Not secret; provision through trusted build/key-management workflow |
-| Camera SID | Issuer and provisioned camera; viewer presents it to Center for activation/view flow | Logs, URLs, analytics, crash reports |
-| Center ticket private key | Signaling-server instances that issue Center tickets | Camera, browser, repository |
-| Center ticket public key | Signaling-server admission verifier(s) | Not secret; pin the expected algorithm/key ID and audience |
-| Camera password | Viewer and camera, forwarded in initial WSS request through MainServer | Center, URLs, logs, analytics, crash reports |
-| Password PHC verifier | Camera persistent storage, mode 0600 | Viewer, Center, general logs |
-| Activation/device private key | Camera persistent protected storage | Center and other devices |
-| Activation record and tenant registry | Center's configured persistence | Public endpoints except minimum necessary claims |
+| SID issuer private key | Controlled issuer (`sidctl`); signs SIDs | Cameras, Center, nodes, viewers, repository |
+| SID issuer public key | Center verifies SIDs; the raw 32-byte key is built into camera binaries | Not secret; provision through the trusted build |
+| Camera SID | Pairing system and the paired camera; the app presents it to Center | Logs, URLs, analytics, crash reports |
+| Center ticket private key | Center only (`cfg/sid/center-ticket.key.pem`): signs tickets and pushed configurations | Nodes, cameras, browsers, repository |
+| Center ticket public key | Every node: verifies tickets, Center's link challenge and pushed configurations | Not secret; pinned with the key ID (`-kid`) |
+| Node link key | Each node's own `cfg/sid/node.key`; its public key is in Center's `config.json` | Never copied off the node |
+| Admin token | Center (`cfg/sid/admin.token`) and the pairing system | Cameras, apps, logs |
+| Relay shared secrets | `cfg/relay-secrets.json` on the node and the relay's `secrets.json` | Cameras and apps (they get per-session credentials) |
+| Camera password | Viewer and camera; forwarded in the first WSS request | Center, URLs, logs, analytics, crash reports |
+| Password verifier | Camera `auth/password.phc`, mode 0600 | Viewer, Center, logs |
+| Device private key | Camera `auth/device.key`, mode 0600 | Center and other devices |
+| Activation store and tenant registry | Center `cfg/sid/` | Public endpoints, except the minimum claims |
 
-Never log or persist raw SID, password, ticket, or signaling request body. Center needs the raw SID transiently to verify it and derives its digest for activation and ticket claims. MainServer derives the camera SID digest from the verified ticket and overwrites any browser-supplied digest. The camera compares that trusted digest with its locally verified SID digest before password validation.
+Never log or persist a raw SID, password, ticket or signaling request body.
+Center needs the raw SID only to verify it and derives its digest (SHA-256 of
+the 118 ASCII characters) for the activation store and ticket claims. The
+control server takes the camera's SID digest from the verified viewer ticket
+and overwrites any digest a browser sends. The camera compares it with its
+own SID digest before checking the password.
 
 ## Activation and viewer flows
 
 ### Camera activation
 
-A provisioned camera verifies its SID locally (canonical format, signature, tenant, role, and minimum issue time), then proves device-key possession to Center for each connection attempt:
+A camera verifies its SID locally (format, signature, tenant, role, minimum
+issue time), then on every connection attempt:
 
-1. Camera calls `POST /v1/challenge`; Center returns a fresh 24-byte, single-use nonce valid for 30 seconds.
-2. Camera calls `POST /verify` with `{"proto":2,"sid":"…","device_pub":"…","nonce":"…","sig":"…"}`. `sig` is the device's Ed25519 proof over `"center-activate-v1" || nonce || SHA-256(SID) || main-origin`; the SID digest is SHA-256 of the exact canonical 118 ASCII SID characters.
-3. Center verifies the SID and proof, binds the first device key to the SID, checks tenant and activation policy, then returns device identity, tenant/role, exact MainServer origin, and a short-lived ticket (60 seconds by default, at most five minutes).
-4. Camera opens WSS at that exact origin and device path with the ticket. TLS/certificate, Center, or origin validation failures fail closed in Center mode; there is no fallback to a fixed URL.
+1. `POST /v1/challenge` with `{"proto":3,"device":"<device id>"}`. Center
+   returns a single-use 24-byte nonce valid for 30 s and the **assigned node**
+   (`main_server_address`), chosen by the camera's country (GeoIP), the
+   region's routes and node load; a camera already on a healthy node of its
+   region stays there.
+2. The camera accepts the node only on a domain built into the binary
+   (`MATRIX_NODE_DOMAINS`, default `5gen.care`) or its configured host.
+3. `POST /verify` with `{"proto":3,"sid","device_pub","nonce","sig","main_server_address"}`.
+   `sig` is the device's Ed25519 signature over
+   `"center-activate-v2" || nonce || SHA-256(SID) || node`. Center checks the
+   SID, the proof, the binding (next section) and the tenant's activation
+   window, then returns the device ID, tenant, role, the node and a ticket
+   whose audience is that node (60 s, single use).
+4. The camera opens `wss://<node>/<device id>?ticket=…`. TLS, Center or node
+   check failures fail closed; there is no fallback address.
 
-The camera device ID is Base64URL(SHA-256(device public key)). The SID does not contain the device ID. While a SID is assigned it is bound to that device public key; do not silently replace a damaged existing key. Under the pool model below the binding can end by an explicit release.
+Old cameras send proto 2 (`"center-activate-v1"` over the Center's own
+address) and are served on their configured server.
 
-### SID pool and re-assignment (decided and implemented 2026-10-19)
+The camera device ID is Base64URL(SHA-256(device public key)). On a refusal
+the camera logs Center's status and reason (2.1.2 and later), for example
+`Center answered 503 …: retry; the SID was just released, or the camera
+holding it went offline less than 3 minutes ago`, and retries after 25–35 s.
 
-A SID is not tied to one camera for life. SIDs are issued in batches into a **pool** owned by the external pairing system. When a device is paired (outside this service) the pairing system takes one *available* SID from the pool and gives it to the device together with a fresh password. The rule is unchanged: **one SID is bound to one device at a time**. When the device is unpaired or replaced, the SID is released and returns to the pool.
+### SID pool, release and takeover
 
-What changed (Center, nodes and `sidctl` are done; the pairing system itself is outside this service):
+SIDs are issued in batches (`sidctl batch`) into a **pool owned by the
+external pairing system**. When a camera is paired (outside this service) the
+pairing system takes an available SID and gives it to the camera with a fresh
+password. When it is unpaired or replaced, the SID goes back to the pool.
 
-| Area | Today | Needed |
-| --- | --- | --- |
-| Binding | The first device key binds forever; a second key is rejected with an `ALERT` | States `unbound → bound(device_id) → released`. A new key may bind only while unbound or released, or (cameras, since 2.5.0) take a bound SID over when its camera has been offline on every node for 3 minutes, because the pairing system frees SIDs without telling Center (see endpoints.md, takeover). A device that held the SID before is refused for it afterwards, so a lost camera cannot race back in |
-| Release | None | An authenticated Center operation `release <sid digest>`, callable only by the pairing system (token plus TLS; never by a device or player), audited. `sidctl status` shows bound, released and history |
-| Cut-off of the old device | n/a | On release the old device's live WebSocket and any ticket still valid (up to 60 s) must stop working. Add `device:<id>` lines to the blocklist file the nodes already reload; nodes check the ticket `sub` and drop matching connections |
-| Old viewers | `camera_ref = SHA-256("camera-ref-v1" \|\| SID)` is a permanent handle, and a viewer who once got the SID can still look the camera up | After re-assignment an old viewer can still resolve the SID and try passwords. Every pairing must therefore set a **new random password** (never the default); optionally derive the handle per binding later |
-| Camera firmware | SID flashed at the factory | No SID at manufacture. SID and password are delivered at pairing as a `pair` file written by the firmware; an unpaired `webrtc` idles. Unpairing (wiping `sid` and `auth/password.phc`, keeping `device.key`) is not built yet |
-| Batch flow | `sidctl batch` → factory partner → firmware | `sidctl batch` → pairing system's pool. The factory sheet is no longer needed |
-| Pool ownership | n/a | The pairing system owns available/assigned. Center owns the truth of bound/released and refuses a bind to a SID currently bound to another key (safety net) |
-| Revocation | Blocklist by digest (permanent) | Unchanged and separate from release: a blocklisted SID is dead, a released SID is reusable |
+| Area | As built |
+| --- | --- |
+| Binding | States `unbound → bound(device) → released`. A new key binds while unbound or released (after a 3 s grace) |
+| Release | `POST /v1/admin/release {"sid_digest"}` with `Authorization: Bearer <admin token>`, by the pairing system only. Writes `device:<id> <expiry>` to the blocklist (fsynced), then marks the SID released. Twice is a no-op; unknown digest 404; a blocklist write failure answers 503 and leaves the SID bound. `POST /v1/admin/status` answers `unbound`, `bound` or `released` with `bindable_at` |
+| Takeover (2.5.0) | A camera SID bound to another key passes to the new camera once the holder has been offline **on every node for 3 minutes**: the camera was reset and paired again with a new key, or the pairing system gave the SID to another camera without a release. Holder online: 401 and an `ALERT` log. Offline for less, or any node not linked (the holder may be on it): 503, retry. On takeover the old key is revoked like a release, `sid_takeover` is counted and a `camera`/`takeover` event is logged. Needs the fleet configuration (`-config-file`). A tenant with `"no_takeover": true` keeps the strict rule. Viewer SIDs are never taken over |
+| Former holders | A device that held a SID is refused for it afterwards (Center keeps up to 1,000 former device IDs per SID), so a lost or reset camera cannot race back in |
+| Cut-off of the old device | Nodes drop connections whose device is revoked, or whose digest or tenant is blocked, on the 30 s sweep; old tickets are refused at the ticket check |
+| Old viewers | A viewer who once had the SID can still try passwords, so every pairing must set a **new random password** |
+| Camera firmware | No SID at manufacture. The firmware writes the SID and password as a `pair` file; an unpaired camera idles. Unpairing on the camera is not built, which is why takeover exists |
+| Revocation | The blocklist by digest is separate from release: a blocklisted SID is dead, a released SID is reusable |
 
-As built:
+The activation store is an append-only JSONL file; each line is the full
+latest state of one SID (`status`, `released_at`, `former`), fsynced. Bind,
+release and takeover are compare-and-set under the store lock, so two
+requests can never both win one SID.
 
-- `POST /v1/admin/status` and `POST /v1/admin/release` (body `{"sid_digest":"<64 hex>"}`, `Authorization: Bearer <token>` from `-admin-token-file`; no token means the routes do not exist). Status answers `unbound`, `bound`, or `released` with `bindable_at`. Release writes `device:<id> <expiry>` to the blocklist, fsynced, and only then marks the SID released; releasing twice is a no-op, an unknown digest is 404, and a blocklist that cannot be written fails the release with 503 and leaves the SID bound.
-- The activation store is still the append-only JSONL file; each line is the full latest state of one SID (`status`, `released_at`, `former`). `Bind` and `Release` are one step under the store lock, so concurrent binds cannot both win.
-- `/verify` for a released SID: a former holder gets 401 and an `ALERT` log; anyone inside the 3-second grace gets 503 (retry); after the grace another device binds. The 3-year window is checked on every bind. `/v1/view` and camera lookup treat a released SID as not found.
-- Nodes drop open connections whose device is revoked, or whose digest or tenant is blocked, on the 30-second sweep; new connections with an old ticket are refused at the ticket check.
-- `sidctl status` lists released SIDs as `released`.
-- Limits: a device that held a SID cannot bind it again, so the pairing system must hand a returning camera a different SID; the admin routes have no rate limit; and the grace and the revocation lifetime are constants.
+Decisions (2026-10-19, takeover added 2026-11-04):
 
-Decisions on expiry and reuse (2026-10-19):
-
-- **Expiry.** The 3-year window applies to **every bind**, counted from the SID's issue time: a SID can be bound (first time or again after a release) only before `issued + 3 years`. A bound SID keeps working. A SID that sits unbound in the pool past that date is dead and must not be handed out; the pairing system should drop it and order new batches ahead of time.
-- **Reuse after release needs no long quarantine.** Devices are many and switch on and off at any time, so safety cannot depend on a device noticing the release. It rests on Center rules that hold whether or not the old device is online: (1) the old device's key is refused for that SID forever (Center keeps the history), so it cannot bind again before or after the new device; (2) a new bind is refused while the SID is bound to another key; (3) viewer tickets are scoped to the new device's ID, so the old device is never addressed; (4) every pairing sets a new random password.
-- **Only a few seconds of grace.** A released SID becomes bindable **3 seconds** after the release (enforced by Center, not by the pairing system). The delay only orders the steps: the release and its `device:<id>` revocation are written and synced first, so a bind can never overtake them. It does not have to cover the old device's in-flight ticket (up to 60 s) or the node dropping its connection (up to the 30 s sweep): a ticket or connection of the old device carries the old device ID, and viewers are scoped to the new device ID, so the old device can neither be addressed nor take the new device's place. It only stays connected, unreachable, until the node drops it. A longer delay would protect only against a mistaken release, which is a product choice, not a security need.
-- **Revocation entries expire.** A released device appears in the blocklist as `device:<id> <expires-unix>` with an expiry after the ticket lifetime plus the node sweep and a margin (about two minutes). The node drops the live connection once when it reloads, and the permanent refusal lives in Center's history, so the blocklist file does not grow with every release in a large fleet.
-- **Atomic release and bind.** Release and bind are compare-and-set on the SID's record in the activation store, so two pairing requests can never both succeed for one SID.
+- **Expiry.** A SID can be bound, the first time or again, only before
+  `issued + 3 years` (per tenant: `activation_window_days`). A bound SID keeps
+  working. A SID left unbound past that date is dead.
+- **No long quarantine.** Safety does not depend on the old device noticing
+  anything: its key is refused for that SID for good, a bind is refused while
+  another online key holds the SID, viewer tickets are scoped to the new device
+  ID, and every pairing sets a new password.
+- **3 s grace after a release** only orders the steps (the revocation is
+  written before any new bind).
+- **Revocation entries expire** after the ticket lifetime plus the sweep and
+  a margin (about two minutes); the permanent refusal lives in Center's history.
+- **Takeover risk.** Anyone holding a copy of the SID text can take it over
+  from a camera that is off for more than 3 minutes, and the owner's key is
+  then refused. See [roll-out.md](roll-out.md) R1 for the mitigations to
+  decide before going past testers.
 
 ### Viewer access
 
-1. Viewer calls Center `POST /v1/view` over HTTPS with the activated camera publisher SID:
+1. The app calls `POST /v1/view` with `{"sid":"<camera SID>"}`.
+2. Center checks the SID, tenant, activation and block status; the camera
+   identity comes from the activation store, never from the caller. It
+   returns a player ticket (60 s, single use, scoped to the camera and the
+   node), the camera ID, a random viewer ID and the node the camera is on now
+   (Center's own node, else the node reporting it online, else the node it
+   was last sent to).
+3. The app connects to `wss://<node>/<viewer id>?ticket=…` and sends
+   `{"id":"<camera_id>","type":"request","password":"<SHA-256 hex>"}`. The node
+   adds the SID digest from the ticket and the relay stream servers for the
+   session, and forwards it to the camera.
+4. The camera checks the digest and the password, then sends the offer with
+   the relay credentials (`candidates`, with `urls` for UDP, TCP and TLS).
 
-   ```json
-   {"sid":"<activated camera publisher SID>"}
-   ```
-
-2. Center verifies SID, tenant, activation, and applicable block status; it derives camera identity from trusted activation data, never caller-supplied tenant or camera ID. It returns a short-lived player ticket, camera ID, ephemeral viewer device ID, and MainServer address. Ticket claims include the camera ID (`cid`), camera SID digest, tenant (`tid`), ephemeral viewer subject, issuer, audience, issue/expiry time, and unique ticket ID.
-3. Viewer connects to the returned WSS origin/path using the ticket. MainServer validates signature, configured key ID/algorithm, expiry, audience, role, and camera scope. It accepts each ticket once and limits signaling to its authorized camera.
-4. Viewer sends the initial request with the camera password:
-
-   ```json
-   {"id":"<camera_id>","type":"request","password":"<camera password>"}
-   ```
-
-   Do not send `sid_digest`. MainServer injects the digest from the verified ticket. The camera checks digest and password before creating a peer connection or sending media.
-
-The ticket is a short-lived, single-use **bearer** credential. Single-use limits later replay but does not prevent theft or a race before first use. A ticket is not cryptographically bound to the viewer device. The scoped ticket limits the request to one camera; it does not establish human identity or authorize who received credentials.
+The ticket is a bearer credential: single use limits replay but does not stop
+theft before first use, and it is not bound to the viewer device.
 
 ## Password provisioning and rotation
 
-The streamer is configured only by `--config FOLDER`; its `auth/` subfolder holds the persistent camera credentials `device.key` and `password.phc`. The auth directory is mode 0700, the files are mode 0600, and the plaintext password is never stored. Existing credential files are loaded on startup and normal startup never overwrites them. On the first normal run with no existing auth state, the camera creates a device key and a verifier for the shared default password `5genmatrix` (cameras initialised before 2026-10-23 keep `5genwebrtc`); this is a known default and the owner must change it before relying on the camera for private viewing. Provisioning systems (the firmware) should therefore set the real password before the first start and not start a camera that has none. Default-password provisioning only applies to genuinely fresh state; if `device.key` exists but `password.phc` is missing or malformed, startup fails closed. The owner recovers with the setup-only `printf '%s' 'NEW' | streamer --config FOLDER --set-password`, which atomically writes the verifier and exits before SID activation, media, or network activity. This does not replace the device key.
+The camera's `auth/` folder (mode 0700) holds `device.key` and `password.phc`
+(mode 0600); the plaintext password is never stored. On the first run with no
+auth state, the camera creates a device key and a verifier for the default
+password `5genmatrix` (cameras initialised before 2026-10-23 keep
+`5genwebrtc`). The firmware should set the real password at pairing (the
+`pair` file) before relying on the camera. If `device.key` exists but
+`password.phc` is missing or malformed, startup fails closed.
 
-`--set-password` reads the password from stdin, so it never appears in a process listing; a value after the flag (`--set-password 'NEW'`) is also accepted and is visible in the process list while the command runs. `camera-password --file PATH` does the same for a bare file. The credential the app sends, and that the camera hashes, is the lowercase hex SHA-256 of the password the user types (64 characters); `--set-password`, `camera-password` and the default all apply that hash first. It makes the credential longer and is not extra security, because the camera checks that value. The verifier is PBKDF2-HMAC-SHA256 with a random 16-byte salt, a 32-byte tag and an iteration count stored in the verifier (`i=`, 4,000 to 1,000,000; new verifiers use 8,000, measured 380 ms on the target camera). `camera-password --benchmark` measures derivation time without accessing auth files. The camera rereads the verifier at least once per second and before each request. A changed, missing, or invalid verifier closes active viewers; new requests fail closed until a valid verifier is present. A newly salted verifier closes viewers even if the plaintext password is unchanged. Failed-attempt throttling is camera-wide, and one in-flight password derivation per camera gate is allowed.
+The credential the app sends, and that the camera hashes, is the lowercase hex
+SHA-256 of the password the user types (64 characters). The verifier is
+PBKDF2-HMAC-SHA256 with a random 16-byte salt, a 32-byte tag and the iteration
+count stored in it (`i=`, 4,000 to 1,000,000; new verifiers use 8,000, about
+0.4 s on the target camera). `--set-password` (from stdin) and
+`camera-password --file PATH` write a new verifier atomically. The camera
+rereads the verifier at least once a second; a changed, missing or invalid
+verifier closes active viewers. Failed attempts are throttled camera-wide.
 
-Password change authorization, owner accounts, and secure delivery to viewers belong to the external provisioning/product system. Atomic replacement and file permissions protect the mechanism; they do not prove who is authorized to change the password. Never put it in argv, environment variables, URLs, logs, analytics, or crash reports.
+Who may change a password, and delivering it to viewers, belongs to the
+external pairing/product system.
 
-Example trusted provisioning flow with terminal echo disabled:
+## Build, configure and run
 
-```sh
-IFS= read -r -s -p 'New camera password: ' pw
-printf '\n'
-printf '%s\n' "$pw" | /path/to/build/examples/streamer/camera-password --file /persistent/camera/auth/password.phc
-result=$?
-unset pw
-exit "$result"
-```
+### Camera
 
-The utility accepts 1–256 password bytes (one final LF/CRLF is stripped). Substitute the actual build executable and persistent camera path. Use a secret manager/protected provisioning channel for unattended provisioning.
+Build with the trusted raw SID public key (64 hex characters) and the minimum
+issue time; there is no unprovisioned build. For the HCX130 (ARM):
+`libdatachannel_c14/compile.sh` (toolchain `anykav330.cmake`, binary
+`build/examples/streamer/matrix_<version>`), published to
+`https://matrix.5gen.care/downloads/HCX130/matrix` with `publish_firmware.sh`.
+Cameras download it to `/tmp/matrix` at boot.
 
-## Build, configure, and run
+The camera's only run-time option is `--config FOLDER` (also `-h`, `-V`,
+`--set-password`). The folder holds:
 
-### Camera build
+- `matrix.ini` (`key=value`; a legacy `webrtc.ini` is renamed once), with
+  the keys `nickname` (default `CAMERA`), `host` and `port` (default
+  `matrix.5gen.care`, 443), `audio`, `video`, `video2`, `chunksize`, `mp4`,
+  `talkback-port`, `talkback-chunksize`, `timeout`, `entropy-bits`,
+  `verbose`, `ca-file`, `reqIP`, `reqPort`
+- `sid` (mode 0600, written from `pair`)
+- `auth/`
 
-The camera must be built with the trusted raw SID public key and explicit minimum issue timestamp. The raw key is 32 bytes represented as 64 hex characters; it is not a fingerprint, PEM text, or private key. For an x86 PC build, set `SID_PUBLIC_KEY_HEX` to the verified raw public-key hex from the controlled key-provisioning workflow, and set `SID_MIN_ISSUED_UNIX` to the policy timestamp:
+A media source (`audio`, `video`, `video2`) is a UNIX socket path, a UDP port
+(`8553` listens on 127.0.0.1; `IPv4:PORT`, e.g. `0.0.0.0:8553`, picks the
+address; 2.1.4), or an `rtsp://` address. Exit status 78 means a bad config
+folder or a malformed `matrix.ini`. MbedTLS builds trust only the embedded
+ISRG Root X1 unless `ca-file` is set.
 
-```sh
-SID_PUBLIC_KEY_HEX="<64-hex-characters>"
-SID_MIN_ISSUED_UNIX="<minimum-unix-seconds>"
-cmake -S libdatachannel_c14 -B build-sid-x86 \
-  -DNO_TESTS=ON -DBUILD_SHARED_LIBS=OFF \
-  -DSID_PUBLIC_KEY_HEX="$SID_PUBLIC_KEY_HEX" \
-  -DSID_MIN_ISSUED_UNIX="$SID_MIN_ISSUED_UNIX"
-cmake --build build-sid-x86 --target streamer camera_password_tool
-```
-
-The camera has one run-time option, `--config FOLDER` (it also accepts `-h`, `-V` and `--set-password`). The folder holds `webrtc.ini` (all settings, `key=value`), `sid` (the SID text, mode 0600, written from `pair`) and `auth/` (`device.key`, `password.phc`). A missing folder or `webrtc.ini` is created with defaults; the keys are `nickname` (optional, default `CAMERA`), `host`, `port`, `audio`, `video`, `chunksize`, `mp4`, `talkback-port`, `talkback-chunksize`, `timeout`, `entropy-bits`, `verbose`, `ca-file`, `reqIP`, `reqPort`. The streamer carries its defaults; with no `sid` it idles instead of exiting, and pairing is a `pair` file (`<sid>\n<password>\n`, mode 0600) that the firmware writes and `webrtc` consumes at start. Exit status **78** means a bad config folder or a malformed `webrtc.ini`. In the supported MbedTLS camera builds (`x86.cmake` and `anykav330.cmake`), the binary includes only the 1939-byte ISRG Root X1 PEM and uses it by default for Center HTTPS and MainServer WSS; `ca-file` is an optional PEM trust-bundle override, and an invalid override fails startup. `host` and `port` (default `webrtc.5gen.care`, 443) select Center and MainServer: the camera derives `https://HOST:PORT/verify`, uses `/v1/challenge` on that same host, and the exact WSS root `wss://HOST:PORT/`. There are no separate center-URL or main-origin settings. The camera clock must be suitable for TLS validation. Do not delete or replace an activated `device.key` unless the SID is also released (see the SID pool section). The camera build always requires `SID_PUBLIC_KEY_HEX` and `SID_MIN_ISSUED_UNIX`; there is no unprovisioned build.
-
-Representative run:
-
-```sh
-./streamer --config /persistent/camera
-```
-
-The `nickname` setting supplies display metadata only. It does not change the key-derived device ID or ticket identity. The WSS registration carries `type=register` and `nickname`; an authenticated camera may also carry its SID, which the server validates against the digest in the verified ticket and retains in memory only for development discovery. The SID is not persisted or logged.
-
-### Signaling-server build and service
-
-Build from the Go module directory. This produces the one server binary used for Center APIs, WSS signaling, and player hosting:
-
-```sh
-cd server/src/control
-go build -o sidctl ./cmd/sidctl
-go build -o matrix_cc ./src   # release packages name it matrix_cc_<version>
-```
-
-Run an ordinary signaling-server instance with Center APIs on the same HTTPS/WSS listener at 8443. Use the exact public MainServer root in `-main-address`. If explicitly setting `-ticket-public-key`, `-ticket-kid`, or `-ticket-aud`, each must agree with the Center signing configuration; the audience must exactly match the configured MainServer root. Paths shown here are deployment placeholders; protect all private files and persistent state with restrictive ownership and permissions.
+### Control server
 
 ```sh
-./matrix_cc -root ../.. -port 8443 -https -center \
-  -sid-public-key /secure/sid-issuer.pub.pem \
-  -min-issued <minimum-issued-RFC3339> \
-  -center-private-key /secure/center-ticket.key.pem -kid center-2026-01 \
-  -main-address wss://webrtc.5gen.care:8443/ \
-  -tenants-file /etc/webrtc/tenants.json \
-  -activation-store /var/lib/webrtc/activations.jsonl \
-  -ticket-public-key /secure/center-ticket.pub.pem \
-  -ticket-kid center-2026-01 \
-  -ticket-aud wss://webrtc.5gen.care:8443/ \
-  -blocklist-file /etc/webrtc/sid-blocklist.txt
+cd server
+release/make_release.sh            # dist/matrix-server-<version>-<commit>.tar.gz
+sudo ./setup.sh install ...        # on a new Center (release/README.md)
+sudo ./setup.sh install-node ...   # on a new node
+./deploy.sh prod | sg              # upgrade the Center / sg00 from this PC
 ```
 
-The load balancer must preserve the HTTPS/WSS routes, forward the correct host/proto information, and target only healthy instances. If TLS terminates at a proxy, `-trust-proxy-tls` is an alternative to `-https` only when the listener is reachable exclusively from that trusted proxy and it sets `X-Forwarded-Proto: https`. Do not expose a plain HTTP trusted-proxy listener directly to clients. With `-https`, the server reads the combined TLS certificate and private key from `<root>/cert.pem`.
+`setup.sh` writes `/etc/matrix/matrix.conf` and the systemd unit with the
+flags (`-https -center -port 443 -kid … -config-file … -relay-dir …
+-statistic-dir … -event-dir … -admin-socket /run/matrix/admin.sock`, and
+more). New droplets: release folder `server/INSTALL.md`.
 
-`POST /v1/challenge`, `/verify`, `/v1/view`, ticket-admitted WSS, and the player are routes on this same listener. `/verify` activation and `/v1/view` viewing are distinct operations. The Center instance must have access to the SID public key, Center ticket private key, tenant registry, activation store, and blocklist; admission verifiers need the matching Center ticket public key, key ID, audience, and blocklist configuration. Keep Center ticket private-key distribution limited to trusted ticket-issuing instances. Never enable `-demo-tenant` in production: it intentionally allows unauthenticated development players.
+Never enable `-demo-tenant` in production. `-discovery-tenant test01` (camera
+list and `/demo/test01` player) is for the demo and limited to the office IP
+with `-player-allow`; turn it off before the official production launch.
 
-The development player can list connected cameras from one explicitly configured tenant with `-discovery-tenant test01`. This read-only `/api/devices` option requires ticket admission and returns only that tenant's camera metadata (internal device ID, display nickname, tenant and signaling path, connection time, type, and latency). For admitted development cameras only, the response may also include the camera's 118-character SID to let the player fill the selected camera's SID field; the response uses `Cache-Control: no-store` and never returns passwords or tickets. Device `id` remains internal for routing and camera-scope checks, and user-facing labels use the nickname or a friendly `Camera N` fallback. This development endpoint makes included SIDs discoverable to anyone who can reach it; the camera password remains required for viewing. The option does not enable anonymous WSS or change ticket routing, camera scope, or authorization. Keep it on the development instance; production does not set it.
+## Issuance and key rotation
 
-In the demo player, select a camera card, enter its camera-local password, and press **Play**. The card's SID fills the editable Camera SID field when discovery provides one; Play obtains a fresh `/v1/view` ticket and then connects over authenticated WSS. If an older admitted camera's discovery record has no SID, the user must paste that camera's SID; the player still checks the returned camera scope against the selected card. Passwords remain user-entered and are never stored as defaults. On legacy production servers where health reports ticket admission disabled, Play without an SID continues to use the legacy WSS request flow.
+Use `sidctl` (`server/src/control/cmd/sidctl`) on a controlled machine:
+`keygen` for the SID issuer and Center ticket key pairs, `issue` for one SID,
+`batch` for a pool export (CSV/XLSX with raw SIDs, plus a digest manifest),
+`verify` and `status`. The private JSONL audit keeps digests, not raw SIDs.
+Raw SID files are secrets; remove them after handing them to the pairing
+system.
 
-## Issuance, key rotation, development, and rollback
+The SID issuer key and the Center ticket key are independent. SID v2 has no
+key ID, so rotating the issuer key means new camera binaries and a migration
+plan. Rotating the Center ticket key needs every node to trust the new key and
+key ID before Center signs with it.
 
-Use `sidctl` for issuance and offline verification from `server/src/control`. Generate the SID issuer key pair once in a controlled environment, keep the private key offline/restricted, and distribute only the public key through the camera build and Center configuration. Generate a separate Center ticket key pair; the Center private key signs admission tickets and the public key is used by ticket verifiers. Issue a distinct random-nonce SID for each camera:
+## Fleet: Center, nodes and relays (built)
 
-```sh
-cd server/src/control
-go build -o sidctl ./cmd/sidctl
-./sidctl keygen --private /secure/sid-issuer.key.pem --public /secure/sid-issuer.pub.pem
-./sidctl keygen --private /secure/center-ticket.key.pem --public /secure/center-ticket.pub.pem
-./sidctl issue --private-key /secure/sid-issuer.key.pem --audit /secure/issued.jsonl \
-  --issued-at <issued-at-RFC3339> --tenant acme01 --role publisher > /secure/camera0.sid
-./sidctl batch --private-key /secure/sid-issuer.key.pem --audit /secure/issued.jsonl \
-  --tenant acme01 --role publisher --count 50000 --out /secure/acme01-001
-./sidctl verify --public-key /secure/sid-issuer.pub.pem \
-  --min-issued <minimum-issued-RFC3339> --sid-file /secure/camera0.sid
-```
+**Why Center decides.** A camera and its viewers must reach the same control
+server process. GeoDNS or a regional load balancer routes each client by its
+own location, so a viewer in Vietnam and a camera in the US would meet on
+different nodes. Center knows where every camera is, so it sends cameras to a
+node of their region and viewers to the camera's node.
 
-The single-issue command writes a raw SID to the selected output file; the batch export contains CSV/XLSX data with raw SIDs plus a digest-only manifest. Protect delivery artifacts as credentials. The private JSONL audit stores digests and issuance metadata, not raw SIDs. Batch issuance appends and syncs audit entries before creating export files. If a later export write fails, audit entries remain for allocated SIDs even though partial output files are removed; treat them as issued and do not assume the operation left no record. `sidctl` does not overwrite existing export paths.
+| Piece | As built |
+| --- | --- |
+| `config.json` (Center) | `nodes` (name, address, region, capacity, link `public_key`, optional `link_from`), `routes` (ISO country → region, `*` default), optional `relays`. Changed only with `matrix-fleet check / apply / rollback`; every version kept in `cfg/config.d/`; reloaded without a restart and pushed to the nodes |
+| Node link | The node opens `wss://matrix.5gen.care/v1/link` on 443 (nyc3 and sgp1 share no private network). Center answers 404 unless the request comes from the node's own IP with a fresh signed header; Center proves itself with its ticket key, the node logs in with its own key. Then `hello`, `camera` changes, `stats` every 60 s (counters, relays, server version and machine load since 2.6.0), signed `config` pushes and `ack`. 5 failures block an IP for an hour |
+| Center down | Nodes keep their last configuration and keep serving connected cameras and viewers; only new activations wait |
+| Relays | `matrix-relay` reports to its region's node (`POST /v1/relay/report`, HMAC-signed) every 15 s: addresses, load, and since 1.2.0 its machine load. The node hands out the least loaded healthy relay of the camera's region plus a backup from another region, with per-session credentials (24 h); it probes UDP, TCP and TLS every 15 s. Without reporting relays it uses `relays` in config.json (violet, fixed credentials) or `cfg/turn.conf` |
+| Limits | Per source address on 443: 20 Center calls/s (burst 200), 300 new connections/min, 50 other requests/s (burst 200), 1,000 open connections; 429 with `Retry-After: 1` |
+| Operations | `matrix-fleet status` (nodes and relays: state, cameras, clients, load, CPU, memory, disk, network, version, config version), `matrix-fleet stats [DAYS]`, `/admin/statistic` per region (30-minute rows for a year, connection log for 30 days, office IP only) |
 
-By default, an SID must be activated within **three years** of issue time; a registered tenant may configure a different activation window. Once activated, an SID does not expire under the current policy. Revocation is a separate online/future entitlement concern; do not infer expiry or current entitlement from the signature alone. Raw SID delivery files are secrets and must be protected and removed after provisioning as operationally appropriate.
+**Not built yet** (see [roll-out.md](roll-out.md)):
+- Several Center instances (a shared activation store, nonces, replay and
+  presence).
+- Cross-node signaling, where a camera and its viewer are on different nodes.
+- Graceful shutdown.
+- Alerting.
+- Pushing revocations over the link.
 
-The SID and Center ticket keys are independent. Never use the SID issuer key to sign tickets. Current SID v2 has no embedded key ID or automatic key rotation; rotating issuer keys requires coordinated public-key provisioning and an explicit migration plan. Rotating the Center ticket key requires all ticket verifiers to trust the replacement key/key ID before issuers begin signing with it. Retain rollback-compatible verifier configuration during the transition and keep old private keys restricted.
+Capacity and cost per fleet size: [capacity.md](capacity.md).
 
-For development, use non-production keys, tenants, activation data, and a local TLS trust setup. Exercise camera activation, ticket scope, wrong-password rejection, password rotation disconnect, and tenant/camera isolation before deployment. Do not use dev/demo admission on a production listener. Confirm persistent activation and password files survive restart and preserve restrictive permissions.
+## Connection analytics
 
-For a production rollout, build a versioned binary, stage config and keys with the target release, then replace one signaling-server instance at a time behind health checks. Confirm Center HTTP routes, WSS admission, player assets, and health on the new instance before draining the next. Roll back the binary and matching configuration together if health, ticket verification, activation persistence, or camera reconnect fails. Preserve activation records and device/password files across binary rollback; restore them from the deployment backup if a migration changed their format. Do not roll back issuer keys or delete activation state as a way to recover service. These are operational recommendations; no automatic migration or rollback mechanism is claimed here.
-
-## Capacity planning and deferred fleet work
-
-A prior planning estimate used **~24 signaling nodes** at 4 vCPU/8 GB for 1.0M cameras plus 30% concurrent viewers, based on a planning density of 60,000 connections/node (stop assignments around 80,000; 100,000 hard ceiling). Scenarios were 20 nodes for cameras-only and ~51 nodes for two simultaneous viewers per camera. These are estimates, not measured capacity; reconnect storms, TLS handshakes, memory, descriptor limits, geography, and real media-session mix must be measured before procurement. The one-process client map means a camera and its viewers must currently reach the same signaling process.
-
-The current approved path is one MainServer address per ticket. Multi-region assignment and camera-to-node routing are planned in the next section. Cross-node signaling (a camera and a viewer on different nodes), globally replicated revocation, and shared ephemeral TURN are separate future work. TURN is not required for initial signaling; any production TURN design must separately specify transport policy, ephemeral credentials, bandwidth sizing, and regional failure behavior. Fleet estimates and options are retained here only as planning context; they are not implemented guarantees.
-
-### Multi-region signaling (planned 2026-10-26; phases 1–2 built and deployed, commit a293c54)
-
-**Goal.** Spread cameras over signaling nodes in several regions. Center stays the one fixed entry point (`matrix.5gen.care`); it decides which node a camera uses and sends viewers to the node that camera is on.
-
-**Why Center-directed and not DNS or a load balancer.** A camera and its viewers must reach the same signaling process (the client map is per process). GeoDNS, anycast, or a regional load balancer routes each client by *its own* location, so a viewer in Vietnam and a camera in the US would land on different nodes and never meet. Only something that knows where the camera is can route the viewer, and that is Center. Signaling latency also matters little: a session exchanges a handful of messages; media goes peer to peer or through TURN. What matters for load is the long-lived camera WebSocket per node, and for quality the TURN relay location (see below).
-
-**Flow.**
-
-1. *Camera.* Every connection attempt starts at Center as today (`/v1/challenge`, `/verify`). Center picks a node: the camera's region from GeoIP of its source address (a country → region table), then the least-loaded healthy node in that region, falling back to the next-nearest region when the region is full or down. It returns that node's WSS address and a ticket whose audience is that node. The camera connects there.
-2. *Node presence.* When a camera registers on a node, the node reports `camera <device_id> online on <node>` to Center; it reports offline when the connection ends. Each node also heartbeats its address, region, connection count, and capacity every few seconds. A node that misses heartbeats is taken out of assignment and its cameras are treated as offline.
-3. *Viewer.* `/v1/view` already returns a MainServer address. It returns the node where the camera is **currently** online (from presence), not where it was first assigned, so failover needs no extra step. A camera that is not online gets a clear "camera offline" answer instead of a ticket. The app connects to the returned address as it does today.
-4. *Failover.* If a camera cannot reach its node, its normal retry goes back to Center, which assigns a healthy node. Assignment is sticky: a camera that reconnects is given the same node while it is healthy and not full, so viewers and caches stay valid.
-
-**Protocol and security changes.**
-
-- *Camera follows the address.* Today the camera signs its own configured origin and refuses any other `main_server_address`. Change: `/v1/challenge` also returns the assigned node address; the camera checks it is `wss://` on an allowed domain list built into the binary (for example `*.5gen.care`), signs it in the activation proof (`"center-activate-v2" || nonce || SHA-256(SID) || node-origin`), and connects to it. Center accepts only proofs over the address it handed out with that nonce. A camera never connects to an address outside its allow list, so a fake or compromised DNS answer cannot send it elsewhere.
-- *Per-node audience.* Center signs tickets with one shared key ID; each node verifies the signature with the shared public key and accepts only tickets whose audience is its own address. A ticket for one node is useless on another.
-- *Node ↔ Center channel.* Presence and heartbeats use an authenticated internal API (per-node token over TLS, or mTLS). Nodes never see the issuer or Center ticket private key.
-- *TURN per region.* Each node hands out its own region's `turn.conf`. Later, Center can give the viewer TURN servers near the camera as well.
-
-**Center itself.** Center must not become the single point of failure or a bottleneck. Every camera reconnect hits it, but the work is small (TLS, two Ed25519 checks, a store lookup). To run more than one Center instance behind `matrix.5gen.care`, the process-local state moves to a shared store: the activation store (today a JSONL file), the challenge nonces, ticket replay, and presence (Postgres for activations, Redis for the short-lived rest). Reconnect storms after a regional outage are already spread by the camera's 25–35 s random wait; Center also needs per-source rate limits.
-
-**Phases.**
-
-| Phase | Scope | Exit test |
-| --- | --- | --- |
-| 1. Redirect | Camera follows the Center-assigned address (allow list, v2 proof); Center returns a configured node address; per-node audience | Dev Center (`webrtc.5gen.care:8443`) sends a camera to prod (`matrix.5gen.care`) and a viewer finds it there |
-| 2. Registry | Node heartbeats and camera presence; Center assigns by region and load; `/v1/view` returns the live node; sticky assignment | Two nodes in two regions; cameras split by region; kill one node, its cameras move and viewers follow |
-| 3. Control plane | One `config.json` on Center with check/apply/rollback; admin over SSH only; Center ↔ node link with pushed config; rate limits; regional relay stream servers chosen by load with expiring credentials (see *Fleet control plane*) | Config change applied to every node without a restart; a node or relay stopped and the fleet routes around it |
-| 4. Shared Center (later) | Activation, nonce, replay in a shared store; two or more Center instances | One Center instance stopped with no camera or viewer impact |
-
-**Phase 1 as built (2026-10-26).** Center flag `-assign-address wss://host:port/` (setup.sh: `ASSIGN_ADDRESS` in `/etc/matrix/matrix.conf`; default `-main-address`). A camera posts `{"proto":3}` to `/v1/challenge` and gets `main_server_address` with the nonce, whose MAC covers that address (`center-challenge-v2`); it proves with `"center-activate-v2" || nonce || SHA-256(SID) || node` and `/verify` body `proto:3` plus `main_server_address`. The ticket audience is that node. Center remembers in memory which node each camera was last sent to and returns it from `/v1/view` and camera lookup (falls back to the assign address after a Center restart until the camera reconnects). The camera accepts a node only on `MATRIX_NODE_DOMAINS` (CMake, default `5gen.care`) or its configured host, and logs `Connecting to MainServer wss://… (assigned by Center)`. Nodes behind one Center must share its `-kid` and ticket key. Test setup: dev `webrtc.5gen.care:8443` runs `-kid matrix-20261023`; it ran `-assign-address wss://matrix.5gen.care:443/` for the phase 1 test (removed 2026-10-27).
-
-Old cameras that sign only their own origin keep working during the change: Center accepts the v1 proof and sends those cameras to the node with their configured address, until the fleet is upgraded.
-
-**Phase 2 as built (2026-10-26, deployed to prod and dev 2026-10-27).** User-facing names: the signaling server is the **control server**, TURN is the **relay stream server**.
-
-- *Nodes file.* Center flag `-nodes-file` (setup.sh: `/opt/matrix/cfg/sid/nodes.json`): `{"nodes":[{"address","region","countries","capacity","token_sha256"}]}`. The Center's own node needs no token and is read in-process; capacity defaults to 60,000 cameras.
-- *Node reports.* Other nodes run `-report-to https://matrix.5gen.care/ -node-token-file FILE` (default address `-main-address` or `-ticket-aud`, or `-node-address`) and `POST /v1/node/report` every 15 s with `Authorization: Bearer <token>` and `{address, cameras:[device IDs], clients, stats}`. A node silent for 50 s is down: no assignments, its cameras count as offline. The full camera list per report is fine for the test fleet; at 60,000 cameras per node it is about 2.7 MB per report, so phase 3 should send changes only.
-- *Assignment.* The camera sends `{"proto":3,"device":"<device id>"}` (an unauthenticated hint). Center keeps it on its current node when that node is healthy, not full and in the camera's region; otherwise it picks the least-loaded healthy node of the region, with the region from the source address's country (`-geoip-file`, DB-IP IP-to-Country Lite CSV, CC BY 4.0, setup.sh `/opt/matrix/cfg/geoip.csv`), or of the whole fleet. Recent assignments count toward load until the node reports. If every node is down or full, it falls back to `-assign-address`/`-main-address`.
-- *Viewers.* `/v1/view` and camera lookup return the Center's own node when the camera is connected there, else the node that reports the camera online, else the node it was last sent to.
-- *Verified locally:* country choice (camera sent to the regional node), viewer sent to the camera's node, fleet counters added up at Center, and failover (node stopped → the camera reconnected to the Center node within about a minute and viewers followed).
-
-### Connection analytics (built and deployed 2026-10-27; mobile app not yet reporting)
-
-After each viewing attempt the camera and the viewer app each send one message on their control server connection; the server counts it and never forwards it:
+After each viewing attempt the camera and the viewer each send one report on
+their control connection. The server counts it, logs it in the connection log
+and never forwards it:
 
 ```json
-{"type":"report","result":"connected","path":"relay","relay_offered":true,"relay_ready":true,"setup_ms":840}
+{"type":"report","result":"connected","path":"relay","relay_protocol":"tcp","relay_offered":true,"relay_ready":true,"setup_ms":840}
 {"type":"report","result":"failed","error":"no_path","relay_offered":true,"relay_ready":false}
 ```
 
 | Field | Values |
 | --- | --- |
 | `result` | `connected` or `failed` |
-| `path` (connected) | `lan` (same network), `direct` (internet, no relay), `relay` (relay stream server) |
-| `error` (failed) | `unauthorized` (wrong password), `camera_offline`, `no_offer` (camera never answered), `no_answer` (viewer never answered within 30 s), `no_path` (no network path, relay included), `timeout`, `closed` (left before connecting), `other` |
-| `relay_offered` / `relay_ready` | the relay stream server was configured / it handed out a relay address (false while offered means the relay server is unreachable or refused the credentials) |
+| `path` (connected) | `lan`, `direct`, `relay` |
+| `relay_protocol` (connected through a relay) | `udp`, `tcp`, `tls` |
+| `error` (failed) | `unauthorized`, `camera_offline`, `no_offer`, `no_answer` (camera side: the viewer never answered), `no_path`, `timeout`, `closed`, `other` |
+| `relay_offered` / `relay_ready` | a relay was offered / it gave an address |
 | `setup_ms` | request to connected |
 
-The role (camera or viewer) comes from the ticket, not the message. Each node also counts what it sees itself: viewer requests forwarded, requests for an offline camera, and connections refused at the ticket check. Counters are kept per UTC day for 31 days (`-stats-file`, saved every minute). Nodes include them in their report, and Center serves the fleet total, a per-day breakdown and per-node totals through `matrix-fleet stats N` on the Center host (admin socket; no longer on the public port). The web player sends the viewer report. The mobile app should send the same message on its control server connection: once per Play, when the session connects (with the path from the selected candidate pair) or fails.
+The role comes from the ticket. The web player and the camera send reports;
+**the mobile app does not yet** ([application_todo.md](../../application_todo.md)).
 
-### Fleet control plane (planned 2026-10-27)
+## Future entitlement and revocation target
 
-**Goal.** Run the fleet from one place. The operator works only on the Control Center (`matrix.5gen.care`): status, statistics and configuration. Configuration is pushed to every control node and applied without a restart; it affects only new camera connections and new viewing sessions. Target hosting is DigitalOcean.
+LicenseServer is a future, separate entitlement service. The target:
+- Center submits SID digests for an online entitlement check, without putting
+  LicenseServer's database in the hot path.
+- If LicenseServer is down, a valid SID is admitted and its check is queued.
+- Digests found invalid are published to a replicated blocklist. If the
+  blocklist cannot be checked, admission fails closed.
+- Active sessions are rechecked at least every 60 minutes.
 
-```
- matrix-eu00.5gen.care            matrix.5gen.care                 matrix-us00.5gen.care
-   control node  ──link──▶   Control Center (+ its own node)  ◀──link──  control node
-        ▲                     config.json, matrix-fleet CLI                    ▲
-   relay (EU)                                                             relay (US)
-```
+None of this is built. Today the blocklist is a file on each server
+(`setup.sh blocklist FILE`), reread without a restart.
 
-Each node opens the link to Center and keeps it open; Center never connects to nodes. Each region's relay stream server reports its load to that region's node.
+## Known limits
 
-**Ports.**
+- **Bearer credentials.** A ticket can be stolen before its first use, and the
+  password check is a shared password, not a user's identity.
+- **The Center is a single instance.** Its state is not backed up off the host
+  yet (roll-out R3).
+- **The blocklist is local.** It is copied to every server by hand and is not
+  a global revocation.
+- **Takeover can be abused.** A copied SID can take over from an offline camera
+  (roll-out R1).
+- **Not yet measured:**
+  - restoring active media sessions after a relay fails
+  - physical ARM behaviour under load
+  - capacity on a real droplet (capacity.md lists what was estimated)
 
-| Port | Use | Reachable by |
-| --- | --- | --- |
-| 443 | Cameras, viewers, activation, viewer tickets, pairing-system admin (`/v1/admin/status`, `/v1/admin/release`) | Everyone |
-| 443 `/v1/link` | Center ↔ node link: presence, statistics, config | Nodes only: the regions can't share a private network, so the link is on the public port and Center answers 404 to anything but a node's own IP with a fresh signature (below). `LINK_LISTEN` can add a private address later. |
-| 22 | Operator: `matrix-fleet` on Center | Operator IPs only |
-| 3478, 5349, relay range | Relay stream server | Everyone |
+## History
 
-Operator commands have no network port: `matrix-fleet` talks to the local server process over a Unix socket (`/run/matrix/admin.sock`, mode 0600).
-
-**`config.json`** (`/opt/matrix/cfg/config.json`, Center only; a superset of the phase 2 nodes file, which stays valid):
-
-```json
-{
-  "nodes": [
-    {"name": "us00", "address": "wss://matrix.5gen.care:443/", "region": "US"},
-    {"name": "eu00", "address": "wss://matrix-eu00.5gen.care:443/", "region": "DE", "capacity": 60000,
-     "public_key": "<node link public key, base64url>"}
-  ],
-  "routes": {"IT": "DE", "FR": "DE", "VN": "ASIA", "*": "US"},
-  "relays": [
-    {"name": "turn-eu00", "region": "DE", "host": "turn-eu00.5gen.care", "port": 3478,
-     "capacity_mbps": 800, "metrics": "http://10.10.0.5:9641/metrics"}
-  ]
-}
-```
-
-- *Routes* map an ISO 3166 alpha-2 country (as the GeoIP data gives it) to a region; `*` is the default. A region with several nodes splits its cameras by load. A camera whose region is down or full goes to the least-loaded region. A node's own `countries` list (phase 2) still works and loses to `routes`.
-- *Relays* carry no secrets. Each node keeps the credentials of the relays it hands out in `cfg/relay-secrets.json` (mode 0600): fixed `{"username","password"}` for violet, or a shared secret for coturn.
-- `version` is stamped by `apply`; the operator does not write it.
-
-**Changing config.**
-
-| Command | What it does |
-| --- | --- |
-| `matrix-fleet check FILE` | Validates (country codes, routes to regions that have nodes, unique names and addresses, keys, relay URLs), prints the difference from the active config and how many online cameras would be placed elsewhere on their next connection |
-| `matrix-fleet apply FILE` | Validates, stamps version N+1, keeps the active file in `cfg/config.d/`, replaces it atomically, reloads Center, pushes to every node and waits for their acks; prints which nodes run which version |
-| `matrix-fleet rollback` | Re-applies the previous file as a new version N+2 |
-| `matrix-fleet status` | Nodes (up/down, cameras, clients, load, config version) and relays (up/down, Mbps, allocations) |
-| `matrix-fleet stats [DAYS]` | Connection counters for the fleet, per day and per node (replaced `GET /v1/admin/stats` on 443) |
-
-A rejected file changes nothing. Cameras that are connected stay where they are.
-
-**Center ↔ node link.** A WebSocket from the node to `wss://<Center>/v1/link` on port 443, TLS verified against the Center's host name.
-
-0. *Gate.* Before upgrading, Center checks the source IP against the node's `link_from` (or its resolved host name) and a signed, timestamped, single-use header (`Matrix-Link-*`). Anything else gets the plain 404 of an unknown path. 5 failures from an IP block it for an hour. Center's challenge is signed with its ticket key over the node's nonce, so the node verifies it reached the real Center.
-
-1. *Node login.* Center sends a random challenge. The node answers within 5 s (first message, at most 1 KB) with its address and an Ed25519 signature over `"matrix-node-link-v1" || challenge || Center host || node address`, made with its own key (`-node-key`, never leaves the node). Center checks it against the node's `public_key` in `config.json`. Removing a node from the config drops its link at once. A node can only report for itself.
-2. *Presence.* After login the node sends `hello` (full camera list, client count, config version), then `camera` messages as cameras come and go, and `stats` every 60 s. Center replaces its view of a node on every `hello`, so a missed change is repaired at the next reconnect. A ping every 10 s; a link with no answer is closed and the node counts as down.
-3. *Config push.* Center sends `{type:"config", version, config, sig}` where `sig` is Ed25519 over `"matrix-config-v1" || version || config` with the Center ticket key (nodes already hold its public key). The node rejects bad signatures and any version not newer than the one it runs, validates the content, saves it (`node-config.json`) and acks; or answers with the error and keeps the old one. `rollback` therefore issues a new version number. Config is data only.
-4. *Center down.* Nodes keep their last config and keep serving connected cameras and viewers. Only new camera activations wait for Center, as today.
-
-Before login a connection gets nothing else; unauthenticated connections are capped. The phase 2 HTTP report (`/v1/node/report`, bearer token) is removed.
-
-**Rate limits on 443.** Per source IP: token buckets on `/v1/challenge`, `/verify`, `/v1/view` and the resolve calls, a cap on concurrent connections, and a cap on WebSocket upgrades per minute; over the limit answers 429. DigitalOcean filters network floods (layers 3 and 4) for free; these limits cover request floods. A DDoS-absorbing HTTPS proxy in front of Center needs no camera change if one is needed later.
-
-**Relay stream servers.** The relay in use is violet (github.com/paullouisageneau/violet). Its options are fixed `--credentials USER:PASS` (each with an allocation `--quota`) and `--max` allocations; it has no shared-secret credentials and no metrics endpoint. The node picks relays for each viewing session: the least-loaded healthy relay of the camera's region, plus one in another region as backup. With violet the relay's fixed credentials are handed out (as `turn.conf` does today; rotate them in violet and `relay-secrets.json` together). With coturn (`use-auth-secret`) credentials are minted per session: user `"<expiry unix time>:<device id>"`, password `base64(HMAC-SHA1(secret, user))`, valid 24 h, so no long-lived password reaches a camera or viewer; getting that with violet needs a shared-secret mode added to it, or coturn. A node with no relays configured keeps sending `cfg/turn.conf` as today.
-
-*Load.* Each node checks its region's relays every 15 s: health by a STUN binding request to the relay port (violet and coturn answer without credentials), bandwidth from `metrics` (node_exporter on the relay host: the busier direction of its network byte counters against `capacity_mbps`; coturn's endpoint also works and adds allocations). Unhealthy or full relays get no sessions; the least loaded wins. Relays from other regions are chosen by capacity only. Nodes include relay measurements in `hello` and `stats`, so `matrix-fleet status` shows every relay.
-
-**DigitalOcean setup.**
-
-- One VPC per region with its own range (for example `10.10.0.0/20` EU, `10.20.0.0/20` US), peered with the Center's VPC. Peered ranges must not overlap; BLR1 has no cross-region peering; droplets created before 2 October 2024 need a manual change for peering.
-- Cloud Firewall: 80, 443 and relay ports from everyone, 22 from operator IPs, nothing else, relay metrics (node_exporter 9100) from the region's node.
-- A Reserved IP for Center, so `matrix.5gen.care` survives a droplet replacement.
-- A node outside DigitalOcean joins over WireGuard; nothing else changes.
-
-**Built so far.** (3) `config.json` with routes, `matrix_cc fleet check|apply|rollback` (the `matrix-fleet` wrapper on Center), reload on SIGHUP (`systemctl reload matrix`); `-config-file` replaces `-nodes-file` (kept as an alias); setup.sh moves `cfg/sid/nodes.json` to `cfg/config.json`. (4) `-admin-socket /run/matrix/admin.sock` (systemd `RuntimeDirectory`, mode 0600): `matrix-fleet status`, `stats [DAYS]` (`-json` for scripts), `apply`/`rollback` reload through it and print the version the server took, `check` counts the online cameras that would move (from the country each camera last activated from; cameras connected before a Center restart are reported as unknown). `GET /v1/admin/stats` is removed from 443; `/v1/admin/status` and `/v1/admin/release` (pairing system) stay. (5) the link as specified above: Center `-link-listen HOST:PORT [-link-name]` (setup.sh `LINK_LISTEN`), node `-link-to wss://host:port/ [-link-server-name] [-link-ca] -node-key FILE [-node-address] [-node-config-file]`; `matrix_cc fleet keygen|pubkey`; nodes are up while linked (no 50 s staleness); a new `public_key` or removal drops the link; `token_sha256` and `-report-to`/`-node-token-file`/`/v1/node/report` are gone (an old `token_sha256` still parses, with a warning). (6) per-source limits on the public port, on by default: `-rate-api 20` Center calls/s (burst 10x), `-rate-connect 300` new connections/min (burst the same), `-rate-web 50` other requests/s (burst 4x), `-conns-per-source 1000` open connections, `-rate-exempt CIDRs`; IPv6 counted per /64; over the limit answers 429 with `Retry-After: 1` and counts `rate_limited` in the statistics. The bursts allow every camera behind one carrier NAT address to reconnect after a restart. Behind a TLS proxy, exempt the proxy (the limits see its address). (7) `relays` in config.json (`name`, `region`, `host`, `port` default 3478, `capacity_mbps` default 1000, `metrics`); each server keeps their secrets in `cfg/relay-secrets.json` (owner-only, `setup.sh relay-secrets`), read per request; per viewing session the camera gets the relay of its node's region plus a backup from another region (random, weighted by capacity, until step 8 measures load), with coturn REST credentials valid 24 h; the camera's `turn` list format is unchanged, so cameras and the player need no update; without relays or secrets `cfg/turn.conf` is used as before. (8) relay health and load as described under *Load*; relay credentials may also be fixed `{"username","password"}` for violet; `matrix-fleet status` lists relays (state, Mbps/capacity, allocations, which node measured them). Verified: the STUN probe gets an answer from the violet relay at `webrtc.5gen.care:3478`. `setup.sh install-node` installs a control node (role `ROLE=node` in `/etc/matrix/matrix.conf`; `upgrade` keeps each role's unit); `setup.sh blocklist FILE` replaces the blocklist after `matrix_cc fleet blocklist-check`. Center answers a node's login with `welcome`; only then does the node count itself linked.
-
-**Build order.** (1) this design; (2) server binary named `matrix_cc_<version>`, installed as `matrix_cc`; (3) `config.json` with routes and `check`/`apply`/`rollback`; (4) admin socket, `status`/`stats`, `/v1/admin/stats` leaves 443; (5) the link; (6) rate limits; (7) relays with expiring credentials; (8) relay load. Then the DigitalOcean move and a failover drill.
-
-### Future entitlement and revocation target
-
-LicenseServer is a separate future service and entitlement system of record; it is not the Center handler or another role of the current signaling-server binary. The target design is for Center to verify SID cryptography and activation policy, then submit SID digests for online entitlement evaluation without putting LicenseServer's database in the signaling hot path. If LicenseServer is unavailable, the intended availability policy is to allow a cryptographically valid, otherwise admissible SID and queue its digest check durably. After recovery, queued checks are drained and invalid, expired, or revoked digests are published to a highly available replicated Redis blocklist. If the blocklist itself cannot be checked, protected admission must fail closed.
-
-MainServer admission checks the blocklist at connect time. The production revocation target is to recheck active sessions at least every **60 minutes** and terminate sessions whose digest has been blocked; a shorter notification path may later improve revocation latency. A durable retry queue, LicenseServer, HA Redis deployment, global replication, and periodic active-session enforcement are future design targets, not capabilities of the current local blocklist implementation. This future service design does not imply a separate Center binary or port.
-
-## Verified implementation scope and limits
-
-Go race tests, vet, builds, and shared-listener HTTPS/WSS integration passed. Camera authentication tests and ARM cross-builds also passed; ARM tests were compiled but not executed. The PC build dependency was repaired by exporting the committed usrsctp source into a temporary build and installing its x86 library/header, preserving the dirty submodule. The original ARM build remains in `libdatachannel_c14/build.arm-preserved-20261013-134621`.
-
-### Camera CLI verification (2026-10-13)
-
-The revised camera CLI was built for x86 with the existing SID trust key/cutoff and `NO_TESTS=ON`. Direct camera-password/device-key tests passed, including concurrent creation and unsafe-file rejection. Isolated tests of the compiled streamer verified first-run `5genwebrtc`, private file permissions, unchanged files on restart, custom password setup before first startup, password rotation preserving the device key, missing/malformed established verifiers failing closed, FIFO/symlink rejection, and password byte limits. An independent Argon2 library verified the emitted PHC files.
-
-A temporary local TLS signaling server and compiled camera completed same-port HTTPS activation and WSS admission using only `-d`/`-p` for the address. The server received the camera nickname while the 43-character key-derived ID matched its activation record. The full Go race suite and focused nickname registration test passed. The server nickname changes were subsequently deployed to the VPS from commit `979fa74`, as recorded below. The camera CLI binary/config now runs under PM2 on the PC, with its existing device key and current password preserved during migration. Physical ARM validation remains pending.
-
-## Current verified development deployment (2026-10-14)
-
-The dev-only release `9a0a800` is online on the isolated HTTPS/WSS listener at 8443. Deployment, automated checks, and the final live camera/viewer probe are verified.
-
-| Item | Verified location/configuration |
-| --- | --- |
-| Source commit/release | `9a0a800` / `release-9a0a800-9a39d1d0` |
-| Remote binary | `/home/admin/webrtc-dev-sid/signaling-server`; SHA-256 `a10fb436ef52573ed2eec958f10b9849d530d6260dcf441012138866980ca7a7` |
-| Remote player | `/home/admin/webrtc-dev-sid/player/ws.html`; SHA-256 `0b8d6618200d2914bf8f4838eee5c8f9920c74b7825dd9e03a7da6e00495f015` |
-| Dev process | PM2 `webrtc_dev`, PID 537677, online on HTTPS/WSS port 8443, version 2.1.1 |
-| PC camera | PM2 `webrtc_camera`, PID 2460215; source `1b0af67e`, tree matches commit `5a2bd02c`; runtime SHA-256 `501301e51750870555e606fb998df9b826b5418225ce32cb351e4869089b18c6` (unchanged) |
-| Rollback | `/home/admin/webrtc-dev-sid/backups/release-9a0a800-9a39d1d0/` |
-
-The final TLS-verified probe passed public health (`ok`, version 2.1.1), public player hash parity, discovery of one `Front door` camera with a 118-character SID, `/v1/view`, WSS admission, viewer nickname-registration rejection, wrong-password rejection, correct-password camera offer (1692 SDP bytes), and consumed-ticket replay rejection. The camera reconnected after two Center retries without a restart or PID change. Final dev PID 537677 ran the expected binary SHA-256; production PID 430487/restarts 3 and activation-store SHA-256 `24a825a74ae04a16abdae32a4065f290c45f89bc0a5cee857a1280332e8bc58e` remained unchanged. Root verified Go tests, admission race tests, `go vet`, build, and JavaScript syntax.
-
-The recovery branch `codex/pre-dev-redeploy-20261014` remains at `9a0a800`. The final amend on `main` contains deployment documentation only; compiled application source remains `9a0a800`, so no rebuild or process restart is needed. Keep `origin/main..HEAD` at one commit. Root will update the remote release-manifest commit mapping to the amended HEAD. The previous release's browser and camera validation below remains historical evidence only.
-
-## Previous verified development deployment (2026-10-14; historical)
-
-The previous dev release was `70d5820` (`release-70d5820-af0a0bd2`), with binary SHA-256 `52f8478c7dda94699706f428f794f3508edc703831ffb7b9478a3337500d8294`, player SHA-256 `0b8d6618200d2914bf8f4838eee5c8f9920c74b7825dd9e03a7da6e00495f015`, and PM2 dev PID 536018. Its rollback files are at `/home/admin/webrtc-dev-sid/backups/release-70d5820-af0a0bd2/`.
-
-That release's discovery returned one `Front door` card. Its 118-character registered SID matched the digest in the authenticated camera ticket; the response used `Cache-Control: no-store`, and the SID value was not recorded. A browser test selected the card, showed a wrong-password error, then connected with the current password and rendered advancing 640x360 video. The TLS-verified probe passed `/v1/view`, WSS admission, wrong-password rejection, current-password offer generation (1691 SDP bytes), and consumed-ticket replay rejection. The camera SID, device key, and password verifier were unchanged. These results apply to release `70d5820`, not the current release.
-
-## Historical development deployment (2026-10-13)
-
-This section preserves earlier release-specific server deployment and PC/browser validation evidence. Its process IDs, hashes, and no-SID discovery behavior describe the 2026-10-13 releases, not the current runtime.
-
-| Item | Verified location/configuration |
-| --- | --- |
-| Remote binary | `/home/admin/webrtc-dev-sid/signaling-server` |
-| Process/listener | PM2 `webrtc_dev`, HTTPS and WSS on 8443, version 2.1.1 |
-| Public test URL | `https://webrtc.5gen.care:8443/` |
-| Remote config | `/home/admin/webrtc-dev-sid/pm2_start.json` (dev-only app) |
-| Rollback backup | `/home/admin/webrtc-dev-sid/backups/release-979fa74-3def9a5b/` (binary, player, prior configuration and manifest) |
-| Binary SHA-256 | `8360c18b36697cab8a4ada202477f1f0fcbb6a8e1d473523791e535b19028ed7` (staged and running executable matched) |
-| Deployed source commit | `979fa74` |
-| Player | Source `979fa74`; served SHA-256 `64c7b3973c9c5db424ddb11aecf329bb6e03c6f64c05c6a5231660659d2279a8` |
-| PC camera | PM2 `webrtc_camera`, compiled x86-64 `libdatachannel_c14/build/examples/streamer/streamer`, version 2.1.1; runtime SHA-256 `ddfbf0399b94c84e9310d7c10007f27b10eb06f89dc204c439aa7134efead6d2` |
-| Private camera runtime | `libdatachannel_c14/.runtime/camera/` (private, gitignored SID/auth/recordings/PID/rollback directory); original test inputs/media PID files remain under `/tmp/webrtc-oneport-NDJJcA/` |
-
-Repository PM2 files: `server/pm2_start.json` keeps the production app configuration intact and defines the compiled dev app; `libdatachannel_c14/pm2_start.json` defines the new camera CLI using PC paths under `.runtime/camera/`, with nickname `Front door` and talkback disabled. The existing SID, device key, and current verifier were migrated byte-for-byte into mode-0600 files under private mode-0700 directories. PM2 `webrtc_camera` (PID 1940520 at verification, zero restarts) replaced manual PID 1783059 while retaining the existing synthetic video/audio feeder processes. The dev server remained online during this camera startup.
-
-Historical dev picker verification for release `979fa74`: `-discovery-tenant test01` was enabled on `webrtc_dev`; that release's public device list returned exactly the online camera `Front door` without SID, digest, password, or ticket fields. The browser displayed its card, and clicking it selected the matching key-derived device ID. Full Go race tests, vet, build and JavaScript syntax checks passed; anonymous WSS and camera-scope restrictions remained enforced. Screenshot proof: `/tmp/webrtc-dev-release/camera-picker.png`. Production configuration and process were unchanged. The no-SID result describes that earlier release behavior; current discovery may include an authenticated SID as described above.
-
-Post-deployment verification: PM2 `webrtc_dev` online (PID 531937 at verification), local TLS health and public HTTPS health `ok`/2.1.1, running executable and served player matched the release hashes. Production PID 430487 and restart count 3 remained unchanged. Activation-store byte count was unchanged. The PC camera connected successfully under PM2; a TLS-verified live probe passed `/v1/view`, WSS admission, viewer nickname-registration rejection, wrong-password rejection, a correct-password camera offer (1,691 SDP bytes with the newly started PM2 camera), and consumed-ticket replay rejection (401).
-
-The deployment uses an isolated test tenant and SID; it does not reuse a real camera's SID. The issuer private key remains local to its issuer. The ticket-signing key was generated on the VPS and remains there; this update retains it. The existing production process on 443 was not restarted. The dev player defaults its HTTP, Center, and WSS host/port to its page origin, so loading the 8443 page does not silently select production 443.
-
-Earlier PC/browser validation on this date: camera activation; HTTPS `/v1/view`; TLS-verified ticket-admitted WSS; missing-password rejection (`Invalid request`); wrong-password rejection (`Unauthorized`); correct-password camera offer; consumed-ticket replay rejection (401); decoded 640x360 synthetic H.264 video and received 8 kHz PCMA audio. Password rotation during active playback stopped video/audio, rejected the old password, and allowed the new password to resume playback without changing SID or device identity.
-
-Synthetic feeds use local UDP inputs 8553 (H.264, single encoder thread/slice) and 8552 (PCMA). The camera is supervised by PM2 `webrtc_camera`; `.runtime/camera/camera.pid` records its PID at verification. Original `streamer.pid` was updated to this PM2 PID, while `video.pid` and `audio.pid` still identify the unchanged feeder processes. Verification used host-to-host LAN media; it does not establish TURN/WAN behavior, microphone/talkback, physical-camera behavior, power-loss durability, ARM memory/latency, production capacity, or cross-instance activation/replay consistency. The activation store and replay cache remain process-local; fleet consistency requires additional work before multiple independent Center instances share a load balancer.
-
-Other limits: Center rate limiting and production fleet routing are deferred; ticket bearer theft before first use remains possible; external systems own password distribution and change authorization; camera password checking is shared-password authorization, not user identity; a locally configured blocklist is not global revocation. Do not infer expiration or global revocation from signature validation alone.
+- 2026-10-13/14: first dev deployments on `webrtc.5gen.care:8443`, PM2. The
+  verification logs, hashes and PIDs are in git history.
+- 2026-10-19: SID pool and release.
+- 2026-10-26/27: multi-region phases 1–2, then the fleet control plane; the
+  Center moved to DigitalOcean.
+- 2026-11-03: `matrix-relay` with relay reports, statistics and the
+  connection log.
+- 2026-11-04: SID takeover (2.5.0) and machine load (2.6.0).

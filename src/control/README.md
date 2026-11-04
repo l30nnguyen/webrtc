@@ -1,93 +1,48 @@
-# Go Signaling Server
+# matrix_cc: Control Center and control server
 
-High-performance WebSocket signaling server for WebRTC peer connections with HTTP REST API.
+One Go binary for every server role: the Control Center (`-center`), the
+control server that cameras and viewers connect to, the node link, the
+statistics and the `fleet` admin commands (`matrix-fleet` on the servers).
+`cmd/sidctl` issues SIDs; `cmd/loadtest` drives load tests.
 
-## Features
+The contract (SID format, activation, viewing, credentials, the fleet) is in
+[sid_licensing_architecture_v2.md](../../design/sid_licensing_architecture_v2.md);
+every endpoint is in [endpoints.md](../../design/endpoints.md).
 
-- **Single binary** - no dependencies, easy deployment
-- **High performance** - 5-10x more connections than Python version
-- **Built-in TLS** - no nginx required
-- **Serves player** - ws.html available at `/`
-- **Direct close propagation** - clients detect disconnections immediately
-
-## Installation
-
-```bash
-cd src/control
-go mod download
-```
-
-## SID licensing and Center
-
-The authoritative SID format, issuance and key management, camera activation and viewing, Center configuration, and password handling are documented in [SID licensing architecture](../../design/sid_licensing_architecture_v2.md). Center APIs run on the ordinary `signaling-server` binary and its configured HTTPS/WSS listener; there is no standalone Center executable.
-
-## Usage
-
-### Build MainServer
+## Build and test
 
 ```bash
-go build -o signaling-server ./src
+go vet ./... && go test -race ./...
+go build -o matrix_cc ./src
+go build -o sidctl ./cmd/sidctl
 ```
 
-### Start the server
+Release packages (`../../release/make_release.sh`) name the binary
+`matrix_cc_<version>`; `setup.sh` installs it as `/opt/matrix/matrix_cc`.
+
+## Run
+
+`./matrix_cc -h` lists every flag. On the servers, `setup.sh` builds the
+command line from `/etc/matrix/matrix.conf` (see `../../release/README.md`).
+The flags used most:
+
+| Flag | Use |
+| --- | --- |
+| `-port` (8000), `-root`, `-https` | Listener; with `-https` the certificate is `<root>/cert.pem` |
+| `-center`, `-sid-public-key`, `-center-private-key`, `-kid`, `-tenants-file`, `-activation-store`, `-admin-token-file` | Center APIs |
+| `-ticket-public-key`, `-ticket-kid`, `-ticket-aud`, `-blocklist-file` | Ticket admission (every server) |
+| `-config-file`, `-geoip-file`, `-admin-socket` | Fleet on the Center (`config.json`, `matrix-fleet`) |
+| `-link-to`, `-node-key`, `-node-address`, `-node-config-file` | A control node's link to the Center |
+| `-relay-dir`, `-statistic-dir`, `-statistic-allow`, `-event-dir`, `-stats-file` | Relay reports, statistics, connection log |
+| `-rate-api`, `-rate-connect`, `-rate-web`, `-conns-per-source`, `-rate-exempt` | Limits per source address |
+| `-discovery-tenant`, `-player-allow` | The demo player and camera list (demo only) |
+| `-demo-tenant` | **Development only:** unauthenticated players |
+
+A local run without TLS, for development:
 
 ```bash
-# With HTTPS (uses cert.pem from root directory)
-./signaling-server -root ../.. -port 8000 -https
-
-# Without HTTPS (HTTP only)
-./signaling-server -root ../.. -port 8000
+go run ./src -root ../.. -port 8000
 ```
 
-### Flags
-
-| Flag | Default | Description |
-|------|---------|-------------|
-| `-port` | 8000 | Listen port |
-| `-root` | "" | Root directory for config, downloads, and cert.pem |
-| `-https` | false | Enable HTTPS (uses cert.pem from root directory) |
-| `-ticket-public-key` | disabled | Center PKIX Ed25519 public-key PEM; enables ticket admission for every client |
-| `-ticket-kid` | disabled | Required key ID pinned in Center-issued JWT tickets |
-| `-ticket-aud` | disabled | Exact WSS root URL audience, such as `wss://signal.example.com:8000/` |
-| `-blocklist-file` | disabled | Required blocklist (SID digests, `tenant:NAME` lines, and `device:ID EXPIRY` lines that Center writes on release); can be empty. Nodes also drop open connections that become blocked, on a 30 s sweep |
-| `-admin-token-file` | disabled | File with the pairing system's bearer token (32+ bytes, mode 0600). With `-center` it enables `POST /v1/admin/status` and `POST /v1/admin/release` (body `{"sid_digest":"<hex>"}`); without it those routes return 404 |
-| `-demo-tenant` | disabled | DEV ONLY: unauthenticated `Player*` clients join this tenant |
-
-### Run without building
-
-```bash
-go run ./src -root ../.. -port 8000 -https
-```
-
-## API Endpoints
-
-| Endpoint | Description |
-|----------|-------------|
-| `WS /{client_id}` | WebSocket signaling endpoint |
-| `GET /api/devices` | List connected devices (query: `?type=producer`); with tenancy it lists only the demo tenant and is hidden if there is none |
-| `GET /api/health` | Health check with client count |
-| `GET /` | WebRTC Player (ws.html) |
-| `GET /downloads/{filename}` | Download files from downloads folder |
-
-## Capacity
-
-| RAM | Max Connections | Safe Production |
-|-----|----------------|-----------------|
-| 2GB | ~100,000+ | ~50,000-80,000 |
-| 4GB | ~200,000+ | ~100,000-150,000 |
-
-See [root README](../../README.md) for detailed capacity analysis.
-
-## PM2 Integration
-
-```bash
-pm2 start pm2_start.json
-```
-
-## Advantages over Python
-
-- **5-10x less memory per connection** (15KB vs 100KB)
-- **Multi-core utilization** (Python is single-threaded)
-- **Lower GC pressure** (no Python object overhead)
-- **Faster message routing** (compiled vs interpreted)
-- **No nginx required** (built-in TLS)
+Measured capacity: about 56 KB per connection, 5,000 cameras on a 1 GB node
+([capacity.md](../../design/capacity.md)).

@@ -6,7 +6,10 @@ reference server is the SG control node **sg00**: DigitalOcean Basic Regular,
 1 TB of outbound transfer a month.
 
 Re-run with `tools/capacity/` and add a line to [Tracking](#tracking) when the
-code, the droplet type or the assumptions change.
+code, the droplet type or the assumptions change. Since server 2.6.0 and
+`matrix-relay` 1.2.0, every server records its own CPU, memory, disk and
+network (`matrix-fleet status`, `/admin/statistic`), so the estimates below can
+be checked against real droplets under real load.
 
 ## Result
 

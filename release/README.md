@@ -147,9 +147,19 @@ sudo matrix-fleet -json stats 7 # the same as JSON
 
 ## Relay stream servers per region
 
-With `relays` in config.json, each viewing session gets the relay of the
-camera's region (the region of the node it is on) plus one from another region
-as a backup.
+**Reporting relays (`matrix-relay`, the replacement for violet).** A relay
+started with `-control https://<its region's node> -name relay-xx01 -region XX`
+reports to that node every 15 s (addresses, load, version, machine load). It
+needs no entry in config.json, only its shared secret under its name in the
+node's `cfg/relay-secrets.json` (`{"relay-xx01": "<shared>"}`). The node then
+hands it out with per-session credentials, adds its TCP and TLS URLs to the
+offer, and shows it in `/admin/statistic` and `matrix-fleet status`. Install
+steps: `server/INSTALL.md` in the release folder; details in
+`src/relay/README.md`.
+
+**Relays listed in config.json** (violet, coturn): with `relays` in
+config.json, each viewing session gets the relay of the camera's region (the
+region of the node it is on) plus one from another region as a backup.
 
 ```json
 "relays": [
@@ -162,7 +172,7 @@ Every server that hands a relay out keeps its credentials in
 `/opt/matrix/cfg/relay-secrets.json` (owner `matrix`, mode 0600;
 `sudo ./setup.sh relay-secrets FILE`), read on each viewing request:
 
-- **violet** (what we run) has fixed credentials only:
+- **violet** (production until `matrix-relay` takes over) has fixed credentials only:
   `{"turn-vn00": {"username": "matrix", "password": "<the --credentials password>"}}`.
   The same pair goes to every session, as with `cfg/turn.conf`; change it in
   violet's config and in this file together to rotate it.

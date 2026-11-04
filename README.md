@@ -1,222 +1,66 @@
-# WebRTC Signaling Server
+# Matrix server
 
-Python WebSocket signaling server for WebRTC peer connections with HTTP REST API.
+The servers of the matrix camera service. User-facing names: the signaling
+server is the **control server**, TURN is the **relay stream server**.
 
-For the current SID licensing, camera viewing, Center deployment, and credential contract, see [SID licensing architecture](design/sid_licensing_architecture_v2.md).
+| Folder | What |
+| --- | --- |
+| `src/control` | `matrix_cc` (Go): the Control Center (SID activation, viewer tickets, node assignment, pairing-system admin), the control server (camera and viewer WebSockets), the node link, statistics, `matrix-fleet`; and `sidctl` (SID issuing, on the administrator's machine) |
+| `src/relay` | `matrix-relay` (Go, pion/turn): the relay stream server over UDP, TCP and TLS, reporting to its region's control node |
+| `player/ws.html` | Web player (demo at `/demo/<tenant>`, office IP only) |
+| `release/` | `make_release.sh` (the package), `setup.sh` (install, install-node, upgrade on a droplet), `README.md` (operating guide) |
+| `cfg/version` | Server version (2.6.0) |
+| `tools/capacity/` | Load tests behind `design/capacity.md` |
+| `design/` | Architecture and plans (below) |
 
-## Capacity Estimation
+## Documents
 
-**Hardware:** EC2 t3.micro (1GB RAM) / t3.small (2GB RAM)
+| Document | Contents |
+| --- | --- |
+| [design/sid_licensing_architecture_v2.md](design/sid_licensing_architecture_v2.md) | The SID and viewing contract, credentials, the fleet as built |
+| [design/endpoints.md](design/endpoints.md) | Every endpoint and message, by caller |
+| [design/roll-out.md](design/roll-out.md) | Versions, code review, the 2026-10-08 strategy review, parity with vrelay, plan and rollback |
+| [design/capacity.md](design/capacity.md) | Measured limits, servers for 1K–1M cameras, DigitalOcean cost per camera |
+| [design/vrelay_parity_gap.md](design/vrelay_parity_gap.md) | Product decisions against vrelay and the status of each item |
+| [release/README.md](release/README.md) | Installing and operating a Center, a node, relays and the fleet |
+| [src/relay/README.md](src/relay/README.md) | The relay, its reports, the statistics and the connection log |
+| [../application_todo.md](../application_todo.md) | What the mobile app implements, with [details and tests](../application_todo_details.md) |
 
-### Python (Current Implementation)
-
-| RAM | Max Connections | Safe Production |
-|-----|----------------|-----------------|
-| 1GB | ~8,000 | ~2,000-5,000 |
-| 2GB | ~17,000 | ~10,000-12,000 |
-
-### Go (Recommended for High Scale)
-
-| RAM | Max Connections | Safe Production |
-|-----|----------------|-----------------|
-| 1GB | ~50,000 | ~30,000-40,000 |
-| 2GB | ~100,000+ | ~50,000-80,000 |
-
-**Why Go is 5-10x more efficient:**
-
-| Metric | Python | Go |
-|--------|--------|-----|
-| Per-connection memory | ~80-100 KB | ~10-20 KB |
-| Concurrency overhead | ~10 KB | ~2-4 KB |
-| Network buffers | ~64 KB | ~8-16 KB |
-| Concurrency model | Single-threaded (GIL) | True parallel (goroutines) |
-| CPU utilization | 1 core max | All cores |
-| Message routing | Interpreted | Compiled |
-
-For signaling servers with many idle connections, Go is ideal. Libraries like `gorilla/websocket` handle 100K+ connections easily.
-
-### Resource Breakdown (Python)
-
-| Resource | Limit | Calculation |
-|----------|-------|-------------|
-| RAM | ~8,000 | 1GB - 200MB (OS) - 40MB (Python) = 760MB / ~100KB per conn |
-| File descriptors | ~1,000 | Default ulimit 1024 (must raise to 65536) |
-| CPU | Not bottleneck | Single-threaded asyncio; keepalive = 1 ping/30s/conn |
-| Network | Not bottleneck | Signaling messages are tiny (~1-2KB) |
-
-### Per-Connection Memory
-
-| Component | Size |
-|-----------|------|
-| WebSocket protocol object | ~10 KB |
-| asyncio task (keepalive_loop) | ~2 KB |
-| TCP socket buffers (OS) | ~64 KB |
-| dict entries (clients + device_info) | ~1 KB |
-| **Total** | **~80-100 KB** |
-
-### Practical Limits
-
-| Scenario | Max Connections |
-|----------|----------------|
-| Without raising ulimit | ~900 (fd-limited) |
-| With `ulimit -n 65536` | ~5,000 (RAM-limited) |
-| Safe production number | ~2,000-3,000 (headroom for spikes) |
-
-### Why CPU Is Not a Concern
-
-The workload is I/O-bound, not compute-bound:
-- 5,000 connections x 1 ping/30s = ~167 pings/sec (trivial for asyncio)
-- Signaling messages are infrequent (only during connection setup)
-- No media processing — the server only relays small JSON messages
-
-### Bottleneck Order
-
-```
-file descriptors → RAM → CPU
-```
-
-To increase capacity:
-1. Raise file descriptor limit: `ulimit -n 65536`
-2. Add more RAM (each additional 1GB ≈ +8,000 connections)
-3. CPU upgrade has minimal impact (already sufficient)
-
-## API Endpoints
-
-| Endpoint | Description |
-|----------|-------------|
-| `WS /{client_id}` | WebSocket signaling endpoint |
-| `GET /api/devices` | List connected devices (query: `?type=producer`) |
-| `GET /api/health` | Health check with client count |
-| `GET /downloads/{filename}` | Download files from downloads folder |
-| `GET /` | WebRTC Player (ws.html) |
-
-## Usage
-
-### Control server (`src/control`)
+## Build and test
 
 ```bash
-cd src/control
-go mod download
-go run src/signaling-server.go -port 8000 -cert cert.pem -player ../../player/ws.html
+cd src/control && go vet ./... && go test -race ./...
+cd src/relay && go vet ./... && go test -race ./...
+release/make_release.sh          # dist/matrix-server-<version>-<commit>.tar.gz
 ```
 
-Build binary:
-```bash
-cd src/control
-go build -o signaling-server src/signaling-server.go
-./signaling-server -port 8000 -cert cert.pem -player ../../player/ws.html
-```
+`matrix_cc -h` lists every flag. On the servers `setup.sh` writes them into
+the systemd unit from `/etc/matrix/matrix.conf`.
 
-Flags:
-- `-port`: Listen port (default: 8000)
-- `-cert`: TLS cert+key PEM file (optional, enables WSS)
-- `-player`: Path to ws.html (default: player/ws.html)
-
-See [src/control/README.md](src/control/README.md) for details.
-
-### Relay stream server (`src/relay`)
-
-See [src/relay/README.md](src/relay/README.md).
-
-## PM2 Integration
+## Deploy
 
 ```bash
-pm2 start pm2_start.json
+./deploy.sh prod   # Control Center matrix.5gen.care (DO nyc3); asks you to type "prod"
+./deploy.sh sg     # control node matrix-sg00.5gen.care (DO sgp1)
+./deploy.sh dev    # the dev VPS (PM2 webrtc_dev, 8443; stopped since 2026-10-27)
 ```
 
-The default configuration uses the Go server.
+- Each target builds the package and refuses uncommitted changes in
+  `src/control`, `player/ws.html`, `cfg/version` or `release/`.
+- It uploads the package and checks its checksum before anything changes.
+- **prod/sg** run `setup.sh upgrade`, which keeps the configuration, keys and
+  data and backs up the previous binary to `/opt/matrix/backups/<time>/`.
+- Each target ends with a health check.
 
-## Deploying to the VPS
+New droplets: `release/README.md`, and `server/INSTALL.md` in the release
+folder.
 
-Run `deploy.sh` from your machine with an explicit target. Both targets build
-one release package with `release/make_release.sh`
-(`dist/matrix-server-<version>-<commit>.tar.gz`, see
-[release/README.md](release/README.md)) and deploy that same package:
+`webrtc_prod` on the dev VPS is a separate process under tester evaluation.
+It is not a deploy target; don't touch it.
 
-```bash
-./deploy.sh dev    # dev VPS: PM2 webrtc_dev, /home/admin/webrtc-dev-sid, port 8443
-./deploy.sh prod   # matrix.5gen.care VPS: setup.sh upgrade (systemd matrix.service); asks you to type "prod"
-```
+## Legacy
 
-- The build refuses uncommitted changes in `src/control`, `player/ws.html`, `cfg/version` or `release/`, uses the toolchain pinned in `src/control/go.mod`, and stops on a build failure.
-- The package is uploaded to `~/releases/` on the VPS and its checksum is verified before anything changes.
-- **dev** installs the package's binary and player, backs up the old ones to `backups/release-<version>-<commit>-<time>/`, writes `release.json`, and restarts only `webrtc_dev` with the arguments already registered in PM2 (`pm2_start.json` is not reapplied).
-- **prod** runs the package's `setup.sh upgrade`, which keeps `/etc/matrix/matrix.conf`, keys and data, backs up to `/opt/matrix/backups/<time>/`, and restarts `matrix.service`.
-- Both end with a health check and print how to roll back if it fails. Override the host or key with `DEPLOY_HOST` and `DEPLOY_KEY`.
-
-The old `webrtc_prod` on the dev VPS is not a `deploy.sh` target.
-
-## TLS certificate renewal
-
-`renewcert.sh` checks and renews `webrtc.5gen.care` through nginx's HTTP-01
-webroot at `/var/www/certbot`, then atomically writes `cert.pem` as the current
-`fullchain.pem` plus `privkey.pem`. It uses an explicit
-`certbot certonly --webroot` request every time, rather than `certbot renew`,
-so a stale standalone renewal configuration cannot conflict with nginx on port
-80. Before starting Certbot, it creates the challenge directory if needed and
-verifies that a local TCP listener is active on port 80. It restarts the PM2
-applications only when that generated file differs from the one currently
-served.
-
-Run it daily as root. It restarts PM2 as the owner of the deployment directory
-(for example, `admin` for `/home/admin/webrtc`), so it uses that user's PM2
-daemon rather than creating `/root/.pm2`:
-
-```bash
-0 0 * * * /home/leon/code/webrtc/server/renewcert.sh >> /var/log/webrtc-cert-renewal.log 2>&1
-```
-
-The deployed nginx site must serve this path from the same webroot:
-
-```nginx
-location /.well-known/acme-challenge/ {
-    root /var/www/certbot;
-}
-```
-
-If an earlier deployment failed with `certbot webroot does not exist`, pull the
-updated script and run it again as root. It creates
-`/var/www/certbot/.well-known/acme-challenge` safely when absent:
-
-```bash
-git pull
-sudo ./renewcert.sh
-```
-
-If it reports no listener on port 80, start or repair nginx before retrying.
-The command is safe to use to inspect that listener:
-
-```bash
-sudo ss -ltnp 'sport = :80'
-sudo ./renewcert.sh
-```
-
-The script restarts `webrtc_prod` and `webrtc_dev` by default because nginx
-redirects public HTTP traffic to port 8443. On a host that uses different
-process names, set them explicitly, for example
-`PM2_APPS=signaling-prod renewcert.sh`.
-
-If the script is deployed in a root-owned directory but PM2 belongs to another
-account, set that account explicitly. This also supports a deliberate
-root-owned PM2 deployment:
-
-```bash
-sudo PM2_USER=admin /home/admin/webrtc/server/renewcert.sh
-sudo PM2_USER=root PM2_USER_HOME=/root PM2_HOME=/root/.pm2 ./renewcert.sh
-```
-
-If an older version published `cert.pem` but failed to restart PM2, the
-running Go server still presents its old in-memory certificate. Repair that
-state once after pulling this update:
-
-```bash
-sudo FORCE_RESTART=1 ./renewcert.sh
-```
-
-The script records a pending restart after each certificate publication and
-retries it on the next run if PM2 fails. `FORCE_RESTART=1` is only needed to
-recover publications made by the older script, which did not leave that marker.
-
-For compatibility the generated PEM keeps mode `644`. If the signaling server
-runs under a dedicated group, set `CERT_MODE=640` and grant that group read
-access to the file.
+`renewcert.sh` renews the dev VPS certificate (`webrtc.5gen.care`) through
+nginx and restarts its PM2 apps. The DigitalOcean servers don't use it: they
+renew with certbot and a deploy hook (`setup.sh`). `pm2_start.json` holds the
+dev VPS PM2 apps.

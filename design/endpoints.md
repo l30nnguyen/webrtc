@@ -1,6 +1,6 @@
 # Matrix endpoints
 
-Every endpoint of `matrix_cc`, by who calls it. Written from the code at commit `eb6ef23` (2026-10-27).
+Every endpoint of `matrix_cc`, by who calls it. Checked against the code on 2026-11-04: control server 2.6.0 (`9808bcf`), `matrix-relay` 1.2.0.
 
 Both server roles run the same binary:
 
@@ -13,8 +13,9 @@ Both server roles run the same binary:
 | 443 `/v1/link` | Center only | Control nodes only: everyone else gets `404` (section 4.2) |
 | `LINK_LISTEN` (optional, private) | Center only | Control nodes, when a private network exists |
 | `/run/matrix/admin.sock` (Unix socket) | Center and every node | `matrix-fleet` on that machine, through sudo |
-| 3478/udp + relay range | Relay hosts (violet) | Cameras and apps |
-| 9100 (node_exporter) | Relay hosts | That region's control node only |
+| 3478/udp, 80/tcp, 443/tcp (TLS), relay range 49152–65535/udp | Relay hosts (`matrix-relay`; a host that also runs a control server uses TCP 3478 and TLS 5349) | Cameras and apps |
+| 127.0.0.1:9641 `/metrics` | `matrix-relay` hosts | The relay host itself |
+| 9100 (node_exporter) | Relay hosts of a fleet-listed relay (violet) | That region's control node only |
 
 All JSON bodies are `Content-Type: application/json`, one strict object, at most 4 KB on Center calls. Unknown fields are rejected. Errors come back as `{"error": "..."}`.
 
@@ -98,7 +99,7 @@ Messages the camera receives:
 
 | Message | From |
 | --- | --- |
-| `{"id":"<viewer id>","type":"request","password":"...","sid_digest":"<hex>","turn":[{"host":"turn-eu00.5gen.care","port":3478,"username":"...","password":"..."}]}` | A viewer, with fields added by the server. `sid_digest` comes from the viewer's ticket, never from the viewer. `turn` lists the relay stream servers for this session: the relay of the node's region first, then a backup from another region. With violet these are its fixed credentials; with coturn they are minted per session and valid 24 h. |
+| `{"id":"<viewer id>","type":"request","password":"...","sid_digest":"<hex>","turn":[{"host":"relay-sg01.5gen.care","port":3478,"username":"...","password":"..."}]}` | A viewer, with fields added by the server. `sid_digest` comes from the viewer's ticket, never from the viewer. `turn` lists the relay stream servers for this session: the relay of the node's region first, then a backup from another region. For `matrix-relay` (and coturn) the credentials are minted per session and valid 24 h; for violet they are its fixed ones. |
 | `{"id":"<viewer id>","type":"answer","sdp":"..."}` and other viewer messages | A viewer |
 | `{"type":"error","msg":"Device offline"}` | The server: the viewer this message was for is not connected |
 
@@ -170,7 +171,7 @@ Messages the app receives:
 
 | Message | Notes |
 | --- | --- |
-| `{"id":"<camera_id>","type":"offer","sdp":"...","candidates":[{"url":"host:port?transport=udp","username":"...","password":"..."}]}` | `candidates` carries the relay stream server and its credentials for this session |
+| `{"id":"<camera_id>","type":"offer","sdp":"...","candidates":[{"url":"host:3478?transport=udp","urls":["turn:host:3478?transport=udp","turn:host:80?transport=tcp","turns:name:443?transport=tcp"],"username":"...","password":"..."}]}` | `candidates` carries the relay stream servers and their credentials for this session. The control server adds `urls` (UDP, TCP, TLS) for a relay that reports TCP and TLS ports; the app picks one (application_todo.md, step 5) |
 | `{"id":"<camera_id>","type":"error","msg":"Unauthorized"}` | Wrong viewing password |
 | `{"type":"error","msg":"Device offline"}` | The camera is not connected to this node |
 
@@ -181,11 +182,11 @@ The app only ever messages its ticket's camera; any other `id` answers `Device o
 Send once per viewing attempt, on the control connection:
 
 ```json
-{"type":"report","result":"connected","path":"lan|direct|relay","relay_offered":true,"relay_ready":true,"setup_ms":840}
+{"type":"report","result":"connected","path":"lan|direct|relay","relay_protocol":"udp|tcp|tls","relay_offered":true,"relay_ready":true,"setup_ms":840}
 {"type":"report","result":"failed","error":"unauthorized|camera_offline|no_offer|no_answer|no_path|timeout|closed|other","relay_offered":true,"relay_ready":false}
 ```
 
-The role (camera or viewer) comes from the ticket. Reports feed `matrix-fleet stats` and are never forwarded. **The web player sends them; the mobile app does not yet.**
+`relay_protocol` only when connected through a relay. The role (camera or viewer) comes from the ticket. Reports feed `matrix-fleet stats`, `/admin/statistic` and the connection log, and are never forwarded. **The web player sends them; the mobile app does not yet.**
 
 ---
 
@@ -197,11 +198,11 @@ The role (camera or viewer) comes from the ticket. Reports feed `matrix-fleet st
 | `GET /` | Plain text `OK` (no page) |
 | `GET /demo/<tenant>` | Web player (`ws.html`), only when `-discovery-tenant <tenant>` is set; limited to `-player-allow` IPs when that is set (Center: `/demo/test01`, `115.78.12.186`) |
 | `GET /api/devices[?type=producer]` | Cameras online in the discovery tenant: `{"count":N,"devices":[{"id","nickname","tenant","connected_at","path","type","rtt","sid"}]}`. Only with `-discovery-tenant` or `-demo-tenant`; limited by `-player-allow`. |
-| `POST /v1/relay/report` | With `-relay-dir`: a relay stream server (`matrix-relay -control`) reports its addresses and load every 15 s. Accepted only for a name with a shared secret in `cfg/relay-secrets.json`, signed with it (`X-Relay-Signature`), within a minute of this server's clock; `204` when taken, `403` otherwise |
-| `GET /admin/statistic` | This control server and the relay stream servers reporting here: state, clients by UDP/TCP/TLS, load, charts over `?hours=24..8784`, daily for 30 days, and the connection log search. Only for `-statistic-allow` IPs; `404` for everyone else, and for everyone when it is not set |
+| `POST /v1/relay/report` | With `-relay-dir`: a relay stream server (`matrix-relay -control`) reports its addresses, load, version and (1.2.0 on) its machine's CPU, memory, disk and network (`"machine"`) every 15 s. Accepted only for a name with a shared secret in `cfg/relay-secrets.json`, signed with it (`X-Relay-Signature`), within a minute of this server's clock; `204` when taken, `403` otherwise |
+| `GET /admin/statistic` | This control server and the relay stream servers reporting here: state, clients by UDP/TCP/TLS, load, machine CPU/memory/disk (2.6.0), charts over `?hours=24..8784`, daily for 30 days, and the connection log search. Only for `-statistic-allow` IPs; `404` for everyone else, and for everyone when it is not set |
 | `GET /admin/statistic/data` | The same statistics as rows for charting tools: `from`, `to` (RFC 3339 or YYYY-MM-DD), `step` (30m, hour, day), `source` (control, relay), `name`, `format` (json, csv). Same allow list. Format in `src/relay/README.md` |
 | `GET /admin/statistic/events` | The connection log: `from`, `to` (UTC), `camera`, `viewer`, `type`, `result`, `format` (json, csv); newest first, at most 5000. Same allow list |
-| `GET /api/health` | `{"status":"ok","clients":N,"version":"2.1.1","ticket_admission":true}`; a control node adds `"center":"https://matrix.5gen.care"`, which its player page uses for `/v1/view` |
+| `GET /api/health` | `{"status":"ok","clients":N,"version":"2.6.0","ticket_admission":true}`; a control node adds `"center":"https://matrix.5gen.care"`, which its player page uses for `/v1/view` |
 | `GET /downloads/<path>` | Files under `/opt/matrix/downloads/` (firmware) |
 | `GET /v1/demo/resolve?ref=<64 hex>` | Center only, only with `-demo-tenant` (development): unauthenticated 2.2 for the demo tenant |
 
@@ -258,10 +259,10 @@ One login at a time per IP, and at most 32 waiting overall (`503` when busy).
 | --- | --- |
 | Center → node | `{"type":"challenge","nonce":"<32 bytes>","sig":"..."}`. `sig` is Ed25519 with the Center ticket key over `"matrix-center-link-v1" ‖ node's upgrade nonce ‖ nonce ‖ Center name ‖ address`. The node hangs up if it doesn't verify, so a fake server can't pose as Center. |
 | node → Center, within 5 s, ≤ 1 KB | `{"type":"login","address":"wss://<node>:443/","sig":"..."}` (the same address as the header). Ed25519 with the node's key over `"matrix-node-link-v1" ‖ nonce ‖ Center name ‖ address`, checked against `public_key` in `config.json`. |
-| node → Center | `{"type":"hello","cameras":[...],"clients":N,"stats":{...},"relays":[...],"version":N}` |
+| node → Center | `{"type":"hello","cameras":[...],"clients":N,"stats":{...},"relays":[...],"version":N,"server_version":"2.6.0","machine":{...}}`. `version` is the configuration version; `server_version` and `machine` (CPU, memory, disk, network: `host.Load`) are sent since 2.6.0 |
 | Center → node | `{"type":"welcome"}`. The node counts itself linked only after this. A refused node is simply disconnected. |
 | node → Center | `{"type":"camera","id":"<device id>","online":true}`, sent as cameras come and go |
-| node → Center, every 60 s | `{"type":"stats","clients":N,"stats":{...},"relays":[...]}` |
+| node → Center, every 60 s | `{"type":"stats","clients":N,"stats":{...},"relays":[...],"server_version":"...","machine":{...}}` |
 | Center → node | `{"type":"config","version":N,"config":"<base64url>","sig":"..."}`, signed with the Center ticket key over `"matrix-config-v1" ‖ version ‖ config` |
 | node → Center | `{"type":"ack","version":N}` or `{"type":"config_error","version":N,"error":"..."}` |
 
@@ -284,7 +285,7 @@ Only the relays of the node's own region are measured.
 
 | Socket call | `matrix-fleet` command | Where |
 | --- | --- | --- |
-| `GET /v1/status` | `status` (nodes, relays, config versions; on a node: its link) | Center, node |
+| `GET /v1/status` | `status` (nodes and relays: state, cameras, clients, load, CPU, memory, disk, network, version, config version; on a node: its link) | Center, node |
 | `GET /v1/stats?days=N` (1–31) | `stats [DAYS]` | Center |
 | `POST /v1/reload` | done by `apply` and `rollback` | Center |
 | `POST /v1/moves` (body: a config) | done by `check`: online cameras that would move | Center |

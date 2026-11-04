@@ -1,179 +1,132 @@
-# Việc còn thiếu so với dịch vụ cũ (vrelay) — bản dành cho người không chuyên kỹ thuật
+# What matrix still lacks compared with vrelay
 
-Cập nhật: 2026-10-19. Nguồn so sánh: `SERVICE_SPEC.md` (mô tả dịch vụ cũ) và hiện trạng code của dự án này.
-Trạng thái: **bản nháp đã review một vòng**, chưa có việc nào bắt đầu. Dự án chưa rollout.
+Originally written 2026-10-19 (in Vietnamese, for non-technical readers).
+Translated to English and brought up to date on 2026-11-04 against control
+server 2.6.0, camera 2.1.4 and `matrix-relay` 1.2.0. Sources: `SERVICE_SPEC.md`
+(the old service) and `~/code/vrelay`.
 
-## 1. Tóm tắt trong một đoạn
+The release plan, the operations gaps (server lists, monitoring, new-server
+scripts) and the code review are in [roll-out.md](roll-out.md). This file
+keeps the product decisions and the status of each original item.
 
-Dự án này là phiên bản kế tiếp, làm theo cách khác dịch vụ cũ: video đi thẳng giữa camera và điện thoại (WebRTC), server chỉ làm "tổng đài" giúp hai bên tìm thấy nhau. Phần lớn tính năng của dịch vụ cũ đã có hoặc không còn cần. Còn lại **một nhóm việc nhỏ về vận hành server**, **một việc về nhiều server**, **một việc về TURN**, **một việc cho camera ở Trung Quốc**, và **một quyết định về cách hai hệ thống SID cùng tồn tại**. Nguyên tắc chọn việc: *server càng đơn giản càng tốt; việc nào app hoặc camera làm được thì để app hoặc camera làm.*
+## 1. Summary
 
-## 2. Quyết định đã có
+Matrix is the next generation and works differently from vrelay:
+- Video goes directly between camera and phone (WebRTC). It passes through a
+  relay stream server only when no direct path works.
+- The control server only helps the two ends find each other.
 
-| Chủ đề | Quyết định |
+Most vrelay features exist or are no longer needed. The rule for choosing
+work: **keep the server as simple as possible; whatever the app or the camera
+can do, they do.**
+
+## 2. Decisions
+
+| Topic | Decision (2026-10-19) |
 | --- | --- |
-| Phía camera và app (client) | Coi như đã đủ. Chỉ còn xử lý camera ở Trung Quốc. Không cần xử lý loại NAT vì đã có TURN |
-| Phía server | Giữ đơn giản để ít lỗi và dễ mở rộng. Việc nào app hoặc camera làm được thì giao cho app hoặc camera |
-| Chạy thử song song | Chạy hai dịch vụ (cũ và mới) song song, độc lập, không dùng chung dữ liệu. Tác động và hiện trạng VPS ghi ở mục 5 |
+| Camera and app | Considered complete, apart from cameras in China. No NAT-type detection: the relay stream server covers it |
+| Server | Keep it simple, so it has few bugs and is easy to scale. Push work to the app or camera where possible |
+| Running beside vrelay | The two services run side by side, independent, sharing no data (MySQL, Redis, files) and no SIDs |
+| A. Old and new SIDs | Two independent systems; no bridge |
+| B. Shared "which camera is on which server" | Not shared |
+| C. Order | Operations first, then scale |
+| D. Cameras in China | Later |
 
-## 2.1 Kiến trúc đích (bạn chốt 2026-10-19)
+### Target architecture (decided 2026-10-19) and where it stands
 
-**Toàn bộ dịch vụ chỉ một chương trình (một file chạy) và chỉ một cổng.** Cổng đó đảm nhận phần "điều khiển" như vrelay. Phần chuyển tiếp video là máy chủ TURN, chạy riêng trên một hoặc nhiều máy khác.
+**One program, one port** for control. Video relaying is a separate relay
+stream server on one or more other machines.
 
-| Thành phần | Chạy ở đâu | Hiện trạng so với đích |
+| Part | Target | Status 2026-11-04 |
 | --- | --- | --- |
-| Chương trình chính (`signaling-server`) | Một file duy nhất, một cổng | **Đã gần đúng.** Một file duy nhất đã gồm tổng đài, kích hoạt SID (Center) và tải file cho camera, tất cả trên một cổng HTTPS. Chương trình Center riêng không còn nữa. Bật phần Center bằng cờ `-center` |
-| Chuyển tiếp video | Máy chủ TURN riêng, một hoặc nhiều máy | **Đã đúng hướng.** Violet chạy riêng. Còn thiếu: danh sách nhiều TURN và tài khoản tạm thời (việc 5) |
-| Công cụ cấp SID (`sidctl`) | Máy của người quản trị, không nằm trên server | Giữ là chương trình riêng vì nó giữ khoá bí mật dùng để ký SID. Đặt khoá đó lên server là hạ mức an toàn. **Đây là suy luận của mình, cần bạn xác nhận** |
+| Main program | One binary, one port | **Done.** `matrix_cc` serves the Center APIs, control connections, the node link, downloads and statistics on 443 |
+| Relay stream server | Separate, one or more machines | **Done in code.** `matrix-relay` (UDP, TCP, TLS) reports to its region's node. Production still uses violet |
+| SID issuing tool (`sidctl`) | On the administrator's machine, not on the server | **Done.** The issuer private key never goes on a server |
 
-Những chỗ hiện chưa đúng "một cổng":
+Where "one port" is not met yet:
 
-| Vấn đề | Giải thích | Cách xử lý |
-| --- | --- | --- |
-| Gia hạn chứng chỉ dùng thêm cổng 80 | nginx giữ cổng 80 chỉ để Let's Encrypt kiểm tra tên miền | Cho chính chương trình tự xin và gia hạn chứng chỉ ngay trên cổng 443 (cách này không cần cổng 80), hoặc xác thực qua DNS, hoặc đặt sau bộ cân bằng tải đã lo chứng chỉ. Cách nên chọn: tự gia hạn trong chương trình, vì bỏ được nginx và `renewcert.sh` |
-| Cấu hình TURN nằm trong tập tin cục bộ (`cfg/turn.conf`) | Nhiều máy thì phải chép tập tin này đồng bộ | Cho Center (cùng chương trình) cấp danh sách TURN cho app và camera, hoặc đọc từ một tập tin dùng chung |
-| Hai bản chạy cùng chương trình | Bản "production" (443) đang ở chế độ cũ không có Center, bản dev (8443) có Center | Khi rollout chỉ còn một bản, bật `-center` |
+| Issue | Status |
+| --- | --- |
+| Certificate renewal uses port 80 | **Open.** `setup.sh` uses certbot standalone on port 80 (renewal by `certbot.timer`). Renewing inside the program on 443 (or DNS validation) would free port 80. Not planned yet |
+| TURN settings in a local file | **Done.** Relays come from relay reports or `config.json`, with per-session credentials. `cfg/turn.conf` stays only as a fallback |
+| Two copies of the program (443 legacy, 8443 dev) | **Done.** The dev VPS copies are stopped, except the separate `webrtc_prod` under tester evaluation. Production is the Center plus sg00 on DigitalOcean |
 
-Tác động lên việc chạy song song với vrelay: dịch vụ mới chỉ cần **một cổng**, không cần cổng 80, không cần TURN trên cùng máy. Vì thế các lo ngại về trùng cổng 80 và tranh băng thông TURN ở mục 5 giảm đi nhiều. Dịch vụ mới chỉ cần nhường 443 (và có thể chạy ở 8443) cho vrelay.
+## 3. The work list and its status
 
-## 3. Việc cần làm
+Who: **Server**, **Camera**, **App** (the user's app team). Size: S, M, L.
 
-Cột "Ai làm": **Server** là chương trình chính, **Camera** là phần mềm trên camera, **App** là ứng dụng điện thoại (đội app của bạn).
-Cột "Cỡ": N = nhỏ, V = vừa, L = lớn. Đây là ước lượng thô để xếp thứ tự, chưa phải cam kết thời gian.
-Thứ tự theo quyết định C: vận hành trước, rồi mở rộng, cuối cùng là việc để sau.
+### Group 1: operations (first)
 
-### Nhóm 1 — Vận hành (làm trước)
-
-| # | Việc | Giải thích đơn giản | Ai làm | Cỡ |
+| # | Item | Who | Size | Status 2026-11-04 |
 |---|---|---|---|---|
-| 1 | Tắt server "êm" | Khi khởi động lại hoặc nâng cấp, hiện server dừng đột ngột và mọi camera bị rớt cùng lúc. Cần để nó ngừng nhận kết nối mới, đợi vài giây cho kết nối cũ xong rồi mới tắt, mỗi lần đợi một thời gian hơi khác nhau | Server | N |
-| 2 | Ghi nhật ký dễ đọc | Đổi nhật ký sang dạng có cấu trúc để lọc theo camera và tìm lỗi dễ hơn. Vẫn không ghi mật khẩu hay nội dung nhạy cảm | Server | N |
-| 3 | Bảng theo dõi sức khoẻ | Có trang số liệu (số camera online, số lần từ chối, độ trễ) để biết hệ thống khoẻ hay yếu. Hiện chỉ có trang đếm số kết nối | Server | V |
-| 4 | Cất mật khẩu và khoá đúng chỗ | Cấu hình nhạy cảm đọc từ biến môi trường hoặc kho bí mật, không để trong tham số dòng lệnh | Server | N |
-| 5 | Tự gia hạn chứng chỉ ngay trong chương trình | Để dịch vụ chỉ cần **một cổng** (mục 2.1): chương trình tự xin và gia hạn chứng chỉ trên cổng 443, bỏ được nginx và cổng 80 | Server | V |
-| 6 | Camera nối lại thông minh | Mất kết nối thì chờ lâu dần (10, 30, 60, 300 giây) và có chút ngẫu nhiên, thay vì luôn 30 giây. Tránh hàng nghìn camera dồn cùng lúc khi server vừa lên lại. SID bị thu hồi thì ngừng hẳn | Camera | N |
-| 7 | Bớt bộ nhớ cho mỗi kết nối | Giảm hàng đợi tin nhắn mỗi kết nối từ 256 xuống khoảng 32 và đặt trần bộ nhớ cho chương trình. Tăng sức chứa khoảng 10%, giữ máy không bị đầy (xem mục 8) | Server | N |
+| 1 | **Graceful shutdown.** Stop taking new connections and close the old ones spread over a few seconds, so a restart doesn't drop every camera at once | Server | S | **Open** (roll-out R4). SIGTERM saves statistics and exits |
+| 2 | **Structured, readable logs** that can be filtered by camera, without secrets | Server | S | **Partly done.** The connection log (`cfg/sid/events/`, JSON lines, 30 days) can be searched by camera, viewer and result. The service log is still plain text in journald |
+| 3 | **Health dashboard** (cameras online, refusals, latency) | Server | M | **Done**, without alerts. Covered by `/admin/statistic` (charts, a year of 30-minute rows, CSV/JSON), `matrix-fleet status` (including CPU, memory, disk and network since 2.6.0) and `matrix-fleet stats`. Alerting is open (roll-out R5) |
+| 4 | **Secrets in the right place**, not on the command line | Server | S | **Done.** Keys, tokens and relay secrets are files under `cfg/sid/` (mode 0600), given to the server by path |
+| 5 | **Certificate renewal inside the program**, to need only one port | Server | M | **Open**, see above |
+| 6 | **Smarter camera reconnect**: back off (10, 30, 60, 300 s) with jitter; stop for good if the SID is revoked | Camera | S | **Open.** The camera waits a random 25–35 s every time |
+| 7 | **Less memory per connection**: a send queue of about 32 instead of 256, and a memory cap | Server | S | **Open.** The queue is still 256 messages; there is no `MemoryMax`. Measured 56 KB per connection (capacity.md) |
 
-### Nhóm 2 — Mở rộng
+### Group 2: scale
 
-| # | Việc | Giải thích đơn giản | Ai làm | Cỡ |
+| # | Item | Who | Size | Status 2026-11-04 |
 |---|---|---|---|---|
-| 8 | Danh sách TURN dùng chung | TURN là trạm chuyển tiếp video khi camera và điện thoại không nối thẳng được, chạy riêng trên máy khác. Hiện chỉ có một trạm cố định đọc từ tập tin. Cần danh sách nhiều trạm do chương trình chính cấp, tài khoản tạm thời cho từng phiên, và TURN qua TLS cho phía điện thoại | Server + App | V |
-| 9 | App tự chọn trạm gần nhất | Server chỉ đưa danh sách (TURN và server). App tự đo trạm nào phản hồi nhanh nhất rồi chọn | App | V |
-| 10 | Nhiều server | Hiện camera chỉ nối được đúng một địa chỉ cố định. Cho phép camera được chỉ sang server khác. Gợi ý: chọn server bằng công thức từ mã camera, nên không cần cơ sở dữ liệu chung để nhớ "camera nào ở server nào" | Server + Camera | L |
-| 11 | Camera tự giới hạn người xem | Số người xem cùng lúc và thời gian tối đa một phiên do camera tự kiểm soát. Server không theo dõi từng phiên | Camera + App | V |
+| 8 | **Shared relay list**: several relays from the main program, temporary credentials per session, TLS for phones | Server + App | M | **Done.** Relays per region, chosen by load, with a backup in another region. Credentials last 24 h per session; UDP, TCP and TLS URLs are in the offer |
+| 9 | **The app picks the nearest relay** | App | M | **Changed.** The control server picks the relay (the camera's region, by load). The app picks the transport (UDP, then TCP, then TLS; `pickRelayURL()` in `ws.html`) |
+| 10 | **Several servers**: cameras can be sent to another server | Server + Camera | L | **Done.** Center assigns each camera a node by country and load, and sends viewers to the camera's node. The fleet configuration is pushed over the node link |
+| 11 | **The camera limits viewers**: how many at once, and the longest session | Camera + App | M | **Open**, not verified in the camera code |
 
-### Nhóm 3 — Để sau
+### Group 3: later
 
-| # | Việc | Ghi chú | Ai làm | Cỡ |
-|---|---|---|---|---|
-| 12 | Camera ở Trung Quốc | Tìm địa chỉ server qua DNS riêng của Trung Quốc. Đã chốt để sau | Camera + App | N |
-| 13 | Nơi lưu dùng chung | Chỉ cần khi có nhiều server trung tâm. Hiện là một tập tin trên một máy | Server | L |
+| # | Item | Status |
+|---|---|---|
+| 12 | Cameras in China (find the server through a China DNS) | Deferred |
+| 13 | Shared storage for several Centers | Deferred. One Center today; its state needs an off-host backup first (roll-out R3) |
 
-Đã bỏ: việc "cầu nối SID cũ/mới" (hai hệ thống độc lập, mục 6).
+Dropped: a bridge between old and new SIDs (decision A).
 
-## 4. Việc cố ý KHÔNG làm
+## 4. vrelay features deliberately not built
 
-| Tính năng của dịch vụ cũ | Vì sao không làm |
+| vrelay feature | Why not |
 | --- | --- |
-| Server chuyển tiếp video (relay ghép cặp) | Video đi thẳng giữa hai đầu, chỉ khi bất khả kháng mới qua TURN |
-| Giới hạn 15 phút và đếm phiên trên server | Giao cho camera/app (việc 9). Server đơn giản hơn |
-| Server chọn trạm theo vùng và tải | Giao cho app tự đo (việc 6) |
-| Ghim thiết bị thử nghiệm cho QA | Đội test dùng bản app trỏ vào server thử, không cần cơ chế riêng |
-| Làm rối dữ liệu tự chế | WebRTC đã mã hoá chuẩn, mạnh hơn |
-| Đo loại NAT | Đã có TURN |
-| Kênh gộp nhiều dịch vụ (AIO) và chuyển tiếp cổng TCP tổng quát | Dùng kênh dữ liệu JSON có sẵn. Chỉ làm nếu sau này cần gọi API camera kiểu cũ |
-| Hai biến thể đóng gói (flavor) | Không áp dụng |
-| PROXY protocol, cổng TLS cho relay | Không có relay. Đã có tuỳ chọn chạy sau bộ cân bằng tải |
+| A relay that carries all video (paired relay) | Video goes directly; the relay stream server is used only when needed |
+| 15-minute limit and session counting on the server | Left to the camera and app (item 11) |
+| Server picks a relay by its own region tables | Replaced by Center routes and relay load (item 9) |
+| Pinning test devices for QA | Testers use an app build that points at a test server |
+| Home-made traffic obfuscation | WebRTC encryption is standard and stronger |
+| NAT-type detection | The relay stream server covers it |
+| AIO multiplexed channel and generic TCP port forwarding | The JSON DataChannel is enough; only if the camera's old API must be called |
+| Two packaging flavours | Not applicable |
+| PROXY protocol | Not needed; `-trust-proxy-tls` exists for running behind a load balancer |
 
-## 5. Chạy song song với dịch vụ cũ trên VPS thật
+## 5. Running beside vrelay (historical, 2026-10-19)
 
-Quyết định: hai dịch vụ **độc lập hoàn toàn**, không dùng chung dữ liệu (MySQL, Redis, tập tin), không liên quan gì về SID. Camera nào chạy chương trình nào là tuỳ từng camera nên không cần kế hoạch riêng cho camera.
+The parallel-run check was done on the old dev VPS (2 vCPU, 939 MB RAM, no
+swap, shared with other projects). The conclusions were:
+- give vrelay ports 443 and 80 if both ran there
+- don't install MySQL on that machine
+- measure each service on its own
 
-### 5.1 VPS hiện tại (kiểm tra ngày 2026-10-19, chỉ đọc)
+Production matrix has since moved to its own DigitalOcean droplets
+(2026-10-27), so the port and memory conflicts no longer apply. vrelay itself
+runs on its own `vrelay-*` servers.
 
-| Mục | Hiện trạng |
+## 6. Capacity
+
+Superseded by [capacity.md](capacity.md): measurements on 2026-11-03,
+servers for 1K–1M cameras, and the DigitalOcean cost per camera. The
+2026-10-19 estimate (about 6,000 cameras on the 1 GB dev VPS, limited by
+memory) agrees with today's 5,000 cameras per 1 GB control node.
+
+## 7. Glossary
+
+| Term | Meaning |
 | --- | --- |
-| Cấu hình máy | 2 vCPU, **RAM 939 MB, chỉ còn khoảng 185 MB trống, không có swap**; ổ đĩa còn 7,8 GB; tải đang gần 0 |
-| Dịch vụ mới (PM2) | Bản "production" nghe cổng **443**; bản dev nghe cổng **8443** |
-| Các thứ khác trên máy | nginx (cổng **80**, chỉ lo gia hạn chứng chỉ cho `webrtc.5gen.care`), TURN Violet (UDP 3478), mediamtx, **Postgres trong Docker (cổng 5432, có vẻ của dự án khác)**, một dịch vụ thống kê NAT (cổng 59980), cloudflared |
-| Dịch vụ cũ (vrelay) | **Chưa cài**: không có cấu hình, thư mục hay chương trình nào |
-| Giới hạn số kết nối mở | 524288, đủ |
-
-### 5.2 Điều này có nghĩa gì
-
-| Chủ đề | Tác động | Đề xuất |
-| --- | --- | --- |
-| **Trùng cổng 443 và 80** | Camera và app của dịch vụ cũ có sẵn mặc định nối vào **443** (điều khiển) và **80** (relay phía app). Hai cổng này đang do dịch vụ mới và nginx giữ. Các cổng khác của dịch vụ cũ (8800, 8801, 9901–9904, 81, 8810, 6060) đang trống | Vì dịch vụ mới **chưa rollout** và cổng của nó chỉnh được, nên nhường 443 và 80 cho dịch vụ cũ, dịch vụ mới chuyển sang cổng khác (bản dev đã dùng 8443). Việc này cần đổi cấu hình camera thử và phần gia hạn chứng chỉ (xem dòng dưới) |
-| Gia hạn chứng chỉ | nginx đang giữ cổng 80 để xác thực chứng chỉ cho tên miền của dịch vụ mới. Nếu nhường cổng 80, cách này không dùng được nữa | Chuyển sang xác thực qua DNS, hoặc dùng cổng 80 cho nginx và đặt relay cũ ở cổng khác (81) khi thử |
-| **RAM rất ít** | Chỉ còn khoảng 185 MB trống, không có swap. Dịch vụ cũ cần thêm bộ nhớ (chương trình Go, và MySQL hoặc Redis). **MySQL không nên cài trên máy này** | Chạy dịch vụ cũ với Redis nhỏ (hoặc chỉ Redis, tắt MySQL như spec cho phép), hoặc dùng máy riêng cho bản thử. Thêm swap nếu bắt buộc chạy chung. Chưa có số đo bộ nhớ của dịch vụ cũ nên cần đo |
-| Máy dùng chung với dự án khác | Postgres và nattypedb trên máy là của việc khác | Không đụng vào. Đặt giới hạn bộ nhớ/CPU cho cả hai dịch vụ thử để không kéo chúng chậm |
-| Cổng 5432 (Postgres) | Đang nghe trên mọi địa chỉ. Có bị lộ ra Internet hay không tuỳ cấu hình tường lửa của VPS, mình không xem được | Ngoài phạm vi dự án này, nhưng nên kiểm tra |
-| Tranh tài nguyên khi đo | Dịch vụ cũ chuyển tiếp **toàn bộ video** qua máy, dịch vụ mới chủ yếu không (trừ khi qua TURN). Với 2 vCPU, hai bên ảnh hưởng nhau | Đo từng bên riêng trước, rồi mới đo cùng lúc. Trong lúc so sánh, hạn chế dùng TURN trên cùng máy |
-| Khởi động lại | Vì chưa rollout nên rủi ro thấp, nhưng khởi động lại một dịch vụ vẫn không nên làm trong lúc đo bên kia | Báo trước |
-| Dữ liệu | Hoàn toàn tách biệt: dịch vụ cũ ghi MySQL/Redis của nó, dịch vụ mới ghi tập tin của nó. Không thể ghi đè nhau | Giữ như vậy |
-
-## 6. Quyết định đã chốt (2026-10-19) và việc còn mở
-
-| # | Câu hỏi | Quyết định |
-| --- | --- | --- |
-| A | SID cũ và SID mới | **Hai hệ thống chạy song song, độc lập.** Không cần cầu nối. Việc 11 bỏ |
-| B | Dùng chung dữ liệu "camera ở server nào" | **Không dùng chung.** Hai dịch vụ độc lập |
-| C | Thứ tự | **Vận hành trước** (việc 1–4), rồi mở rộng |
-| D | Camera Trung Quốc | **Để sau.** Việc 7 chuyển xuống cuối |
-| E | Cổng trên VPS | Đã kiểm tra (mục 5.1). Chưa rollout nên có thể điều chỉnh cổng. Camera thử không cần lập kế hoạch |
-
-Việc còn mở:
-
-| # | Câu hỏi | Gợi ý |
-| --- | --- | --- |
-| F | Dịch vụ cũ có chạy trên chính VPS này không, hay trên máy thử riêng? | RAM chỉ còn 185 MB và không có swap, nên máy riêng an toàn hơn. Nếu chạy chung thì cần thêm swap và đo trước |
-| G | Nếu chạy chung: dịch vụ nào nhận cổng 443 và 80? | Dịch vụ cũ nhận (vì camera và app cũ có sẵn cổng mặc định), dịch vụ mới chuyển sang 8443 |
-
-## 7. Thuật ngữ
-
-| Từ | Nghĩa đơn giản |
-| --- | --- |
-| Signaling (tổng đài) | Server giúp camera và điện thoại tìm nhau và thoả thuận cách nối. Không chở video |
-| WebRTC | Công nghệ nối thẳng hai thiết bị để truyền video |
-| TURN | Trạm trung chuyển khi hai thiết bị không nối thẳng được (ví dụ do mạng công ty) |
-| SID | Mã cấp phép của camera |
-| Tenant | Một khách hàng/nhóm. Người xem của nhóm này không thấy camera nhóm khác |
-| Center | Máy chủ kiểm tra SID và cấp vé vào server tín hiệu |
-| Graceful shutdown | Tắt máy chủ một cách êm, không làm rớt đột ngột |
-| Node | Một máy chủ trong hệ thống nhiều máy |
-
-## 8. Ước tính sức chứa trên VPS hiện có
-
-**Giả định:** VPS chỉ chạy dịch vụ này (2 vCPU, RAM 939 MB). Mỗi camera luôn online, mỗi camera có một app xem 30 phút mỗi ngày. TURN chạy ở máy khác nên không tính ở đây.
-
-**Số đo thật (ngày 2026-10-19):** mình chạy chính `signaling-server` (bản hiện tại, HTTPS với chứng chỉ RSA 2048) trên máy mình, khoá vào 2 nhân CPU, rồi mở 2.000, 10.000 và 20.000 kết nối WebSocket thật.
-
-| Số kết nối | RAM chương trình dùng | RAM mỗi kết nối | CPU server |
-| --- | --- | --- | --- |
-| 2.000 | 117 MB | khoảng 55 KB | 4 giây |
-| 10.000 | 519 MB | khoảng 51 KB | 21 giây |
-| 20.000 | 1.019 MB | khoảng 51 KB | 41 giây |
-
-Tốc độ nhận kết nối mới đạt khoảng 950 kết nối mỗi giây (bao gồm bắt tay TLS), tốn khoảng 2 mili-giây CPU mỗi kết nối.
-
-**Cách tính:**
-- Số kết nối cùng lúc = số camera + số người đang xem. 30 phút mỗi ngày là khoảng 2% thời gian. Nếu giờ cao điểm đông gấp 5 lần thì khoảng 10% camera có người xem cùng lúc. Kết nối cùng lúc khoảng **1,1 × số camera**.
-- RAM dùng được cho dịch vụ khoảng 600 MB (máy 939 MB, trừ hệ điều hành và PM2 khoảng 150–300 MB). Cộng thêm khoảng 10% cho bộ nhớ của hệ điều hành mỗi kết nối (không nằm trong số đo trên) thì mỗi kết nối tốn khoảng 57 KB. Chừa 30% dự phòng để không bị đầy khi có đợt tăng đột ngột.
-
-| RAM dùng được | Trần kết nối | Kết nối an toàn (chừa 30%) | Số camera phục vụ được |
-| --- | --- | --- | --- |
-| 500 MB | khoảng 8.800 | khoảng 6.100 | khoảng **5.500** |
-| 600 MB | khoảng 10.500 | khoảng 7.400 | khoảng **6.700** |
-| 700 MB | khoảng 12.300 | khoảng 8.600 | khoảng **7.800** |
-
-**Kết luận:** nên lập kế hoạch cho khoảng **6.000 camera** trên VPS này, mỗi camera một người xem 30 phút mỗi ngày. Trần tuyệt đối khoảng 9.000–10.000 camera nếu chấp nhận rủi ro đầy bộ nhớ. Việc 7 (bớt bộ nhớ mỗi kết nối) tăng thêm khoảng 10%. Muốn nhiều hơn thì giới hạn là **RAM, không phải CPU hay mạng**: mỗi 1 GB RAM thêm khoảng 15.000 camera.
-
-**Những thứ không phải là giới hạn:**
-- CPU lúc bình thường: nhịp ping 30 giây của 6.000 kết nối chỉ khoảng 200 tin nhắn mỗi giây.
-- Mạng của server tín hiệu: vài chục KB mỗi giây. Video không đi qua đây (đi thẳng giữa hai đầu hoặc qua TURN ở máy khác).
-- Số phiên xem: 6.000 phiên mỗi ngày, mỗi phiên vài KB tin nhắn.
-
-**Điểm nghẽn thật là lúc khởi động lại:** nếu server restart, cả 6.000 camera nối lại cùng lúc, mỗi camera cần hai lần bắt tay TLS (một với Center, một cho WebSocket). Với khoảng 500–900 bắt tay mỗi giây thì mất khoảng 15–25 giây nếu camera nối lại ngay lập tức. Việc 1 và việc 6 giảm rủi ro này.
-
-**Độ tin cậy của con số:** đây là ước tính từ máy mình (loopback, kết nối rảnh, chưa có vé xác thực, CPU khác với VPS). RAM mỗi kết nối chắc chắn hơn CPU. Trước khi rollout cần chạy lại bài đo trên chính VPS.
-
+| Control server (signaling) | Helps camera and phone find each other and agree how to connect; carries no video |
+| Relay stream server (TURN) | Forwards video when the two ends can't connect directly |
+| WebRTC | The technology that connects two devices directly for video |
+| SID | The camera's licence code |
+| Tenant | A customer or group; viewers of one tenant can't see another's cameras |
+| Control Center | The server that checks SIDs, issues tickets and assigns nodes |
+| Control node | A control server in a region, linked to the Center |
+| Graceful shutdown | Stopping a server without dropping everyone at once |
