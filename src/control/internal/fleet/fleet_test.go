@@ -228,6 +228,16 @@ func TestRelaysMergeTheLatestMeasurement(t *testing.T) {
 	}
 }
 
+func TestRelaysListReportingRelaysTheConfigDoesNotName(t *testing.T) {
+	r, _ := testRegistry(t, &Report{Address: self})
+	link := linked(t, r, Report{Address: asia})
+	r.NodeStats(asia, link, 0, nil, []RelayStatus{{Name: "mx-relay-sg00", Region: "SG", Healthy: true, At: "2026-11-04T09:39:56Z"}}, nil, "")
+	got := r.Relays([]RelayStatus{{Name: "mx-relay-us00", Region: "US", Healthy: true, At: "2026-11-04T09:40:00Z"}})
+	if len(got) != 2 || got[0].Name != "mx-relay-sg00" || got[0].MeasuredBy != asia || got[1].Name != "mx-relay-us00" || got[1].MeasuredBy != self {
+		t.Fatalf("relays %+v", got)
+	}
+}
+
 func TestStatusShowsTheMachineOfLinkedNodesOnly(t *testing.T) {
 	r, _ := testRegistry(t, &Report{Address: self})
 	link := linked(t, r, Report{Address: asia, Version: "2.6.0", Machine: &host.Load{CPU: 12, MemMB: 961}})

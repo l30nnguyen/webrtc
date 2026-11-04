@@ -13,6 +13,7 @@ import (
 	"crypto/ed25519"
 	"encoding/base64"
 	"errors"
+	"sort"
 	"strings"
 	"sync"
 	"time"
@@ -336,8 +337,10 @@ func (r *Registry) NodeStats(address string, link uint64, clients int, days stat
 }
 
 // Relays merges the relay measurements of the linked nodes with local (the
-// Center node's own), keeping the latest one per relay listed in the active
-// configuration. Relays nobody measured are listed without a measurement.
+// Center node's own), keeping the latest one per relay: first the relays
+// listed in the active configuration (those nobody measured without a
+// measurement), then the reporting relays the configuration doesn't list,
+// by name.
 func (r *Registry) Relays(local []RelayStatus) []RelayStatus {
 	r.mu.Lock()
 	defer r.mu.Unlock()
@@ -360,15 +363,21 @@ func (r *Registry) Relays(local []RelayStatus) []RelayStatus {
 			}
 		}
 	}
-	out := make([]RelayStatus, 0, len(r.config.Relays))
+	out := make([]RelayStatus, 0, len(r.config.Relays)+len(latest))
 	for _, relay := range r.config.Relays {
 		status, ok := latest[relay.Name]
 		if !ok {
 			status = RelayStatus{Name: relay.Name, Region: relay.Region, CapacityMbps: relay.CapacityMbps}
 		}
+		delete(latest, relay.Name)
 		out = append(out, status)
 	}
-	return out
+	reporting := make([]RelayStatus, 0, len(latest))
+	for _, status := range latest {
+		reporting = append(reporting, status)
+	}
+	sort.Slice(reporting, func(i, j int) bool { return reporting[i].Name < reporting[j].Name })
+	return append(out, reporting...)
 }
 
 // ConfigAck records the configuration version a linked node runs.
