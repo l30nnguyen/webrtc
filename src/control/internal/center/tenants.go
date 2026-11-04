@@ -19,6 +19,9 @@ const DefaultActivationWindow = 3 * 365 * 24 * time.Hour
 type Tenant struct {
 	// ActivationWindow overrides DefaultActivationWindow when positive.
 	ActivationWindow time.Duration
+	// NoTakeover keeps a bound SID with its key even when that camera is
+	// offline: a camera with a new key needs a release first.
+	NoTakeover bool
 }
 
 // TenantSource answers whether a tenant is registered. Unknown tenants are
@@ -38,7 +41,7 @@ func (s StaticTenants) Lookup(name string) (Tenant, bool, error) {
 // TenantFile reads a JSON object mapping tenant names to settings and rereads
 // it when the file changes:
 //
-//	{"acme01": {}, "bigco001": {"activation_window_days": 365}}
+//	{"acme01": {}, "bigco001": {"activation_window_days": 365, "no_takeover": true}}
 type TenantFile struct {
 	Path string
 
@@ -50,7 +53,8 @@ type TenantFile struct {
 }
 
 type tenantEntry struct {
-	ActivationWindowDays int `json:"activation_window_days"`
+	ActivationWindowDays int  `json:"activation_window_days"`
+	NoTakeover           bool `json:"no_takeover"`
 }
 
 func (f *TenantFile) Lookup(name string) (Tenant, bool, error) {
@@ -93,7 +97,7 @@ func readTenants(path string) (map[string]Tenant, error) {
 		if !sid.ValidTenant(name) || entry.ActivationWindowDays < 0 {
 			return nil, fmt.Errorf("invalid tenant entry %q", name)
 		}
-		tenants[name] = Tenant{ActivationWindow: time.Duration(entry.ActivationWindowDays) * 24 * time.Hour}
+		tenants[name] = Tenant{ActivationWindow: time.Duration(entry.ActivationWindowDays) * 24 * time.Hour, NoTakeover: entry.NoTakeover}
 	}
 	return tenants, nil
 }

@@ -65,7 +65,7 @@ What changed (Center, nodes and `sidctl` are done; the pairing system itself is 
 
 | Area | Today | Needed |
 | --- | --- | --- |
-| Binding | The first device key binds forever; a second key is rejected with an `ALERT` | States `unbound → bound(device_id) → released`. A new key may bind only while unbound or released. A device that held the SID before is refused for it afterwards, so a lost camera cannot race back in |
+| Binding | The first device key binds forever; a second key is rejected with an `ALERT` | States `unbound → bound(device_id) → released`. A new key may bind only while unbound or released, or (cameras, since 2.5.0) take a bound SID over when its camera has been offline on every node for 3 minutes, because the pairing system frees SIDs without telling Center (see endpoints.md, takeover). A device that held the SID before is refused for it afterwards, so a lost camera cannot race back in |
 | Release | None | An authenticated Center operation `release <sid digest>`, callable only by the pairing system (token plus TLS; never by a device or player), audited. `sidctl status` shows bound, released and history |
 | Cut-off of the old device | n/a | On release the old device's live WebSocket and any ticket still valid (up to 60 s) must stop working. Add `device:<id>` lines to the blocklist file the nodes already reload; nodes check the ticket `sub` and drop matching connections |
 | Old viewers | `camera_ref = SHA-256("camera-ref-v1" \|\| SID)` is a permanent handle, and a viewer who once got the SID can still look the camera up | After re-assignment an old viewer can still resolve the SID and try passwords. Every pairing must therefore set a **new random password** (never the default); optionally derive the handle per binding later |

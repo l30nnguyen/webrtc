@@ -65,8 +65,10 @@ Response `200`:
 | Code | Meaning |
 | --- | --- |
 | `400` | Malformed request |
-| `401 SID rejected` | Bad SID, unknown tenant, blocklisted, expired challenge, wrong signature, nonce already used, SID bound to another device, or activation window passed |
-| `503 verification unavailable` | Store or blocklist could not be read, or the SID was released a moment ago. Retry. |
+| `401 SID rejected` | Bad SID, unknown tenant, blocklisted, expired challenge, wrong signature, nonce already used, SID in use by another camera that is online (or held before by this device), or activation window passed |
+| `503 verification unavailable` | Store or blocklist could not be read, the SID was released a moment ago, or the SID is bound to another camera that has been offline for less than 3 minutes (or whose node is not linked). Retry. |
+
+**Takeover.** A camera SID bound to another key is handed to the new camera once the camera holding it has been offline on every node for 3 minutes: a camera reset and paired again (new key), or a SID the pairing system gave to another camera without a release. While the holder is online the new key gets `401`; while it is offline for less, or a node is not linked (the holder may be on it), `503`. The old key is revoked on the nodes and refused for that SID from then on, as after a release. Center logs `center: SID … taken over by device … from device …`, counts `sid_takeover` in the control server's statistics and adds a `camera` event with result `takeover` to the connection log. Takeover needs the fleet configuration (`-config-file`); a tenant with `"no_takeover": true` in `tenants.json` keeps the strict rule (a new key needs a release first). Player SIDs are never taken over.
 
 The ticket is single-use, valid 60 s, and only for that node (its audience).
 

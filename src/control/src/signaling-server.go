@@ -944,6 +944,10 @@ func configureServer(srv *Server, opts serverOptions) error {
 			MainAddress: opts.mainAddress, AssignAddress: opts.assignAddress, Blocklist: blocklist, Tenants: tenants, Activations: store,
 			ChallengeKey: deriveChallengeKey(centerPrivate), TrustProxyTLS: opts.trustProxyTLS,
 			DemoTenant: opts.demoTenant, ViewOrigin: opts.viewOrigin, AdminToken: adminToken,
+			OnTakeover: func(tenant, from, to string) {
+				srv.countHistory(map[string]int64{"sid_takeover": 1})
+				srv.addEvent(events.Event{Type: events.Camera, Camera: to, Result: "takeover", Detail: "SID of tenant " + tenant + " taken over from offline camera " + from})
+			},
 		})
 		if err != nil {
 			store.Close()

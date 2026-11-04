@@ -122,7 +122,22 @@ type Registry struct {
 	self     string
 	local    Local
 	now      func() time.Time
+	// gone is when each camera that left a node was last seen there, for
+	// Absence; started stands in for cameras not seen since Center started.
+	gone      map[string]goneCamera
+	started   time.Time
+	lastPrune time.Time
 }
+
+type goneCamera struct {
+	at   time.Time
+	node *nodeState
+}
+
+// goneKeep is how long Absence remembers when a camera left. Older entries are
+// dropped (their node being linked), which only makes the camera look offline
+// for longer than it was, never shorter than goneKeep.
+const goneKeep = time.Hour
 
 // ErrUnknownNode is returned for a link from an address that is not a node
 // of the configuration (or is the Center's own node).
@@ -149,7 +164,7 @@ func NewFromConfig(config Config, selfAddress string, local Local, now func() ti
 		now = time.Now
 	}
 	r := &Registry{byAddr: map[string]*nodeState{}, location: map[string]*nodeState{}, country: map[string]string{},
-		self: selfAddress, local: local, now: now}
+		self: selfAddress, local: local, now: now, gone: map[string]goneCamera{}, started: now()}
 	if err := r.Apply(config); err != nil {
 		return nil, err
 	}
@@ -242,6 +257,14 @@ func (r *Registry) Linked(report Report, configVersion int) (uint64, error) {
 	r.links++
 	n.link = r.links
 	n.acked = configVersion
+	// A camera may have stayed on this node while its link was down; one the
+	// node no longer reports left now at the latest.
+	now := r.now()
+	for id, g := range r.gone {
+		if g.node == n {
+			r.gone[id] = goneCamera{at: now, node: n}
+		}
+	}
 	r.applyLocked(n, report)
 	return n.link, nil
 }
@@ -272,11 +295,13 @@ func (r *Registry) Camera(address string, link uint64, device string, online boo
 		}
 		n.cameras[device] = struct{}{}
 		r.location[device] = n
+		delete(r.gone, device)
 		return
 	}
 	delete(n.cameras, device)
 	if r.location[device] == n {
 		delete(r.location, device)
+		r.gone[device] = goneCamera{at: n.lastSeen, node: n}
 	}
 }
 
@@ -350,26 +375,34 @@ func (r *Registry) Unlinked(address string, link uint64) {
 
 func (r *Registry) unlinkLocked(n *nodeState) {
 	n.link = 0
+	now := r.now()
 	for id := range n.cameras {
 		if r.location[id] == n {
 			delete(r.location, id)
+			r.gone[id] = goneCamera{at: now, node: n}
 		}
 	}
 	n.cameras = map[string]struct{}{}
 }
 
 func (r *Registry) applyLocked(n *nodeState, report Report) {
-	for id := range n.cameras {
-		if r.location[id] == n {
-			delete(r.location, id)
-		}
-	}
+	now := r.now()
+	old := n.cameras
 	n.cameras = make(map[string]struct{}, len(report.Cameras))
 	for _, id := range report.Cameras {
 		if admission.ValidDeviceID(id) {
 			n.cameras[id] = struct{}{}
-			r.location[id] = n
 		}
+	}
+	for id := range old {
+		if _, still := n.cameras[id]; !still && r.location[id] == n {
+			delete(r.location, id)
+			r.gone[id] = goneCamera{at: now, node: n}
+		}
+	}
+	for id := range n.cameras {
+		r.location[id] = n
+		delete(r.gone, id)
 	}
 	n.clients = report.Clients
 	n.stats = report.Stats
@@ -563,6 +596,37 @@ func (r *Registry) Locate(device string) (string, bool) {
 		return "", false
 	}
 	return n.Address, true
+}
+
+// Absence tells whether a camera is online on a healthy node and, if not, for
+// how long it has been offline. certain is false when some node is not linked:
+// the camera may be online there unseen.
+func (r *Registry) Absence(device string) (offline time.Duration, online, certain bool) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	now := r.now()
+	r.refreshLocalLocked()
+	if n := r.location[device]; n != nil && r.healthyLocked(n, now) {
+		return 0, true, true
+	}
+	for _, n := range r.nodes {
+		if !r.healthyLocked(n, now) {
+			return 0, false, false
+		}
+	}
+	if now.Sub(r.lastPrune) > goneKeep/6 {
+		for id, g := range r.gone {
+			if now.Sub(g.at) > goneKeep && (r.healthyLocked(g.node, now) || r.byAddr[g.node.Address] != g.node) {
+				delete(r.gone, id)
+			}
+		}
+		r.lastPrune = now
+	}
+	since := r.started
+	if g, ok := r.gone[device]; ok {
+		since = g.at
+	}
+	return now.Sub(since), false, true
 }
 
 // Known reports whether address is a node of this fleet.

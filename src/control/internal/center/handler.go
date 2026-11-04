@@ -35,8 +35,13 @@ type Activations interface {
 	Get(digest string) (activation.Record, bool)
 	Bind(record activation.Record, now time.Time) (activation.Record, activation.BindResult, error)
 	Release(digest string, now time.Time) (activation.Record, bool, error)
+	Replace(record activation.Record, holder string, now time.Time) (activation.Record, bool, error)
 	LookupRef(tenant, ref string) (activation.Record, bool)
 }
+
+// DefaultTakeoverAfter is how long the camera holding a SID must have been
+// offline before another camera's key may take the SID over.
+const DefaultTakeoverAfter = 3 * time.Minute
 
 type Config struct {
 	SIDPublicKey ed25519.PublicKey
@@ -80,6 +85,15 @@ type Config struct {
 	// ViewOrigin is an optional exact HTTPS origin allowed to call POST /v1/view
 	// from a browser on another origin. Same-origin deployments leave it empty.
 	ViewOrigin string
+	// TakeoverAfter is how long a camera holding a SID must have been offline
+	// on every node before a camera with another key may take the SID over: a
+	// camera reset and paired again, or the SID handed to another camera by a
+	// pairing system that never released it. Zero means DefaultTakeoverAfter,
+	// negative turns takeover off. It needs Fleet, which knows where cameras
+	// are online; without Fleet a second key is always refused.
+	TakeoverAfter time.Duration
+	// OnTakeover, when set, is told about every takeover.
+	OnTakeover func(tenant, fromDevice, toDevice string)
 	Now        func() time.Time
 	Logf       func(format string, args ...any)
 }
@@ -498,11 +512,17 @@ func (h *Handler) handleVerify(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 	if record.DevicePub != request.DevicePub {
-		// A second key presented a SID whose seat is taken: either a leaked
-		// SID or a device that lost its key. Surface it for operators.
-		h.config.Logf("center: ALERT SID %s tenant=%s already bound to device %s; rejected key %s", short, verified.Tenant, record.DeviceID, deviceID)
-		h.reject(w)
-		return
+		// A second key presented a SID whose seat is taken: a camera reset and
+		// paired again, the SID handed on without a release, or a leaked SID.
+		candidate := activation.Record{
+			Digest: digest, Tenant: verified.Tenant, Role: role, DeviceID: deviceID,
+			DevicePub: request.DevicePub, CameraRef: sid.CameraRef(request.SID),
+			IssuedAt: verified.IssuedAt.Unix(), ActivatedAt: h.now().Unix(),
+		}
+		var taken bool
+		if record, taken = h.takeOver(w, record, candidate, tenant, verified.IssuedAt); !taken {
+			return
+		}
 	}
 
 	signer := h.config.Signer
@@ -527,6 +547,68 @@ func (h *Handler) handleVerify(w http.ResponseWriter, r *http.Request) {
 		Tenant            string `json:"tenant"`
 		Role              string `json:"role"`
 	}{node, ticket, int(signer.EffectiveLifetime().Seconds()), deviceID, verified.Tenant, role})
+}
+
+// takeOver gives candidate's camera the SID bound to another camera's key when
+// that camera has been offline on every node for TakeoverAfter. A camera that
+// is online keeps its SID; while it is offline for less, or Center can not
+// tell (a node is down), the new camera is told to retry. The old key is
+// revoked on the nodes first and then refused for this SID forever. When it
+// does not take over, takeOver has answered the request.
+func (h *Handler) takeOver(w http.ResponseWriter, record, candidate activation.Record, tenant Tenant, issued time.Time) (activation.Record, bool) {
+	short := record.Digest[:12]
+	after := h.config.TakeoverAfter
+	if after == 0 {
+		after = DefaultTakeoverAfter
+	}
+	window := tenant.ActivationWindow
+	if window <= 0 {
+		window = DefaultActivationWindow
+	}
+	if after < 0 || h.config.Fleet == nil || tenant.NoTakeover || record.Role != admission.RoleCamera ||
+		candidate.Role != admission.RoleCamera || record.Held(candidate.DeviceID) || h.now().Sub(issued) > window {
+		h.config.Logf("center: ALERT SID %s tenant=%s already bound to device %s; rejected key %s", short, record.Tenant, record.DeviceID, candidate.DeviceID)
+		h.reject(w)
+		return record, false
+	}
+	offline, online, certain := h.config.Fleet.Absence(record.DeviceID)
+	switch {
+	case online:
+		h.config.Logf("center: ALERT SID %s tenant=%s is in use by device %s, online; rejected key %s", short, record.Tenant, record.DeviceID, candidate.DeviceID)
+		h.reject(w)
+		return record, false
+	case !certain:
+		h.config.Logf("center: SID %s tenant=%s bound to device %s, whose node is not linked; device %s should retry", short, record.Tenant, record.DeviceID, candidate.DeviceID)
+		h.unavailable(w)
+		return record, false
+	case offline < after:
+		h.config.Logf("center: SID %s tenant=%s bound to device %s, offline for %s; device %s may take it over after %s",
+			short, record.Tenant, record.DeviceID, offline.Round(time.Second), candidate.DeviceID, after)
+		h.unavailable(w)
+		return record, false
+	}
+	now := h.now()
+	if err := h.config.Blocklist.RevokeDevice(record.DeviceID, now.Add(h.revocationLifetime())); err != nil {
+		h.config.Logf("center: cannot revoke device for takeover of SID %s: %v", short, err)
+		h.unavailable(w)
+		return record, false
+	}
+	replaced, ok, err := h.config.Activations.Replace(candidate, record.DeviceID, now)
+	if err != nil {
+		h.config.Logf("center: activation store failure: %v", err)
+		h.unavailable(w)
+		return record, false
+	}
+	if !ok { // another camera took it in the meantime
+		h.reject(w)
+		return replaced, false
+	}
+	h.config.Logf("center: SID %s tenant=%s taken over by device %s from device %s, offline for %s",
+		short, record.Tenant, candidate.DeviceID, record.DeviceID, offline.Round(time.Second))
+	if h.config.OnTakeover != nil {
+		h.config.OnTakeover(record.Tenant, record.DeviceID, candidate.DeviceID)
+	}
+	return replaced, true
 }
 
 type resolveResponse struct {

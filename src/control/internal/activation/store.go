@@ -311,5 +311,27 @@ func (s *Store) Release(digest string, now time.Time) (Record, bool, error) {
 	return existing, true, nil
 }
 
+// Replace hands a SID bound to holder over to candidate's device in one step,
+// for a camera that took over the SID of an offline one. holder becomes a
+// former holder and can never bind the SID again. It returns the record in
+// force and whether the hand-over happened: false when the SID is no longer
+// bound to holder.
+func (s *Store) Replace(candidate Record, holder string, now time.Time) (Record, bool, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	existing, ok := s.byDigest[candidate.Digest]
+	if !ok || !existing.Bound() || existing.DeviceID != holder {
+		return existing, false, nil
+	}
+	candidate.Former = append(append([]string(nil), existing.Former...), holder)
+	if len(candidate.Former) > maxFormer {
+		candidate.Former = candidate.Former[len(candidate.Former)-maxFormer:]
+	}
+	if err := s.append(candidate); err != nil {
+		return Record{}, false, err
+	}
+	return candidate, true, nil
+}
+
 // Close releases the file.
 func (s *Store) Close() error { return s.file.Close() }
