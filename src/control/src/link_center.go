@@ -370,7 +370,8 @@ func (h *linkHub) serve(conn *websocket.Conn, address, peer string) {
 		conn.Close()
 		return
 	}
-	gen, err := h.registry.Linked(fleet.Report{Address: address, Cameras: hello.Cameras, Clients: hello.Clients, Stats: hello.Stats}, hello.Version)
+	gen, err := h.registry.Linked(fleet.Report{Address: address, Cameras: hello.Cameras, Clients: hello.Clients, Stats: hello.Stats,
+		Machine: hello.Machine, Version: hello.ServerVersion}, hello.Version)
 	if err != nil {
 		log.Printf("link: node %s refused: %v", address, err)
 		conn.Close()
@@ -383,7 +384,7 @@ func (h *linkHub) serve(conn *websocket.Conn, address, peer string) {
 	}
 	h.links[address] = l
 	h.mu.Unlock()
-	h.registry.NodeStats(address, gen, hello.Clients, hello.Stats, hello.Relays)
+	h.registry.NodeStats(address, gen, hello.Clients, hello.Stats, hello.Relays, nil, "")
 	log.Printf("link: node %s connected from %s (%d cameras, config version %d)", address, peer, len(hello.Cameras), hello.Version)
 
 	if welcome, err := json.Marshal(link.Message{Type: "welcome"}); err == nil {
@@ -444,7 +445,7 @@ func (h *linkHub) readLoop(l *centerLink) {
 		case "camera":
 			h.registry.Camera(l.address, l.gen, m.ID, m.Online)
 		case "stats":
-			h.registry.NodeStats(l.address, l.gen, m.Clients, m.Stats, m.Relays)
+			h.registry.NodeStats(l.address, l.gen, m.Clients, m.Stats, m.Relays, m.Machine, m.ServerVersion)
 		case "ack":
 			h.registry.ConfigAck(l.address, l.gen, m.Version)
 			log.Printf("link: node %s runs configuration version %d", l.address, m.Version)

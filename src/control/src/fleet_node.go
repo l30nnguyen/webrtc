@@ -101,6 +101,7 @@ func (s *Server) LocalReport(address string) fleet.Report {
 	if s.stats != nil {
 		report.Stats = s.stats.Snapshot()
 	}
+	report.Machine, report.Version = s.host.Last(), s.version
 	return report
 }
 

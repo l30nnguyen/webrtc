@@ -20,6 +20,7 @@ import (
 
 	"signaling-server/internal/fleet"
 	"signaling-server/internal/history"
+	"signaling-server/internal/host"
 )
 
 const (
@@ -64,6 +65,8 @@ type Report struct {
 	AuthFailures     int64            `json:"auth_failures"`
 	QuotaRejects     int64            `json:"quota_rejects"`
 	PeersDenied      int64            `json:"peers_denied"`
+	// Machine is the relay's machine load (relay 1.2.0 and later).
+	Machine *host.Load `json:"machine,omitempty"`
 }
 
 // Relay is the configuration part of a report, as the fleet lists relays.
@@ -244,6 +247,11 @@ func (r *Registry) addHistory(e *entry, report Report) {
 	for _, transport := range []string{"udp", "tcp", "tls"} {
 		gauges["clients_"+transport] = float64(report.ByTransport[transport])
 	}
+	if report.Machine != nil {
+		for gauge, v := range report.Machine.Gauges() {
+			gauges[gauge] = v
+		}
+	}
 	r.History.Sample(history.SourceRelay, report.Name, report.Region, gauges)
 	// A relay new here or restarted counts from zero.
 	before := e.Report
@@ -387,7 +395,10 @@ func (r *Registry) FleetStatuses() []fleet.RelayStatus {
 	var out []fleet.RelayStatus
 	for _, s := range r.Statuses() {
 		status := fleet.RelayStatus{Name: s.Name, Region: s.Region, Healthy: s.Up, Mbps: s.Mbps, Measured: true,
-			Allocations: int(s.Allocations), CapacityMbps: s.CapacityMbps, At: s.LastSeen}
+			Allocations: int(s.Allocations), CapacityMbps: s.CapacityMbps, At: s.LastSeen, Version: s.Version}
+		if s.Up {
+			status.Machine = s.Machine
+		}
 		switch {
 		case s.State == "stopping":
 			status.Error = "stopped"

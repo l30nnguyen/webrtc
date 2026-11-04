@@ -18,6 +18,7 @@ import (
 	"time"
 
 	"signaling-server/internal/admission"
+	"signaling-server/internal/host"
 	"signaling-server/internal/stats"
 )
 
@@ -69,6 +70,10 @@ type Report struct {
 	Cameras []string   `json:"cameras"`
 	Clients int        `json:"clients"`
 	Stats   stats.Days `json:"stats,omitempty"`
+	// Machine is the node's machine load, nil until measured; Version its
+	// server version.
+	Machine *host.Load `json:"machine,omitempty"`
+	Version string     `json:"version,omitempty"`
 }
 
 // RelayStatus is one relay's last measurement by a node of its region.
@@ -87,6 +92,10 @@ type RelayStatus struct {
 	// "down", or empty when it has none.
 	TCP string `json:"tcp,omitempty"`
 	TLS string `json:"tls,omitempty"`
+	// Machine is the relay's machine load and Version its version, from its
+	// own reports (empty for a relay that doesn't report).
+	Machine *host.Load `json:"machine,omitempty"`
+	Version string     `json:"version,omitempty"`
 }
 
 // MaxRelayStatuses bounds the relay measurements one node reports.
@@ -104,6 +113,8 @@ type nodeState struct {
 	cameras  map[string]struct{}
 	clients  int
 	stats    stats.Days
+	machine  *host.Load
+	version  string
 	relays   []RelayStatus
 	pending  []time.Time
 }
@@ -307,7 +318,7 @@ func (r *Registry) Camera(address string, link uint64, device string, online boo
 
 // NodeStats records a linked node's client count, counters and relay
 // measurements.
-func (r *Registry) NodeStats(address string, link uint64, clients int, days stats.Days, relays []RelayStatus) {
+func (r *Registry) NodeStats(address string, link uint64, clients int, days stats.Days, relays []RelayStatus, machine *host.Load, version string) {
 	if len(relays) > MaxRelayStatuses {
 		relays = relays[:MaxRelayStatuses]
 	}
@@ -315,6 +326,12 @@ func (r *Registry) NodeStats(address string, link uint64, clients int, days stat
 	defer r.mu.Unlock()
 	if n := r.byAddr[address]; n != nil && n.link == link && link != 0 {
 		n.clients, n.stats, n.relays, n.lastSeen = clients, days, relays, r.now()
+		if machine != nil {
+			n.machine = machine
+		}
+		if version != "" {
+			n.version = version
+		}
 	}
 }
 
@@ -406,6 +423,7 @@ func (r *Registry) applyLocked(n *nodeState, report Report) {
 	}
 	n.clients = report.Clients
 	n.stats = report.Stats
+	n.machine, n.version = report.Machine, report.Version
 	n.lastSeen = r.now()
 }
 
@@ -669,6 +687,10 @@ type NodeStatus struct {
 	// Center's own node always runs the active one).
 	ConfigVersion int        `json:"config_version"`
 	Stats         stats.Days `json:"-"`
+	// Version is the server version the node runs, and Machine its
+	// machine's latest load (both empty while it is down).
+	Version string     `json:"version,omitempty"`
+	Machine *host.Load `json:"machine,omitempty"`
 }
 
 // Status returns every node with its state and counters.
@@ -683,6 +705,9 @@ func (r *Registry) Status() []NodeStatus {
 			Cameras: len(n.cameras), Clients: n.clients, Capacity: n.Capacity, ConfigVersion: n.acked, Stats: stats.Days{}}
 		if n.local {
 			status.ConfigVersion = r.version
+		}
+		if status.Healthy {
+			status.Version, status.Machine = n.version, n.machine
 		}
 		if !n.lastSeen.IsZero() {
 			status.LastSeen = n.lastSeen.UTC().Format(time.RFC3339)

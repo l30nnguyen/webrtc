@@ -140,7 +140,7 @@ admin socket `/run/matrix/admin.sock`; nothing administrative is served on the
 public port:
 
 ```bash
-sudo matrix-fleet status        # nodes up/down, cameras, clients, load, config version
+sudo matrix-fleet status        # nodes up/down, cameras, clients, load, CPU/memory/disk/network, version, config version
 sudo matrix-fleet stats 7       # requests, connected/failed by path, errors, per day and per node
 sudo matrix-fleet -json stats 7 # the same as JSON
 ```

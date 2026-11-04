@@ -150,7 +150,8 @@ func (s *Server) fleetStatus() FleetStatus {
 	}
 	report := s.LocalReport("")
 	status := FleetStatus{Nodes: []fleet.NodeStatus{{Address: "(this server)", Healthy: true,
-		Cameras: len(report.Cameras), Clients: report.Clients, LastSeen: time.Now().UTC().Format(time.RFC3339)}}}
+		Cameras: len(report.Cameras), Clients: report.Clients, LastSeen: time.Now().UTC().Format(time.RFC3339),
+		Version: report.Version, Machine: report.Machine}}}
 	if s.nodeLink != nil {
 		_, version := s.nodeLink.Config()
 		status.ConfigVersion, status.Center, status.Linked = version, s.nodeLink.serverName, s.nodeLink.connected.Load()

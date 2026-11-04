@@ -356,6 +356,14 @@ func TestReporterSignsWhatTheControlServerChecks(t *testing.T) {
 	if got.Name != "relay-test" || got.TLSHost != "relay.test" || got.TCPPort == 0 || got.TLSPort == 0 || got.State != "up" || got.CapacityMbps != 500 {
 		t.Fatalf("report %+v", got)
 	}
+	// The machine's load, under the names the control server reads (host.Load).
+	if _, err := os.Stat("/proc/stat"); err == nil && (got.Machine == nil || got.Machine.MemMB <= 0 || got.Machine.Cores <= 0) {
+		t.Fatalf("report machine %+v", got.Machine)
+	}
+	machine, _ := json.Marshal(hostLoad{})
+	if string(machine) != `{"cpu_pct":0,"load1":0,"cores":0,"mem_pct":0,"mem_mb":0,"rss_mb":0,"disk_pct":0,"net_mbps":0,"at":""}` {
+		t.Fatalf("machine JSON %s", machine)
+	}
 	for name, mutate := range map[string]func(*options){
 		"plain http":  func(o *options) { o.control = "http://control.example.test" },
 		"no name":     func(o *options) { o.name = "" },

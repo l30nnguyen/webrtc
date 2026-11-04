@@ -185,7 +185,8 @@ func TestFleetThroughTheAdminSocket(t *testing.T) {
 	}
 
 	out, code := withSocket("status")
-	if code != 0 || !strings.Contains(out, "Configuration version 1") || !strings.Contains(out, "de00") {
+	if code != 0 || !strings.Contains(out, "Configuration version 1") || !strings.Contains(out, "de00") ||
+		!strings.Contains(out, "CPU") || !strings.Contains(out, "VERSION") {
 		t.Fatalf("status: %d %s", code, out)
 	}
 	second := writeCandidate(t, dir, "second.json", `{"IT":"US"}`)

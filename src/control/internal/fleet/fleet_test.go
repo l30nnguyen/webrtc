@@ -8,6 +8,8 @@ import (
 	"strings"
 	"testing"
 	"time"
+
+	"signaling-server/internal/host"
 )
 
 const (
@@ -210,8 +212,8 @@ func TestRelaysMergeTheLatestMeasurement(t *testing.T) {
 	}
 	link1 := linked(t, r, Report{Address: asia})
 	link2 := linked(t, r, Report{Address: asia2})
-	r.NodeStats(asia, link1, 0, nil, []RelayStatus{{Name: "sg-relay", Healthy: false, At: "2026-10-27T00:00:00Z"}})
-	r.NodeStats(asia2, link2, 0, nil, []RelayStatus{{Name: "sg-relay", Healthy: true, Mbps: 5, At: "2026-10-27T00:00:15Z"}})
+	r.NodeStats(asia, link1, 0, nil, []RelayStatus{{Name: "sg-relay", Healthy: false, At: "2026-10-27T00:00:00Z"}}, nil, "")
+	r.NodeStats(asia2, link2, 0, nil, []RelayStatus{{Name: "sg-relay", Healthy: true, Mbps: 5, At: "2026-10-27T00:00:15Z"}}, nil, "")
 	got := r.Relays(nil)
 	if len(got) != 2 || got[0].Name != "sg-relay" || !got[0].Healthy || got[0].MeasuredBy != asia2 {
 		t.Fatalf("relays %+v", got)
@@ -223,5 +225,35 @@ func TestRelaysMergeTheLatestMeasurement(t *testing.T) {
 	r.Unlinked(asia2, link2)
 	if got := r.Relays(nil); got[0].MeasuredBy != asia || got[0].Healthy {
 		t.Fatalf("after unlink %+v", got[0])
+	}
+}
+
+func TestStatusShowsTheMachineOfLinkedNodesOnly(t *testing.T) {
+	r, _ := testRegistry(t, &Report{Address: self})
+	link := linked(t, r, Report{Address: asia, Version: "2.6.0", Machine: &host.Load{CPU: 12, MemMB: 961}})
+	find := func() NodeStatus {
+		for _, s := range r.Status() {
+			if s.Address == asia {
+				return s
+			}
+		}
+		return NodeStatus{}
+	}
+	if s := find(); s.Version != "2.6.0" || s.Machine == nil || s.Machine.CPU != 12 {
+		t.Fatalf("after hello: %+v", s)
+	}
+	// A stats message without a measurement keeps the last one.
+	r.NodeStats(asia, link, 3, nil, nil, nil, "")
+	if s := find(); s.Clients != 3 || s.Machine == nil || s.Version != "2.6.0" {
+		t.Fatalf("after stats: %+v", s)
+	}
+	r.NodeStats(asia, link, 3, nil, nil, &host.Load{CPU: 80}, "2.6.1")
+	if s := find(); s.Machine.CPU != 80 || s.Version != "2.6.1" {
+		t.Fatalf("after new stats: %+v", s)
+	}
+	// Down: nothing stale is shown.
+	r.Unlinked(asia, link)
+	if s := find(); s.Healthy || s.Machine != nil || s.Version != "" {
+		t.Fatalf("down: %+v", s)
 	}
 }

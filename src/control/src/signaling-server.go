@@ -32,6 +32,7 @@ import (
 	"signaling-server/internal/events"
 	"signaling-server/internal/fleet"
 	"signaling-server/internal/history"
+	"signaling-server/internal/host"
 	"signaling-server/internal/link"
 	"signaling-server/internal/relay"
 	"signaling-server/internal/sid"
@@ -115,12 +116,14 @@ type Server struct {
 	history       *history.Store     // the region's statistics (-statistic-dir)
 	events        *events.Log        // what happened to each connection (-event-dir)
 	refusals      refusalLimiter
+	host          *host.Sampler // this machine's load, every controlSampleInterval
+	version       string        // cfg/version, read at start
 	// statisticAllow limits /admin/statistic; empty: not served.
 	statisticAllow []netip.Prefix
 }
 
 func NewServer(playerPath string, rootDir string) *Server {
-	return &Server{
+	s := &Server{
 		clients: make(map[string]*Client),
 		upgrader: websocket.Upgrader{
 			ReadBufferSize:  1024,
@@ -129,7 +132,10 @@ func NewServer(playerPath string, rootDir string) *Server {
 		},
 		playerPath: playerPath,
 		rootDir:    rootDir,
+		host:       host.NewSampler(rootDir),
 	}
+	s.version = s.loadVersion()
+	return s
 }
 
 // SetAdmission requires a Center-issued ticket from every client. The ticket
@@ -1180,9 +1186,9 @@ func main() {
 				store.Flush()
 			}
 		}()
-		go srv.sampleControl()
 		log.Printf("Statistics kept in %s", *statisticDir)
 	}
+	go srv.sampleControl()
 	go srv.saveOnStop(*statsPath)
 	if *eventDir != "" {
 		eventLog, err := events.Open(*eventDir, *eventDays)

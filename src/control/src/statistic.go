@@ -201,7 +201,8 @@ func (s *Server) handleStatistic(w http.ResponseWriter, r *http.Request) {
 						{"requests", "s1", count("requests")}, {"connected", "s3", count("viewer_connected")},
 						{"failed", "s4", count("viewer_failed", "camera_offline")}})},
 				}
-				src.Totals = controlTotals(rows)
+				src.Charts = append(src.Charts, machineCharts(rows, from, now)...)
+				src.Totals = append(controlTotals(rows), machineTotals(rows)...)
 				page.Control = append(page.Control, src)
 			} else {
 				src.Charts = []chart{
@@ -210,7 +211,8 @@ func (s *Server) handleStatistic(w http.ResponseWriter, r *http.Request) {
 					{"Relayed Mbps", lineChart(rows, from, now, []series{
 						{"average", "s1", gaugeAvg("mbps")}, {"peak", "s5", gaugeMax("mbps")}})},
 				}
-				src.Totals = relayTotals(rows)
+				src.Charts = append(src.Charts, machineCharts(rows, from, now)...)
+				src.Totals = append(relayTotals(rows), machineTotals(rows)...)
 				page.RelayData = append(page.RelayData, src)
 			}
 		}
@@ -282,6 +284,37 @@ func relayTotals(rows []history.Row) []total {
 		{"new clients", fmt.Sprint(sumCounts(rows, "new_clients"))},
 		{"refused logins", fmt.Sprint(sumCounts(rows, "auth_failures"))},
 		{"minutes up", fmt.Sprint(minutes)},
+	}
+}
+
+// measuredMachine reports whether any row has the machine's load (servers
+// before 2.6.0 and relays before 1.2.0 don't send it).
+func measuredMachine(rows []history.Row) bool {
+	for _, row := range rows {
+		if _, ok := row.Gauges["mem_pct"]; ok {
+			return true
+		}
+	}
+	return false
+}
+
+// machineCharts are the CPU, memory and disk of the source's machine.
+func machineCharts(rows []history.Row, from, to time.Time) []chart {
+	if !measuredMachine(rows) {
+		return nil
+	}
+	return []chart{{"Machine %", lineChart(rows, from, to, []series{
+		{"CPU", "s1", gaugeAvg("cpu_pct")}, {"CPU peak", "s5", gaugeMax("cpu_pct")},
+		{"memory", "s2", gaugeAvg("mem_pct")}, {"disk", "s3", gaugeMax("disk_pct")}})}}
+}
+
+func machineTotals(rows []history.Row) []total {
+	if !measuredMachine(rows) {
+		return nil
+	}
+	return []total{
+		{"peak CPU / memory / disk %", fmt.Sprintf("%.0f / %.0f / %.0f", peak(rows, "cpu_pct"), peak(rows, "mem_pct"), peak(rows, "disk_pct"))},
+		{"peak load / process MB / net Mbps", fmt.Sprintf("%.2f / %.0f / %.1f", peak(rows, "load1"), peak(rows, "rss_mb"), peak(rows, "net_mbps"))},
 	}
 }
 

@@ -19,7 +19,8 @@ import (
 )
 
 // controlSampleInterval is how often the control server samples itself
-// into the statistics (cameras and viewers connected).
+// (cameras and viewers connected, and its machine's load) into the
+// statistics and for the fleet status.
 const controlSampleInterval = 15 * time.Second
 
 // SetHistory turns on the region's statistics (-statistic-dir).
@@ -75,10 +76,15 @@ func (s *Server) saveOnStop(statsPath string) {
 	os.Exit(0)
 }
 
-// sampleControl samples the cameras and viewers connected, every
-// controlSampleInterval.
+// sampleControl samples the machine, and with statistics on (-statistic-dir)
+// the cameras and viewers connected, every controlSampleInterval.
 func (s *Server) sampleControl() {
 	for {
+		load, measured := s.host.Sample()
+		if s.history == nil {
+			time.Sleep(controlSampleInterval)
+			continue
+		}
 		cameras, viewers := 0, 0
 		s.mu.RLock()
 		for _, c := range s.clients {
@@ -90,9 +96,13 @@ func (s *Server) sampleControl() {
 		}
 		s.mu.RUnlock()
 		name, region := s.historyIdentity()
-		s.history.Sample(history.SourceControl, name, region, map[string]float64{
-			"cameras": float64(cameras), "viewers": float64(viewers),
-		})
+		gauges := map[string]float64{"cameras": float64(cameras), "viewers": float64(viewers)}
+		if measured {
+			for gauge, v := range load.Gauges() {
+				gauges[gauge] = v
+			}
+		}
+		s.history.Sample(history.SourceControl, name, region, gauges)
 		time.Sleep(controlSampleInterval)
 	}
 }

@@ -90,8 +90,9 @@ row per source and step (`-statistic-step`, 30 minutes, or `hour`).
 A row is `{"t", "step", "source": "control"|"relay", "name", "region",
 "minutes", "gauges": {NAME: {"max", "avg"}}, "counts": {NAME: N}}`: gauges are
 sampled every 15 s, counts are what happened in the step, `minutes` the
-minutes with data (a relay's minutes up). At most about 600 bytes, so one
-source takes about 10.5 MB a year at 30 minutes.
+minutes with data (a relay's minutes up). At most about 800 bytes (600
+without the machine gauges), so one source takes about 14 MB a year at 30
+minutes.
 
 - Relay gauges: `clients` and `clients_udp`, `clients_tcp`, `clients_tls` (the
   clients it serves, by how they reach it), `mbps`. Counts: `rx_bytes`,
@@ -102,6 +103,11 @@ source takes about 10.5 MB a year at 30 minutes.
   after each viewing attempt `viewer_connected`, `viewer_failed`,
   `viewer_path_lan|direct|relay`, `viewer_relay_udp|tcp|tls`,
   `viewer_error_<code>` (the same with `camera_` for camera reports).
+- Machine gauges, of both (control server 2.6.0 and relay 1.2.0 on): `cpu_pct`
+  (all cores), `load1`, `mem_pct` (memory in use, total less available),
+  `rss_mb` (the server process), `disk_pct`, `net_mbps` (the busier direction
+  of every interface but loopback), read from `/proc`. The relay sends them in
+  each report as `"machine"`; the page charts them as "Machine %".
 
 `/admin/statistic/data?from=2026-11-01&to=2026-11-03&step=hour&source=relay&name=relay-sg01&format=csv`
 returns rows for a charting tool (Grafana with a CSV/JSON data source, Excel,

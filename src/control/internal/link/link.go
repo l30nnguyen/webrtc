@@ -18,9 +18,9 @@
 //     node verified Center's certificate for. Center checks it against the
 //     node's public key in config.json.
 //  2. The node sends {"type":"hello"}: its full camera list, client count,
-//     counters, its measurements of its region's relays and the configuration
-//     version it runs. Then {"type":"camera"} as cameras come and go, and
-//     {"type":"stats"} (counters and relays) every StatsInterval.
+//     counters, its measurements of its region's relays, the configuration
+//     version it runs, its server version and its machine's load. Then {"type":"camera"} as cameras come and go, and
+//     {"type":"stats"} (counters, relays and machine load) every StatsInterval.
 //     Center answers {"type":"welcome"} once it has taken the login and the
 //     list; a refused node is just disconnected.
 //  3. Center pushes {"type":"config"}: the configuration signed with the
@@ -40,6 +40,7 @@ import (
 	"time"
 
 	"signaling-server/internal/fleet"
+	"signaling-server/internal/host"
 	"signaling-server/internal/stats"
 )
 
@@ -91,6 +92,9 @@ type Message struct {
 	Clients int                 `json:"clients,omitempty"`
 	Stats   stats.Days          `json:"stats,omitempty"`
 	Relays  []fleet.RelayStatus `json:"relays,omitempty"`
+	// The node's machine and server version (since 2.6.0).
+	Machine       *host.Load `json:"machine,omitempty"`
+	ServerVersion string     `json:"server_version,omitempty"`
 	// hello, config, ack, config_error
 	Version int `json:"version,omitempty"`
 	// camera

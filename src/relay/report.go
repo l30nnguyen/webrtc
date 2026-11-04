@@ -20,7 +20,7 @@ import (
 )
 
 const (
-	relayVersion = "1.1.0"
+	relayVersion = "1.2.0"
 	// reportInterval is how often the relay reports to its control server,
 	// which counts a relay silent for three intervals as gone.
 	reportInterval = 15 * time.Second
@@ -61,6 +61,9 @@ type report struct {
 	AuthFailures     int64            `json:"auth_failures"`
 	QuotaRejects     int64            `json:"quota_rejects"`
 	PeersDenied      int64            `json:"peers_denied"`
+	// Machine is the relay host's CPU, memory, disk and network, since the
+	// previous report (absent where /proc is missing).
+	Machine *hostLoad `json:"machine,omitempty"`
 }
 
 // reporter sends reports to the control server named by -control.
@@ -69,6 +72,7 @@ type reporter struct {
 	identity report // the fixed part of every report
 	stats    *stats
 	secrets  *secrets
+	host     *hostSampler
 	client   *http.Client
 	now      func() time.Time
 
@@ -124,7 +128,7 @@ func newReporter(o options, st *stats, s *secrets) (*reporter, error) {
 	}
 	return &reporter{
 		endpoint: control.Scheme + "://" + control.Host + reportPath,
-		identity: identity, stats: st, secrets: s,
+		identity: identity, stats: st, secrets: s, host: newHostSampler("/"),
 		client: &http.Client{Timeout: reportTimeout}, now: time.Now,
 	}, nil
 }
@@ -146,6 +150,9 @@ func (r *reporter) build(state string) report {
 		out.Mbps = float64(max(out.RxBytes-r.lastRx, out.TxBytes-r.lastTx)) * 8 / 1e6 / seconds
 	}
 	r.lastAt, r.lastRx, r.lastTx = now, out.RxBytes, out.TxBytes
+	if load, ok := r.host.Sample(); ok {
+		out.Machine = &load
+	}
 	return out
 }
 

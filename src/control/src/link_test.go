@@ -13,6 +13,7 @@ import (
 	"net/netip"
 	"os"
 	"path/filepath"
+	"runtime"
 	"strconv"
 	"strings"
 	"testing"
@@ -88,6 +89,8 @@ func (l *linkLab) config(version int, nodeKey string) fleet.Config {
 
 func (l *linkLab) startNode(key ed25519.PrivateKey) (*Server, *nodeLink) {
 	srv := NewServer("", l.dir+"/")
+	srv.version = "9.9.9"
+	srv.host.Sample()
 	n := newNodeLink(srv, l.url, "example.com", linkNode, key, l.centerKey.Public().(ed25519.PublicKey), l.tls,
 		filepath.Join(l.dir, "node-config.json"))
 	srv.nodeLink = n
@@ -131,6 +134,10 @@ func TestNodeLinksPresenceAndConfig(t *testing.T) {
 	eventually(t, "node up with version 1", func() bool { s := l.node(); return s.Healthy && s.ConfigVersion == 1 })
 	if _, version := n.Config(); version != 1 {
 		t.Fatalf("node runs version %d", version)
+	}
+	// Its server version and machine load come with it (on Linux).
+	if s := l.node(); s.Version != "9.9.9" || (runtime.GOOS == "linux" && (s.Machine == nil || s.Machine.MemMB <= 0)) {
+		t.Fatalf("node status %+v machine %+v", s, s.Machine)
 	}
 
 	// Cameras coming and going reach Center at once.

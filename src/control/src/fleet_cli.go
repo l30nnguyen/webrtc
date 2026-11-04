@@ -28,6 +28,7 @@ import (
 
 	"signaling-server/internal/admission"
 	"signaling-server/internal/fleet"
+	"signaling-server/internal/host"
 	"signaling-server/internal/stats"
 )
 
@@ -435,7 +436,7 @@ func (c fleetCLI) status() error {
 		fmt.Fprintln(c.out, "No fleet configuration: this server serves its own cameras only.")
 	}
 	table := tabwriter.NewWriter(c.out, 0, 0, 2, ' ', 0)
-	fmt.Fprintln(table, "NODE\tADDRESS\tREGION\tSTATE\tCAMERAS\tCLIENTS\tLOAD\tCONFIG\tLAST REPORT")
+	fmt.Fprintln(table, "NODE\tADDRESS\tREGION\tSTATE\tCAMERAS\tCLIENTS\tLOAD\tCPU\tMEM\tDISK\tNET\tVERSION\tCONFIG\tLAST REPORT")
 	for _, n := range status.Nodes {
 		state := "DOWN"
 		if n.Healthy {
@@ -452,15 +453,15 @@ func (c fleetCLI) status() error {
 				config += " (old)"
 			}
 		}
-		fmt.Fprintf(table, "%s\t%s\t%s\t%s\t%d\t%d\t%s\t%s\t%s\n", dash(n.Name), n.Address, dash(n.Region), state,
-			n.Cameras, n.Clients, load, config, dash(n.LastSeen))
+		fmt.Fprintf(table, "%s\t%s\t%s\t%s\t%d\t%d\t%s\t%s\t%s\t%s\t%s\n", dash(n.Name), n.Address, dash(n.Region), state,
+			n.Cameras, n.Clients, load, machineColumns(n.Machine), dash(n.Version), config, dash(n.LastSeen))
 	}
 	if err := table.Flush(); err != nil || len(status.Relays) == 0 {
 		return err
 	}
 	fmt.Fprintln(c.out)
 	table = tabwriter.NewWriter(c.out, 0, 0, 2, ' ', 0)
-	fmt.Fprintln(table, "RELAY\tREGION\tSTATE\tMBPS\tLOAD\tALLOCATIONS\tMEASURED BY\tAT")
+	fmt.Fprintln(table, "RELAY\tREGION\tSTATE\tMBPS\tLOAD\tALLOCATIONS\tCPU\tMEM\tDISK\tNET\tVERSION\tMEASURED BY\tAT")
 	for _, r := range status.Relays {
 		state, mbps, load, allocations := "not measured", "-", "-", "-"
 		if r.At != "" {
@@ -486,7 +487,8 @@ func (c fleetCLI) status() error {
 				allocations = fmt.Sprint(r.Allocations)
 			}
 		}
-		fmt.Fprintf(table, "%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\n", r.Name, r.Region, state, mbps, load, allocations, dash(r.MeasuredBy), dash(r.At))
+		fmt.Fprintf(table, "%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\n", r.Name, r.Region, state, mbps, load, allocations,
+			machineColumns(r.Machine), dash(r.Version), dash(r.MeasuredBy), dash(r.At))
 	}
 	return table.Flush()
 }
@@ -564,6 +566,15 @@ func (c fleetCLI) stats(days int) error {
 		fmt.Fprintf(table, "%s\t%s\t%d\t%d/%d\t%d/%d\n", dash(n.Name), n.Address, d.Requests, d.Camera.Connected, d.Camera.Failed, d.Player.Connected, d.Player.Failed)
 	}
 	return table.Flush()
+}
+
+// machineColumns are the CPU, MEM, DISK and NET columns of a machine's load
+// (tab-separated), dashes when it was not measured.
+func machineColumns(m *host.Load) string {
+	if m == nil {
+		return "-\t-\t-\t-"
+	}
+	return fmt.Sprintf("%.0f%% (%.2f/%d)\t%.0f%% of %.0f MB\t%.0f%%\t%.1f Mbps", m.CPU, m.Load1, m.Cores, m.Mem, m.MemMB, m.Disk, m.NetMbps)
 }
 
 func dash(s string) string {
