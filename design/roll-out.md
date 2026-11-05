@@ -34,20 +34,28 @@ keeping both sides.
 | Relay | Droplet | Reports to | Transports | Logins |
 |---|---|---|---|---|
 | `mx-relay-us00.5gen.care` | DO nyc3, 45.55.167.162, 1 vCPU / 1 GB (`vps.sh relay_us`) | Center `matrix.5gen.care`, region US | UDP 3478, TCP 80, TLS 443 (Let's Encrypt, certbot stops the relay a few seconds every 60 days) | per session only |
-| `mx-relay-sg00` (no DNS name yet) | DO sgp1, 188.166.244.220, 1 vCPU / 1 GB (`vps.sh relay_sg`) | node `matrix-sg00.5gen.care`, region SG | UDP 3478, TCP 80; **TLS off** until a DNS name exists | per session, plus violet's fixed login (copied on the box) for clients still configured with it |
+| `mx-relay-sg00` (no DNS name yet) | DO sgp1, 188.166.244.220, 1 vCPU / 1 GB (`vps.sh relay_sg`) | node `matrix-sg00.5gen.care`, region SG | UDP 3478, TCP 80; **TLS off** until a DNS name exists | per session only (violet's fixed login was removed on 2026-11-04) |
 
-- violet on the SG droplet is stopped and kept: container `violet-turn`,
-  restart policy `no`.
+- violet and Docker are removed from both relay droplets (2026-11-05). The
+  control servers' `cfg/turn.conf` (violet, and the AWS dev relay) is removed:
+  each hands out only its reporting relay. Checked in sg00's connection log:
+  requests got `3.95.228.203` from `turn.conf` until the relay registered at
+  09:39:26, then `mx-relay-sg00`.
+- The old binaries in `/opt/matrix/backups/` and old packages in
+  `~/releases` were removed on 2026-11-05; only 2.5.0 is left. The next
+  `setup.sh upgrade` saves a new backup again.
 - The SG droplet sits behind a DigitalOcean cloud firewall: UDP 3478 and
   49152–65535, TCP 22, 80 and 443 pass; TCP 3478 and other UDP ports don't.
   `mx-relay-us00` uses ufw with the same ports.
-- Each control server gets its relay's shared secret in
-  `cfg/relay-secrets.json` (`scratchpad` script `control-add-relays.sh`,
-  merged with a backup `relay-secrets.json.bak-20261104`). Until then the
-  relay logs `403 unknown relay` and the node keeps using `cfg/turn.conf`.
-- The AWS dev VPS (`webrtc.5gen.care`, 3.95.228.203) is no longer part of
-  the relay plan. It will become the license server (the machine that holds
-  the keys); its old dev relay and PM2 apps are not used by production.
+- Each control server has its relay's shared secret in
+  `cfg/relay-secrets.json` (2026-11-04). Without it a relay logs
+  `403 unknown relay` and is not handed out.
+- The AWS dev VPS (`webrtc.5gen.care`, 3.95.228.203) is not part of the
+  matrix fleet. It will become the license server (the machine that holds
+  the keys). Since 2026-11-05 it runs violet in Docker (`violet-turn`,
+  restart `always`, relay ports 49152–65535) for the testers' `webrtc_prod`
+  on the same box, whose `cfg/turn.conf` points at it; the dev matrix-relay
+  there is removed.
 - Tests and measurements: [capacity.md](capacity.md#droplet-measurement-2026-11-04),
   including violet against matrix-relay on the same droplet.
 
@@ -147,10 +155,8 @@ ran no load, runtime or chaos tests. Its findings, with today's status:
    - publish it
    - keep 2.1.3 for rollback
 2. A production `matrix-relay` per region: `mx-relay-us00` and
-   `mx-relay-sg00` installed 2026-11-04. Remove the violet container after a
-   week without relay errors; then drop violet's fixed login from the SG
-   relay once nothing uses it. Add the SG DNS name and TLS (R13), and a
-   backup relay (R12).
+   `mx-relay-sg00` in service since 2026-11-04, violet retired. Add the SG
+   DNS name and TLS (R13), and a backup relay (R12).
 3. The mobile app sends its connection report (application_todo.md, step 7).
 4. Watch for 7 days on `/admin/statistic` and `matrix-fleet status`:
    - verify success
@@ -194,5 +200,5 @@ ran no load, runtime or chaos tests. Its findings, with today's status:
 | Control server | `/opt/matrix/backups/<time>/` holds the previous binary and player: copy it back as `/opt/matrix/matrix_cc` and run `systemctl restart matrix`, or run `setup.sh upgrade` from the previous package. 2.5.0 and 2.6.0 change no data format; a takeover writes ordinary activation records (2.4.0 reads them); 2.6.0's extra statistics gauges are ignored by older versions |
 | Fleet configuration | `sudo matrix-fleet rollback [VERSION]` |
 | Takeover only | Per tenant: `"no_takeover": true` in `tenants.json`. For the whole server there is no flag yet: set `TakeoverAfter: -1` in the Center config and rebuild, or roll back to 2.4.0 |
-| Relay | On the SG droplet: `systemctl disable --now matrix-relay; docker update --restart=always violet-turn; docker start violet-turn`. On a control server: copy `cfg/relay-secrets.json.bak-20261104` back, or remove the file if there was none before (read per request, no restart); it then uses `cfg/turn.conf` again. A new relay binary: replace `/usr/local/bin/matrix-relay`, `systemctl restart matrix-relay` |
+| Relay | A new relay binary: keep the old one, replace `/usr/local/bin/matrix-relay`, `systemctl restart matrix-relay` (sessions on it drop and reconnect). There is no violet to go back to on the relay droplets; in an emergency a control server can hand out fixed relays again from a `cfg/turn.conf` once `cfg/relay-secrets.json` is removed (read per request, no restart) |
 | Camera | Publish the previous binary to the download URL; cameras take it at their next boot |

@@ -172,7 +172,7 @@ Every server that hands a relay out keeps its credentials in
 `/opt/matrix/cfg/relay-secrets.json` (owner `matrix`, mode 0600;
 `sudo ./setup.sh relay-secrets FILE`), read on each viewing request:
 
-- **violet** (retired 2026-11-04; matrix-relay accepts its fixed login as a fixed user) has fixed credentials only:
+- **violet** (retired from the fleet 2026-11-04) has fixed credentials only:
   `{"turn-vn00": {"username": "matrix", "password": "<the --credentials password>"}}`.
   The same pair goes to every session, as with `cfg/turn.conf`; change it in
   violet's config and in this file together to rotate it.

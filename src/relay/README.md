@@ -27,8 +27,7 @@ already serves 80 and 443 (a control server), use
 
 In production (2026-11-04): `mx-relay-us00.5gen.care` (UDP, TCP, TLS;
 reports to the Center) and `mx-relay-sg00` on 188.166.244.220 (UDP and TCP,
-no TLS until it has a DNS name; reports to sg00; also accepts violet's fixed
-login). Measurements, including violet against matrix-relay:
+no TLS until it has a DNS name; reports to sg00). Measurements, including violet against matrix-relay:
 [capacity.md](../../design/capacity.md#droplet-measurement-2026-11-04).
 
 `secrets.json` must be owner-only (0600). SIGHUP rereads it:
