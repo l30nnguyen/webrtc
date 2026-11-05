@@ -1,6 +1,6 @@
 # Roll-out of matrix
 
-Updated 2026-11-04. This covers:
+Updated 2026-11-05. This covers:
 - what is released and where it runs
 - the code review findings
 - what matrix still needs to be run the way vrelay is run (`~/code/vrelay`,
@@ -19,8 +19,8 @@ sheet `todo` (Google Drive, matrix docs folder).
 
 | Part | Version | Commit | State |
 | --- | --- | --- | --- |
-| Control server `matrix_cc` | 2.5.0 | `a091483` (tag `release_2.5.0`) | Ran on the Center `matrix.5gen.care` (DO nyc3) and node `matrix-sg00` (DO sgp1) 2026-11-04 to 2026-11-05 |
-| Control server `matrix_cc` | 2.6.1 | 2.6.0 `9808bcf` + `4244dfa` | Deployed 2026-11-05 to the Center and sg00. 2.6.0 adds machine load (CPU, memory, disk, network) and the server version to `matrix-fleet status` and `/admin/statistic`; 2.6.1 lists reporting relays in the Center's status |
+| Control server `matrix_cc` | 2.5.0 | `a091483` (tag `release_2.5.0`) | Running on the Center `matrix.5gen.care` (DO nyc3) and node `matrix-sg00` (DO sgp1) since 2026-11-04, until 2.6.1 is deployed |
+| Control server `matrix_cc` | 2.6.1 | `e4fd11f` (2.6.0 `9808bcf` + `4244dfa`) | Pushed 2026-11-05; deploy with `./deploy.sh sg`, then `./deploy.sh prod` (each asks to type `prod`). 2.6.0 adds machine load (CPU, memory, disk, network) and the server version to `matrix-fleet status` and `/admin/statistic`; 2.6.1 lists reporting relays in the Center's status |
 | Relay stream server `matrix-relay` | 1.2.0 | `9808bcf` (sends its machine load) | Production since 2026-11-04 on `mx-relay-us00` (nyc3, reports to the Center) and `mx-relay-sg00` (sgp1, the former violet droplet, reports to sg00). See [Relay stream servers](#relay-stream-servers-2026-11-04) |
 | Camera `matrix` (HCX130) | 2.1.3 published; 2.1.4 in release 2.5.0; **2.1.5** built 2026-11-05 | `libdatachannel_c14` `062c4228`, `11be1993` | 2.1.5 fixes the camera's relay login (R15). Not published: test it on one camera, then run `publish_firmware.sh` |
 
@@ -117,7 +117,7 @@ ran no load, runtime or chaos tests. Its findings, with today's status:
 | P1 | **Legacy rollout behind a Center-only load balancer** | **No longer applies.** There is no load balancer. Old cameras on the legacy service are a separate system (vrelay_parity_gap.md decision A); old matrix cameras (proto 2) are served on their configured server |
 | P1 | **Regional recovery capacity.** The emergency capacity in the plan conflicted with the admission cap | **Open, smaller.** If a region is down or full its cameras go to the least loaded node anywhere. If every node is full, Center sends cameras to its own fallback address, which can overload it. Plan N+1 control nodes per region with capacity.md's numbers (5,000 cameras per 1 GB node at 70%), and test a node loss once on droplets (phase 3) |
 | P2 | **Relay recovery.** A live stream on a failed relay is not moved; ICE restart and new credentials are needed, and relay choice needs bandwidth and allocation load | **Load done, recovery open.** Relays report allocations and Mbps and are chosen by load. A backup from another region is offered only for relays listed in `config.json`; the reporting relays of 2026-11-04 have none (R12). A stream on a relay that dies still drops: the app and the camera reconnect (new request, new offer). ICE restart is not built |
-| — | **Blind spot:** a healthy WebSocket and a successful assignment don't prove playable video | **Partly done.** Every viewing attempt reports connected or failed, the path, the relay protocol and the setup time (the web player and the camera; the mobile app not yet). First-frame time and forced-relay recovery are not measured |
+| — | **Blind spot:** a healthy WebSocket and a successful assignment don't prove playable video | **Partly done.** Every viewing attempt reports connected or failed, the path, the relay protocol and the setup time (the web player and the camera). Decided 2026-11-05: a connection counts as working when the camera's data channel is open and answers a ping; a viewer who then sees no picture points at bandwidth or the video source, measured by the camera from the viewer's RTCP feedback (2.7.0, phase 1 step 3) |
 
 ## 4. Parity with vrelay
 
@@ -133,7 +133,7 @@ ran no load, runtime or chaos tests. Its findings, with today's status:
 | `grafana-dashboard.json`, `do_server_metrics.py` | `/admin/statistic` charts (including "Machine %"), `/admin/statistic/data` for Grafana | Optional |
 | `export_log.sh` (daily journal gzip, 30 days) | journald; events kept 30 days | Small gap (R10) |
 | Stress scripts (`tcpkali`) and results | `cmd/loadtest` for control and relay, `tools/capacity/`, capacity.md | Run once on a droplet |
-| A relay that carries all video, 15-minute sessions | Video peer to peer; relay only when needed, over UDP, TCP or TLS | Move production from violet to `matrix-relay` (phase 1) |
+| A relay that carries all video, 15-minute sessions | Video peer to peer; relay only when needed, over UDP, TCP or TLS | Done 2026-11-04: production runs `matrix-relay` only |
 | `devconn` release package and readme per flavour | Camera binary downloaded at boot, `publish_firmware.sh`, release folder `device/` | **Gap** (R7, staged rollout) |
 
 ## 5. Plan
@@ -144,21 +144,27 @@ ran no load, runtime or chaos tests. Its findings, with today's status:
 2. Set up the Center backup and restore it once on a scratch droplet (R3).
 3. Decide the takeover policy (R1). At least alert on `sid_takeover`.
 4. sg00's relay: done 2026-11-04, `mx-relay-sg00` on the former violet
-   droplet (waits for its secret on sg00).
-5. Deploy 2.6.0 to the Center and sg00 (machine load in status).
+   droplet.
+5. Deploy 2.6.1 to the Center and sg00 (machine load in status, reporting
+   relays in the Center's status).
 6. Push and tag `release_2.5.0`. Done 2026-11-04.
 
 ### Phase 1: pilot (testers, up to about 100 cameras, Center plus sg00)
 
-1. Camera 2.1.4:
-   - test it on one camera: verify, view over LAN, direct and relay, and an
-     RTSP or UDP `IPv4:PORT` source
+1. Camera 2.1.5 (2.1.4 plus the relay login fix, R15):
+   - test it on one camera: verify, view over LAN, direct and relay (the
+     camera's own relay candidate on `mx-relay-sg00`), and an RTSP or UDP
+     `IPv4:PORT` source
    - publish it
    - keep 2.1.3 for rollback
 2. A production `matrix-relay` per region: `mx-relay-us00` and
    `mx-relay-sg00` in service since 2026-11-04, violet retired. Add a backup
    relay (R12). SG TLS done 2026-11-05.
-3. The mobile app sends its connection report (application_todo.md, step 7).
+3. Statistics 2.7.0 (decided 2026-11-05): the control server counts the
+   requests; a session succeeds when the **camera** reports its data channel
+   open and a ping answered. The camera also reports stream quality from the
+   viewer's RTCP feedback (loss, jitter, RTT, the viewer's bandwidth
+   estimate). The mobile app adds nothing; country comes from the Center.
 4. Watch for 7 days on `/admin/statistic` and `matrix-fleet status`:
    - verify success
    - `viewer_connected` against `viewer_failed`, and the error codes
