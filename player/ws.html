@@ -1599,7 +1599,7 @@
             return { urls: chosen ? [chosen] : urls, fallbacks, username: first.username, credential: first.password, host: turnHost };
         }
 
-        const RELAY_SESSION_MS = 3000; // the session's relay address must come this soon, or the next URL is used
+        const RELAY_SESSION_MS = 5000; // the session's relay address must come this soon, or the next URL is used
 
         // waitRelayAddress resolves true once peer gathers a relay candidate,
         // false after ms or when gathering completes without one.

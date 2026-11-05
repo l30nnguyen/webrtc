@@ -348,4 +348,6 @@ None of this is built. Today the blocklist is a file on each server
 - 2026-11-04: SID takeover (2.5.0) and machine load (2.6.0); `matrix-relay`
   in production on `mx-relay-us00` and `mx-relay-sg00`.
 - 2026-11-05: violet and `cfg/turn.conf` retired from the fleet; camera 2.1.5
-  fixes the relay login ([roll-out.md](roll-out.md) R15).
+  fixes the relay login and 2.1.6 the ICE role check for TCP/TLS-relayed
+  viewers ([roll-out.md](roll-out.md) R15, R16); server 2.6.3 (player relay
+  fallback after 5 s).

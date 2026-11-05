@@ -20,9 +20,9 @@ sheet `todo` (Google Drive, matrix docs folder).
 | Part | Version | Commit | State |
 | --- | --- | --- | --- |
 | Control server `matrix_cc` | 2.5.0 | `a091483` (tag `release_2.5.0`) | Ran on the Center `matrix.5gen.care` (DO nyc3) and node `matrix-sg00` (DO sgp1) 2026-11-04 to 2026-11-05 |
-| Control server `matrix_cc` | 2.6.2 | `7a24178` (2.6.0 `9808bcf` + `4244dfa` + player relay fallback) | Deployed 2026-11-05 to the Center and sg00. 2.6.0 adds machine load and the server version to `matrix-fleet status` and `/admin/statistic`; 2.6.1 lists reporting relays in the Center's status; 2.6.2's player moves a session to the next relay URL (TCP, then TLS) when the chosen one gives no relay address within 3 s |
+| Control server `matrix_cc` | 2.6.3 | tag `release_2.6.3` | Deployed 2026-11-05 to the Center and sg00. 2.6.0 adds machine load and the server version to `matrix-fleet status` and `/admin/statistic`; 2.6.1 lists reporting relays in the Center's status; 2.6.2/2.6.3: the player moves a session to the next relay URL (TCP, then TLS) when the chosen one gives no relay address within **5 s** (2.6.2 used 3 s, which sent slow UDP sessions to TCP) |
 | Relay stream server `matrix-relay` | 1.2.0 | `9808bcf` (sends its machine load) | Production since 2026-11-04 on `mx-relay-us00` (nyc3, reports to the Center) and `mx-relay-sg00` (sgp1, the former violet droplet, reports to sg00). See [Relay stream servers](#relay-stream-servers-2026-11-04) |
-| Camera `matrix` (HCX130) | **2.1.5** published 2026-11-05 (cameras take it at their next boot); 2.1.4 in release 2.5.0 | `libdatachannel_c14` `11be1993` | 2.1.5 fixes the camera's relay login (R15) |
+| Camera `matrix` (HCX130) | **2.1.6** published 2026-11-05 (cameras take it at their next boot) | `libdatachannel_c14` tag `release_2.6.3` | 2.1.5 fixes the relay login (R15); 2.1.6 patches libjuice to accept ICE checks with a zero tie-breaker (R16) |
 
 Camera 2.1.4 is 2.1.3 plus the UDP bind address (`IPv4:PORT` media sources).
 That feature was pushed to `origin/main` from another worktree on
@@ -94,6 +94,7 @@ keeping both sides.
 | R13 | Medium | **No TLS on the SG relay.** | Done 2026-11-05: `mx-relay-sg00.5gen.care`, certbot with pre/post hooks | Done |
 | R14 | Medium | **UDP quality is not verified from a real viewer network.** The office line lets in only about 100–150 UDP packets a second from outside (about 1.2 Mbps), so office tests of relayed UDP show heavy loss that the relays don't cause (their counters show every packet forwarded) | Check relayed UDP from a phone on 4G and from a home line | Open |
 | R15 | High | **Cameras up to 2.1.4 can't log in to matrix-relay.** The camera built its relay address as `turn:USER:PASS@host`; the per-session user name `<expiry>:<camera id>` has a `:`, so libdatachannel split it and the relay refused the login (`auth_failures` on the relay, one per session). The camera then offers no relay candidate of its own; the viewer's side can still be relayed, so most sessions still connect. Found by the user on 2026-11-05 (viewing on sg00) | Camera 2.1.5 passes host, port, user and password as fields (`11be1993`). Checked 2026-11-05 with the camera's libdatachannel against `mx-relay-sg00`: URL form refused, fields form got a relay candidate. Published 2026-11-05. The C port (`matrix_c`) already passes fields | Fixed, published; on-device check by the user |
+| R16 | High | **Cameras up to 2.1.5 reject a TCP/TLS-relayed viewer.** Chrome's ICE checks over a TCP or TLS relay carry `ICE-CONTROLLED=0`. libjuice 1.6.2 keeps the role attributes by value and reads 0 as "absent", so it saw neither attribute and answered every check with 400: the viewer stayed in `checking → disconnected` and no stream came up (found by the user with a viewer on a VPN, 2026-11-05; reproduced with the camera's library and a packet capture on the relay) | Camera 2.1.6: `patches/libjuice-ice-role-presence.patch` records presence separately, applied by `compile.sh`. Checked: 240 s of data both ways, camera relay UDP ↔ Chrome relay TCP. `matrix_c` pins the same libjuice and needs the same patch | Fixed, published |
 | R11 | Low | **`LimitNOFILE=65536`** in `matrix.service`, while a 4 GB node is rated at 62,500 connections (capacity.md) | Raise to 262144 (as vrelay) when 4 GB nodes are used | Open |
 
 Takeover itself worked as designed in the unit tests and in a local
@@ -145,7 +146,7 @@ ran no load, runtime or chaos tests. Its findings, with today's status:
 3. Decide the takeover policy (R1). At least alert on `sid_takeover`.
 4. sg00's relay: done 2026-11-04, `mx-relay-sg00` on the former violet
    droplet.
-5. Deploy 2.6.x to the Center and sg00: done 2026-11-05 (2.6.2).
+5. Deploy 2.6.x to the Center and sg00: done 2026-11-05 (2.6.3).
 6. Push and tag `release_2.5.0`. Done 2026-11-04.
 
 ### Phase 1: pilot (testers, up to about 100 cameras, Center plus sg00)
