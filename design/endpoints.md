@@ -99,7 +99,7 @@ Messages the camera receives:
 
 | Message | From |
 | --- | --- |
-| `{"id":"<viewer id>","type":"request","password":"...","sid_digest":"<hex>","turn":[{"host":"mx-relay-us00.5gen.care","port":3478,"username":"...","password":"..."}]}` | A viewer, with fields added by the server. `sid_digest` comes from the viewer's ticket, never from the viewer. `turn` lists the relay stream servers for this session: the least loaded relay reporting to this node first, then, for relays listed in `config.json`, a backup from another region. For `matrix-relay` (and coturn) the credentials are minted per session and valid 24 h; for violet they are its fixed ones. |
+| `{"id":"<viewer id>","type":"request","password":"...","sid_digest":"<hex>","turn":[{"host":"mx-relay-us00.5gen.care","port":3478,"username":"...","password":"..."}]}` | A viewer, with fields added by the server. `sid_digest` comes from the viewer's ticket, never from the viewer. `turn` lists the relay stream servers for this session: the least loaded relay reporting to this node first, then, for relays listed in `config.json`, a backup from another region. For `matrix-relay` (and coturn) the credentials are minted per session and valid 24 h; for violet they are its fixed ones. The minted user name is `<expiry>:<camera id>` and the password is base64: give the ICE agent host, port, user name and password as separate fields, never as a `turn:user:pass@host` URL (cameras up to 2.1.4 did, roll-out.md R15). |
 | `{"id":"<viewer id>","type":"answer","sdp":"..."}` and other viewer messages | A viewer |
 | `{"type":"error","msg":"Device offline"}` | The server: the viewer this message was for is not connected |
 
