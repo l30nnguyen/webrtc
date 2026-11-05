@@ -5,7 +5,8 @@ the code on 2026-11-04: control server 2.6.0 (`9808bcf`), camera 2.1.4
 (`libdatachannel_c14` `062c4228`), relay stream server `matrix-relay` 1.2.0.
 This is the single authoritative SID contract. Older 107-character SID
 details (`sid_licensing_v2_changelog.xlsx`) are historical. LicenseServer is a
-separate future entitlement service, not part of the `matrix_cc` binary.
+separate future entitlement service, not part of the `matrix_cc` binary; it is
+planned on the AWS machine `webrtc.5gen.care`, which will hold the keys.
 
 User-facing names: the signaling server is the **control server**, TURN is the
 **relay stream server**.
@@ -301,7 +302,10 @@ and never forwards it:
 | `setup_ms` | request to connected |
 
 The role comes from the ticket. The web player and the camera send reports;
-**the mobile app does not yet** ([application_todo.md](../../application_todo.md)).
+the mobile app will not (decided 2026-11-05). From 2.7.0 a session counts as
+successful when the camera reports its data channel open and a ping
+answered, and the camera adds stream quality from the viewer's RTCP feedback
+([roll-out.md](roll-out.md) phase 1, step 3).
 
 ## Future entitlement and revocation target
 
@@ -329,7 +333,8 @@ None of this is built. Today the blocklist is a file on each server
 - **Not yet measured:**
   - restoring active media sessions after a relay fails
   - physical ARM behaviour under load
-  - capacity on a real droplet (capacity.md lists what was estimated)
+  - control-server capacity on a real droplet (the relay was measured on
+    2026-11-04: about 67 relayed sessions per 1 GB droplet)
 
 ## History
 
@@ -340,4 +345,7 @@ None of this is built. Today the blocklist is a file on each server
   Center moved to DigitalOcean.
 - 2026-11-03: `matrix-relay` with relay reports, statistics and the
   connection log.
-- 2026-11-04: SID takeover (2.5.0) and machine load (2.6.0).
+- 2026-11-04: SID takeover (2.5.0) and machine load (2.6.0); `matrix-relay`
+  in production on `mx-relay-us00` and `mx-relay-sg00`.
+- 2026-11-05: violet and `cfg/turn.conf` retired from the fleet; camera 2.1.5
+  fixes the relay login ([roll-out.md](roll-out.md) R15).
