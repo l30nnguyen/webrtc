@@ -48,8 +48,8 @@ Where "one port" is not met yet:
 | Issue | Status |
 | --- | --- |
 | Certificate renewal uses port 80 | **Open.** `setup.sh` uses certbot standalone on port 80 (renewal by `certbot.timer`). Renewing inside the program on 443 (or DNS validation) would free port 80. Not planned yet |
-| TURN settings in a local file | **Done.** Relays come from relay reports or `config.json`, with per-session credentials. `cfg/turn.conf` stays only as a fallback |
-| Two copies of the program (443 legacy, 8443 dev) | **Done.** The dev VPS copies are stopped, except the separate `webrtc_prod` under tester evaluation. Production is the Center plus sg00 on DigitalOcean |
+| TURN settings in a local file | **Done.** Relays come from relay reports or `config.json`, with per-session credentials. Production has no `cfg/turn.conf` since 2026-11-05 |
+| Two copies of the program (443 legacy, 8443 dev) | **Done.** The AWS dev VPS is not part of matrix: it keeps only the testers' `webrtc_prod` (with its own violet) and will become the license server. Production is the Center plus sg00 on DigitalOcean |
 
 ## 3. The work list and its status
 
@@ -71,7 +71,7 @@ Who: **Server**, **Camera**, **App** (the user's app team). Size: S, M, L.
 
 | # | Item | Who | Size | Status 2026-11-04 |
 |---|---|---|---|---|
-| 8 | **Shared relay list**: several relays from the main program, temporary credentials per session, TLS for phones | Server + App | M | **Done.** Relays per region, chosen by load, with a backup in another region. Credentials last 24 h per session; UDP, TCP and TLS URLs are in the offer |
+| 8 | **Shared relay list**: several relays from the main program, temporary credentials per session, TLS for phones | Server + App | M | **Done.** Relays per region, chosen by load (a backup in another region only for relays listed in `config.json`; none today, roll-out R12). Credentials last 24 h per session; UDP, TCP and TLS URLs are in the offer |
 | 9 | **The app picks the nearest relay** | App | M | **Changed.** The control server picks the relay (the camera's region, by load). The app picks the transport (UDP, then TCP, then TLS; `pickRelayURL()` in `ws.html`) |
 | 10 | **Several servers**: cameras can be sent to another server | Server + Camera | L | **Done.** Center assigns each camera a node by country and load, and sends viewers to the camera's node. The fleet configuration is pushed over the node link |
 | 11 | **The camera limits viewers**: how many at once, and the longest session | Camera + App | M | **Open**, not verified in the camera code |
