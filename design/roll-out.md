@@ -19,8 +19,8 @@ sheet `todo` (Google Drive, matrix docs folder).
 
 | Part | Version | Commit | State |
 | --- | --- | --- | --- |
-| Control server `matrix_cc` | 2.5.0 | `a091483` (tag `release_2.5.0`) | Running on the Center `matrix.5gen.care` (DO nyc3) and node `matrix-sg00` (DO sgp1) since 2026-11-04 |
-| Control server `matrix_cc` | 2.6.0 | `9808bcf` | Committed, **not deployed**. It adds machine load (CPU, memory, disk, network) and the server version to `matrix-fleet status` and `/admin/statistic`. 2.5.0 and 2.6.0 run together without problems |
+| Control server `matrix_cc` | 2.5.0 | `a091483` (tag `release_2.5.0`) | Ran on the Center `matrix.5gen.care` (DO nyc3) and node `matrix-sg00` (DO sgp1) 2026-11-04 to 2026-11-05 |
+| Control server `matrix_cc` | 2.6.1 | 2.6.0 `9808bcf` + `4244dfa` | Deployed 2026-11-05 to the Center and sg00. 2.6.0 adds machine load (CPU, memory, disk, network) and the server version to `matrix-fleet status` and `/admin/statistic`; 2.6.1 lists reporting relays in the Center's status |
 | Relay stream server `matrix-relay` | 1.2.0 | `9808bcf` (sends its machine load) | Production since 2026-11-04 on `mx-relay-us00` (nyc3, reports to the Center) and `mx-relay-sg00` (sgp1, the former violet droplet, reports to sg00). See [Relay stream servers](#relay-stream-servers-2026-11-04) |
 | Camera `matrix` (HCX130) | 2.1.3 published; 2.1.4 in release 2.5.0 | `libdatachannel_c14` `062c4228` | 2.1.4 is **not published**: test it on one camera, then run `publish_firmware.sh` |
 
@@ -34,7 +34,7 @@ keeping both sides.
 | Relay | Droplet | Reports to | Transports | Logins |
 |---|---|---|---|---|
 | `mx-relay-us00.5gen.care` | DO nyc3, 45.55.167.162, 1 vCPU / 1 GB (`vps.sh relay_us`) | Center `matrix.5gen.care`, region US | UDP 3478, TCP 80, TLS 443 (Let's Encrypt, certbot stops the relay a few seconds every 60 days) | per session only |
-| `mx-relay-sg00` (no DNS name yet) | DO sgp1, 188.166.244.220, 1 vCPU / 1 GB (`vps.sh relay_sg`) | node `matrix-sg00.5gen.care`, region SG | UDP 3478, TCP 80; **TLS off** until a DNS name exists | per session only (violet's fixed login was removed on 2026-11-04) |
+| `mx-relay-sg00.5gen.care` | DO sgp1, 188.166.244.220, 1 vCPU / 1 GB (`vps.sh relay_sg`) | node `matrix-sg00.5gen.care`, region SG | UDP 3478, TCP 80, TLS 443 (Let's Encrypt since 2026-11-05) | per session only (violet's fixed login was removed on 2026-11-04) |
 
 - violet and Docker are removed from both relay droplets (2026-11-05). The
   control servers' `cfg/turn.conf` (violet, and the AWS dev relay) is removed:
@@ -91,7 +91,7 @@ keeping both sides.
 | R9 | Low | **Revoke happens before replace.** If `Activations.Replace` fails with an I/O error after `RevokeDevice`, the camera still holding the SID is blocklisted until the revocation expires | Replace first and revoke after, or undo on failure | Open |
 | R10 | Low | **Hand-made host setup.** `ufw` was set by hand on each droplet, `setup.sh` does not set it, and journald keeps its default retention (vrelay's `export_log.sh` keeps 30 days of gzip) | `setup.sh install`/`install-node` open 22, 80 and 443 in ufw; set `SystemMaxUse=` for journald | Open |
 | R12 | High | **One relay per region, no backup.** A reporting relay is known only to the control server it reports to, so the Center hands out only `mx-relay-us00` and sg00 only `mx-relay-sg00`. The cross-region backup exists only for relays listed in `config.json`. While a region's relay is down, relayed sessions there fail (direct and LAN still work); `cfg/turn.conf` is not used as a fallback once a reporting relay is configured | A second relay per region (N+1), or list the other region's relay in `config.json` with its secret on every node, or let a relay report to several control servers | Open |
-| R13 | Medium | **No TLS on the SG relay.** `mx-relay-sg00` has no DNS name, so viewers on networks that pass only 443 with TLS can't use it | Create `mx-relay-sg00.5gen.care` → 188.166.244.220, then certbot and `-tls 0.0.0.0:443` as on the US relay | Open (DNS) |
+| R13 | Medium | **No TLS on the SG relay.** | Done 2026-11-05: `mx-relay-sg00.5gen.care`, certbot with pre/post hooks | Done |
 | R14 | Medium | **UDP quality is not verified from a real viewer network.** The office line lets in only about 100–150 UDP packets a second from outside (about 1.2 Mbps), so office tests of relayed UDP show heavy loss that the relays don't cause (their counters show every packet forwarded) | Check relayed UDP from a phone on 4G and from a home line | Open |
 | R11 | Low | **`LimitNOFILE=65536`** in `matrix.service`, while a 4 GB node is rated at 62,500 connections (capacity.md) | Raise to 262144 (as vrelay) when 4 GB nodes are used | Open |
 
@@ -155,8 +155,8 @@ ran no load, runtime or chaos tests. Its findings, with today's status:
    - publish it
    - keep 2.1.3 for rollback
 2. A production `matrix-relay` per region: `mx-relay-us00` and
-   `mx-relay-sg00` in service since 2026-11-04, violet retired. Add the SG
-   DNS name and TLS (R13), and a backup relay (R12).
+   `mx-relay-sg00` in service since 2026-11-04, violet retired. Add a backup
+   relay (R12). SG TLS done 2026-11-05.
 3. The mobile app sends its connection report (application_todo.md, step 7).
 4. Watch for 7 days on `/admin/statistic` and `matrix-fleet status`:
    - verify success

@@ -19,7 +19,7 @@ every server role on one HTTPS/WSS listener:
 | --- | --- | --- | --- |
 | Control Center | `matrix.5gen.care`, DigitalOcean nyc3 | `setup.sh install` | Center APIs (`/v1/challenge`, `/verify`, `/v1/view`, `/v1/resolve`, pairing-system admin), its own control node, the node link (`/v1/link`), downloads |
 | Control node | `matrix-sg00.5gen.care`, DigitalOcean sgp1 | `setup.sh install-node` | Camera and viewer WSS, relay reports, statistics, downloads; links to Center |
-| Relay stream server | `mx-relay-us00` (DO nyc3, reports to the Center) and `mx-relay-sg00` (DO sgp1, reports to sg00), `matrix-relay` 1.2.0 since 2026-11-04; violet stopped | manual (`server/src/relay/deploy/`, release `INSTALL.md` section 3) | TURN over UDP 3478, TCP 80 and TLS 443 (SG: no TLS until it has a DNS name) |
+| Relay stream server | `mx-relay-us00` (DO nyc3, reports to the Center) and `mx-relay-sg00` (DO sgp1, reports to sg00), `matrix-relay` 1.2.0 since 2026-11-04; violet stopped | manual (`server/src/relay/deploy/`, release `INSTALL.md` section 3) | TURN over UDP 3478, TCP 80 and TLS 443  |
 
 `setup.sh` runs the server on port 443 under systemd (`matrix.service`, user
 `matrix`); the CLI default `-port` is 8000. `-center` turns the Center APIs on
