@@ -1592,7 +1592,27 @@
                 log('Relay stream server ' + turnHost + ' did not answer', 'warn');
             }
             // With no answer, offer them all: the session may still connect direct.
-            return { urls: chosen ? [chosen] : urls, username: first.username, credential: first.password, host: turnHost };
+            // fallbacks are the URLs after the chosen one, for a session whose
+            // own allocation on the chosen URL gets no answer (a lossy UDP path
+            // can pass the probe and still lose the session's request).
+            const fallbacks = chosen ? urls.slice(urls.indexOf(chosen) + 1) : [];
+            return { urls: chosen ? [chosen] : urls, fallbacks, username: first.username, credential: first.password, host: turnHost };
+        }
+
+        const RELAY_SESSION_MS = 3000; // the session's relay address must come this soon, or the next URL is used
+
+        // waitRelayAddress resolves true once peer gathers a relay candidate,
+        // false after ms or when gathering completes without one.
+        function waitRelayAddress(peer, ms) {
+            return new Promise(resolve => {
+                let timer = null;
+                const done = value => { clearTimeout(timer); resolve(value); };
+                peer.addEventListener('icecandidate', event => {
+                    if (event.candidate && event.candidate.candidate.includes(' typ relay')) done(true);
+                    else if (!event.candidate) done(false);
+                });
+                timer = setTimeout(() => done(false), ms);
+            });
         }
 
         function createPeerConnection(offer, relay) {
@@ -1958,8 +1978,8 @@
             });
         }
 
-        async function sendAnswer(pc) {
-            await pc.setLocalDescription(await pc.createAnswer());
+        async function sendAnswer(pc, gathering) {
+            if (!gathering) await pc.setLocalDescription(await pc.createAnswer());
             await waitGatheringComplete(pc);
             if (talkback.peer !== pc || !websocket || websocket.readyState !== WebSocket.OPEN) return;
 
@@ -1984,20 +2004,34 @@
             if (pc) pc.close();
             pc = null;
             const generation = ++offerGeneration;
-            const relay = await chooseRelay(offer);
+            let relay = await chooseRelay(offer);
             if (generation !== offerGeneration) return; // a newer offer took over
-            const peer = createPeerConnection(offer, relay);
-            pc = peer;
-            await peer.setRemoteDescription(offer);
-            if (pc !== peer) return;
-            talkback.configure(peer);
-            talkback.connection(peer);
-            recording.configure(peer);
-            recording.connection(peer);
-            lens.configure(peer);
-            lens.connection(peer);
-            log('✅ Remote description set', 'success');
-            await sendAnswer(peer);
+            for (;;) {
+                const peer = createPeerConnection(offer, relay);
+                pc = peer;
+                await peer.setRemoteDescription(offer);
+                if (pc !== peer) return;
+                talkback.configure(peer);
+                talkback.connection(peer);
+                recording.configure(peer);
+                recording.connection(peer);
+                lens.configure(peer);
+                lens.connection(peer);
+                log('✅ Remote description set', 'success');
+                const next = relay && relay.fallbacks.length > 0 ? relay.fallbacks[0] : null;
+                if (!next) return sendAnswer(peer);
+                const relayed = waitRelayAddress(peer, RELAY_SESSION_MS);
+                await peer.setLocalDescription(await peer.createAnswer());
+                if (await relayed || pc !== peer) return pc === peer ? sendAnswer(peer, true) : undefined;
+                // The answer is not sent yet, so the session can still move to the next URL.
+                log('Relay stream server gave no address over ' + relayProtocol(relay.urls[0]) +
+                    ' within ' + RELAY_SESSION_MS / 1000 + ' s; using ' + relayProtocol(next), 'warn');
+                talkback.reset();
+                recording.reset();
+                lens.reset();
+                peer.close();
+                relay = { ...relay, urls: [next], fallbacks: relay.fallbacks.slice(1) };
+            }
         }
 
         // Exchange the camera SID for a one-minute viewer ticket. Center sees the
