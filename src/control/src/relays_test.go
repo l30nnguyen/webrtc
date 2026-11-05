@@ -19,6 +19,7 @@ import (
 	"testing"
 	"time"
 
+	"signaling-server/internal/events"
 	"signaling-server/internal/fleet"
 	"signaling-server/internal/history"
 	"signaling-server/internal/host"
@@ -280,5 +281,47 @@ func TestStatisticPageOnlyForAllowedAddresses(t *testing.T) {
 	}
 	if code := data("115.78.12.186:1000"); code != http.StatusNotFound {
 		t.Fatalf("data without -statistic-allow: %d", code)
+	}
+}
+
+func TestStatisticConnectionLogPagesAndColumns(t *testing.T) {
+	dir := t.TempDir()
+	srv := NewServer("", dir+"/")
+	log, err := events.Open(filepath.Join(dir, "events"), 30)
+	if err != nil {
+		t.Fatal(err)
+	}
+	srv.events = log
+	for i := 0; i < 120; i++ {
+		log.Add(events.Event{Type: events.Request, Camera: fmt.Sprintf("cam%03d", i), Result: "forwarded"})
+	}
+	allow, _ := parsePlayerAllow("115.78.12.186")
+	srv.statisticAllow = allow
+	page := func(query string) string {
+		req := httptest.NewRequest(http.MethodGet, statisticPath+query, nil)
+		req.RemoteAddr = "115.78.12.186:1000"
+		w := httptest.NewRecorder()
+		srv.ServeHTTP(w, req)
+		return w.Body.String()
+	}
+	first := page("")
+	if n := strings.Count(first, "<td>cam"); n != pageEvents {
+		t.Fatalf("first page has %d rows", n)
+	}
+	if !strings.Contains(first, "cam119") || strings.Contains(first, "cam069") || !strings.Contains(first, "older →") || strings.Contains(first, "← newer") {
+		t.Fatal("first page should hold the newest 50 and link only to older ones")
+	}
+	if !strings.Contains(first, "<th>Path</th><th class=\"n\">Setup</th><th>Relays / from</th><th>Camera</th><th>Viewer</th>") {
+		t.Fatal("Path, Setup and Relays / from should come before Camera and Viewer")
+	}
+	last := page("?page=3&type=request")
+	if n := strings.Count(last, "<td>cam"); n != 20 || !strings.Contains(last, "cam000") || strings.Contains(last, "older →") || !strings.Contains(last, "← newer") {
+		t.Fatalf("last page: %d rows", n)
+	}
+	if !strings.Contains(last, "type=request") {
+		t.Fatal("page links should keep the search")
+	}
+	if past := page("?page=9"); !strings.Contains(past, "No more events") {
+		t.Fatal("a page past the end should say so")
 	}
 }

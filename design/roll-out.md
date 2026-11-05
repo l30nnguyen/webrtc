@@ -20,7 +20,7 @@ sheet `todo` (Google Drive, matrix docs folder).
 | Part | Version | Commit | State |
 | --- | --- | --- | --- |
 | Control server `matrix_cc` | 2.5.0 | `a091483` (tag `release_2.5.0`) | Ran on the Center `matrix.5gen.care` (DO nyc3) and node `matrix-sg00` (DO sgp1) 2026-11-04 to 2026-11-05 |
-| Control server `matrix_cc` | 2.6.3 | tag `release_2.6.3` | Deployed 2026-11-05 to the Center and sg00. 2.6.0 adds machine load and the server version to `matrix-fleet status` and `/admin/statistic`; 2.6.1 lists reporting relays in the Center's status; 2.6.2/2.6.3: the player moves a session to the next relay URL (TCP, then TLS) when the chosen one gives no relay address within **5 s** (2.6.2 used 3 s, which sent slow UDP sessions to TCP) |
+| Control server `matrix_cc` | 2.6.4 | tag `release_2.6.4` | Deployed 2026-11-05 to the Center and sg00. 2.6.0 adds machine load and the server version to `matrix-fleet status` and `/admin/statistic`; 2.6.1 lists reporting relays in the Center's status; 2.6.2/2.6.3: the player moves a session to the next relay URL (TCP, then TLS) when the chosen one gives no relay address within **5 s** (2.6.2 used 3 s, which sent slow UDP sessions to TCP); 2.6.4: the connection log on `/admin/statistic` shows 50 events a page with newer/older links, and Path, Setup and Relays come before Camera and Viewer |
 | Relay stream server `matrix-relay` | 1.2.0 | `9808bcf` (sends its machine load) | Production since 2026-11-04 on `mx-relay-us00` (nyc3, reports to the Center) and `mx-relay-sg00` (sgp1, the former violet droplet, reports to sg00). See [Relay stream servers](#relay-stream-servers-2026-11-04) |
 | Camera `matrix` (HCX130) | **2.1.6** published 2026-11-05 (cameras take it at their next boot) | `libdatachannel_c14` tag `release_2.6.3` | 2.1.5 fixes the relay login (R15); 2.1.6 patches libjuice to accept ICE checks with a zero tie-breaker (R16) |
 
@@ -146,7 +146,7 @@ ran no load, runtime or chaos tests. Its findings, with today's status:
 3. Decide the takeover policy (R1). At least alert on `sid_takeover`.
 4. sg00's relay: done 2026-11-04, `mx-relay-sg00` on the former violet
    droplet.
-5. Deploy 2.6.x to the Center and sg00: done 2026-11-05 (2.6.3).
+5. Deploy 2.6.x to the Center and sg00: done 2026-11-05 (2.6.4).
 6. Push and tag `release_2.5.0`. Done 2026-11-04.
 
 ### Phase 1: pilot (testers, up to about 100 cameras, Center plus sg00)

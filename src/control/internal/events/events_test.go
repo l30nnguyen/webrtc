@@ -37,6 +37,14 @@ func TestEventsAreFoundAndPruned(t *testing.T) {
 	if len(limited) != 2 || !more {
 		t.Fatalf("limit: %d %v", len(limited), more)
 	}
+	// Paging: the second page of two starts after the newest two, across days.
+	second, more := l.Find(Query{From: now.Add(-48 * time.Hour), To: now.Add(time.Minute), Limit: 2, Offset: 2})
+	if len(second) != 1 || more || second[0].Type != Request {
+		t.Fatalf("offset: %+v %v", second, more)
+	}
+	if past, more := l.Find(Query{From: now.Add(-48 * time.Hour), To: now.Add(time.Minute), Limit: 2, Offset: 3}); len(past) != 0 || more {
+		t.Fatalf("offset past the end: %+v %v", past, more)
+	}
 
 	// Ten days on, the first day's file is removed.
 	now = now.Add(10 * 24 * time.Hour)

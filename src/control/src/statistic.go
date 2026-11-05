@@ -26,7 +26,7 @@ const (
 	statisticPath       = "/admin/statistic"
 	statisticDataPath   = "/admin/statistic/data"
 	statisticEventsPath = "/admin/statistic/events"
-	pageEvents          = 200
+	pageEvents          = 50 // connection log rows per page
 )
 
 // series is one line of a chart.
@@ -96,6 +96,7 @@ type statisticPage struct {
 // datetime-local input sends them (2026-11-03T08:00).
 type eventSearch struct {
 	From, To, Camera, Viewer, Type, Result string
+	Page                                   int // 1 is the newest page
 }
 
 func (q eventSearch) query(now time.Time) (events.Query, error) {
@@ -129,8 +130,12 @@ func searchFrom(r *http.Request) eventSearch {
 		}
 		return s
 	}
+	page, err := strconv.Atoi(v.Get("page"))
+	if err != nil || page < 1 || page > 1000 {
+		page = 1
+	}
 	return eventSearch{From: clip(v.Get("from")), To: clip(v.Get("to")), Camera: clip(v.Get("camera")),
-		Viewer: clip(v.Get("viewer")), Type: clip(v.Get("type")), Result: clip(v.Get("result"))}
+		Viewer: clip(v.Get("viewer")), Type: clip(v.Get("type")), Result: clip(v.Get("result")), Page: page}
 }
 
 // pageStep is the row step a chart over hours uses.
@@ -227,6 +232,7 @@ func (s *Server) handleStatistic(w http.ResponseWriter, r *http.Request) {
 		page.Error = err.Error()
 	} else {
 		q.Limit = pageEvents
+		q.Offset = (page.Search.Page - 1) * pageEvents
 		page.Events, page.More = s.events.Find(q)
 	}
 	w.Header().Set("Cache-Control", "no-store")
@@ -537,6 +543,19 @@ var statisticTemplate = template.Must(template.New("statistic").Funcs(template.F
 		return []string{"connected", "failed", "forwarded", "camera_offline", "online", "offline",
 			"no_ticket", "bad_ticket", "too_many_connections", "registered", "restarted", "stopping", "silent", "back"}
 	},
+	// pageLink is this page with the same search on connection log page n.
+	"pageLink": func(q eventSearch, hours, n int) string {
+		v := url.Values{}
+		for key, value := range map[string]string{"from": q.From, "to": q.To, "camera": q.Camera, "viewer": q.Viewer, "type": q.Type, "result": q.Result} {
+			if value != "" {
+				v.Set(key, value)
+			}
+		}
+		v.Set("hours", strconv.Itoa(hours))
+		v.Set("page", strconv.Itoa(n))
+		return "?" + v.Encode() + "#events"
+	},
+	"add": func(a, b int) int { return a + b },
 	"eventsLink": func(q eventSearch, format string) string {
 		v := url.Values{}
 		for key, value := range map[string]string{"from": q.From, "to": q.To, "camera": q.Camera, "viewer": q.Viewer, "type": q.Type, "result": q.Result} {
@@ -567,7 +586,7 @@ th{color:var(--muted);font-weight:600;font-size:12px}td.n,th.n{text-align:right}
 .search{display:flex;flex-wrap:wrap;gap:8px 12px;align-items:end;margin-bottom:12px}.search label{display:flex;flex-direction:column;font-size:12px;color:var(--muted);gap:2px}
 .search input,.search select,.search button{font:inherit;color:var(--fg);background:var(--bg);border:1px solid var(--line);border-radius:6px;padding:4px 6px}.search button{cursor:pointer}
 table.events td{font-size:13px}tr.bad td:nth-child(3),tr.bad td:nth-child(4){color:var(--down);font-weight:600}
-.legend .range{margin-left:auto}.empty{color:var(--muted);margin:0}a{color:var(--s1)}nav a{margin-right:10px}
+.pager{color:var(--muted);margin:10px 0 0;font-size:13px}.legend .range{margin-left:auto}.empty{color:var(--muted);margin:0}a{color:var(--s1)}nav a{margin-right:10px}
 </style></head><body><main>
 <h1>Region statistics</h1>
 <p class="sub">This control server and the relay stream servers reporting to it. {{.Generated}}.<br>
@@ -587,10 +606,12 @@ table.events td{font-size:13px}tr.bad td:nth-child(3),tr.bad td:nth-child(4){col
 <input type="hidden" name="hours" value="{{.Hours}}"><button>Search</button>
 <a href="{{eventsLink .Search "csv"}}">CSV</a><a href="{{eventsLink .Search "json"}}">JSON</a></form>
 {{if .Events}}<table class="events">
-<tr><th>Time (UTC)</th><th>Event</th><th>Result</th><th>Cause</th><th>Camera</th><th>Viewer</th><th>Path</th><th class="n">Setup</th><th>Relays / from</th></tr>
+<tr><th>Time (UTC)</th><th>Event</th><th>Result</th><th>Cause</th><th>Path</th><th class="n">Setup</th><th>Relays / from</th><th>Camera</th><th>Viewer</th></tr>
 {{range .Events}}<tr class="{{if or (eq .Result "failed") (eq .Result "camera_offline") (eq .Result "silent") (eq .Type "refused")}}bad{{end}}"><td>{{.T}}</td><td>{{.Type}}{{with .Role}} ({{.}}){{end}}</td><td>{{.Result}}</td><td>{{.Error}}{{.Detail}}</td>
-<td>{{.Camera}}</td><td>{{.Viewer}}</td><td>{{.Path}}{{with .RelayProtocol}} over {{.}}{{end}}</td><td class="n">{{if .SetupMillis}}{{.SetupMillis}} ms{{end}}</td><td>{{range .Relays}}{{.}} {{end}}{{.Relay}}{{.From}}</td></tr>{{end}}
-</table>{{if .More}}<p class="empty">Showing the newest {{len .Events}}; narrow the search or use the CSV for more.</p>{{end}}
+<td>{{.Path}}{{with .RelayProtocol}} over {{.}}{{end}}</td><td class="n">{{if .SetupMillis}}{{.SetupMillis}} ms{{end}}</td><td>{{range .Relays}}{{.}} {{end}}{{.Relay}}{{.From}}</td><td>{{.Camera}}</td><td>{{.Viewer}}</td></tr>{{end}}
+</table>
+<p class="pager">Page {{.Search.Page}}{{if gt .Search.Page 1}} · <a href="{{pageLink .Search .Hours 1}}">newest</a> · <a href="{{pageLink .Search .Hours (add .Search.Page -1)}}">← newer</a>{{end}}{{if .More}} · <a href="{{pageLink .Search .Hours (add .Search.Page 1)}}">older →</a>{{end}}</p>
+{{else if gt .Search.Page 1}}<p class="empty">No more events. <a href="{{pageLink .Search .Hours 1}}">Back to the newest</a>.</p>
 {{else}}<p class="empty">No events match.</p>{{end}}</div>{{end}}
 
 <h2>Control server, last {{.Hours}} hours</h2>

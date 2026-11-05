@@ -177,10 +177,11 @@ type Query struct {
 	Result   string // e.g. failed
 	Relay    string
 	Limit    int // newest first; 0 means maxResults
+	Offset   int // matches skipped before the first returned (paging)
 }
 
-// Find returns the matching events, newest first, and whether more matched
-// than the limit.
+// Find returns the matching events, newest first, after skipping q.Offset of
+// them, and whether more matched than the limit.
 func (l *Log) Find(q Query) ([]Event, bool) {
 	limit := q.Limit
 	if limit <= 0 || limit > maxResults {
@@ -193,6 +194,7 @@ func (l *Log) Find(q Query) ([]Event, bool) {
 	}
 	sort.Sort(sort.Reverse(sort.StringSlice(days)))
 	var out []Event
+	skip := q.Offset
 	for _, day := range days {
 		f, err := os.Open(filepath.Join(l.dir, day+".jsonl"))
 		if err != nil {
@@ -215,6 +217,10 @@ func (l *Log) Find(q Query) ([]Event, bool) {
 		}
 		f.Close()
 		for i := len(matched) - 1; i >= 0; i-- {
+			if skip > 0 {
+				skip--
+				continue
+			}
 			if len(out) == limit {
 				return out, true
 			}
