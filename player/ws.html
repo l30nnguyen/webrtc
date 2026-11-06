@@ -1978,9 +1978,16 @@
             });
         }
 
+        // Gathering can stay open for ~40 s when one network interface (a VPN or
+        // Tailscale adapter) drops the relay request, past the camera's 30 s answer
+        // limit. The answer goes out with the addresses gathered so far.
+        const ANSWER_GATHER_MS = 1000; // after the relay address is in
+        const ANSWER_MAX_GATHER_MS = RELAY_SESSION_MS + ANSWER_GATHER_MS;
+
         async function sendAnswer(pc, gathering) {
             if (!gathering) await pc.setLocalDescription(await pc.createAnswer());
-            await waitGatheringComplete(pc);
+            await Promise.race([waitGatheringComplete(pc), new Promise(resolve =>
+                setTimeout(resolve, gathering ? ANSWER_GATHER_MS : ANSWER_MAX_GATHER_MS))]);
             if (talkback.peer !== pc || !websocket || websocket.readyState !== WebSocket.OPEN) return;
 
             const answer = pc.localDescription;
@@ -1992,7 +1999,8 @@
                 type: answer.type,
                 sdp: answer.sdp,
             }));
-            log('📤 Answer sent to camera', 'success');
+            log('📤 Answer sent to camera' + (pc.iceGatheringState === 'complete' ? '' :
+                ' (address gathering still running)'), 'success');
         }
 
         let offerGeneration = 0;
