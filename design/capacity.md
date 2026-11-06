@@ -90,7 +90,8 @@ camera a month; control traffic is a few KB a session and left out.
 | Control node, 4 GB / 2 vCPU | 62,500 connections | 40,000 cameras | memory |
 | Control node: viewing sessions | 711 per second (sg00) | — | CPU; 1M cameras need about 35 per second at peak, so never the limit |
 | Relay, 1 GB (sg00) | **33,000 packets/s** | **137 sessions** (viewer side relayed) or **69** (both sides) | CPU; about 20,000 cameras per relay |
-| Relay memory | 23 KB per allocation | — | not a limit (25,000 allocations in 600 MB) |
+| Relay memory | 23 KB per allocation | — | not a limit (25,000 allocations in 600 MB); the unit's `MemoryMax=384M` covers `-max 8000` |
+| Relay allocations | 2 per viewing session (camera and viewer), held for the whole session even over LAN or direct | `-max 8000` on both relays since 2026-11-06 (4,000 sessions; the default 1000 was only 500) | `matrix_relay_quota_rejects_total` |
 
 A camera takes one control connection all day. A viewer takes one while it
 watches. Disk is not a limit (see [statistics retention](../src/relay/README.md#statistics-and-the-connection-log)):

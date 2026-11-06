@@ -4,6 +4,7 @@ import (
 	"log"
 	"os"
 	"os/signal"
+	"regexp"
 	"syscall"
 	"time"
 
@@ -24,6 +25,9 @@ func (s *Server) countStat(name string, update func(*stats.Counters)) {
 	}
 	s.countHistory(map[string]int64{name: 1})
 }
+
+// reportVersion is the software version a report may carry, e.g. 2.6.6.
+var reportVersion = regexp.MustCompile(`^[0-9A-Za-z._+-]{1,32}$`)
 
 // relayProtocols are the ways a viewer may reach the relay stream server.
 var relayProtocols = map[string]bool{"udp": true, "tcp": true, "tls": true}
@@ -82,6 +86,9 @@ func (s *Server) recordReport(c *Client, msg map[string]interface{}) {
 	}
 	if protocol, _ := msg["relay_protocol"].(string); report.Path == "relay" && relayProtocols[protocol] {
 		e.RelayProtocol = protocol
+	}
+	if version, _ := msg["version"].(string); reportVersion.MatchString(version) {
+		e.Version = version
 	}
 	s.addEvent(e)
 }

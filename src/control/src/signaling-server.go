@@ -262,6 +262,8 @@ func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 			http.NotFound(w, r)
 			return
 		}
+		// Revalidated on every load, so a deploy reaches open tabs on reload.
+		w.Header().Set("Cache-Control", "no-cache")
 		http.ServeFile(w, r, s.playerPath)
 	case r.URL.Path == "/api/devices":
 		if !s.playerAllowed(r) {

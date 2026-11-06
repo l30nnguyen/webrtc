@@ -542,6 +542,9 @@
             dataChannelLog = document.getElementById('data-channel'),
             dcStatusLog = document.getElementById('dc-status');
 
+        // This page's own version, sent in every report; equals cfg/version (checked by a test).
+        const PLAYER_VERSION = '2.6.6';
+
         let clientId = null;
         let websocket = null;
         let pc = null;
@@ -1256,7 +1259,8 @@
                 }
                 healthBadge.textContent = `🟢 Server (${hData.clients} online) v${hData.version || '?'}`;
                 healthBadge.className   = 'health-badge';
-                document.getElementById('viewerVersion').textContent = 'v' + (hData.version || '?');
+                document.getElementById('viewerVersion').textContent = 'v' + (hData.version || '?') +
+                    (hData.version === PLAYER_VERSION ? '' : ' (player v' + PLAYER_VERSION + ': reload the page)');
             } catch(e) {
                 if (!isCurrentRequest()) return;
                 healthBadge.textContent = '🔴 Server offline';
@@ -1382,7 +1386,7 @@
                 }
             }, 10000);
         }
-        window.addEventListener('load', () => startDeviceAutoRefresh());
+        window.addEventListener('load', () => { log('Player v' + PLAYER_VERSION, 'info'); startDeviceAutoRefresh(); });
 
         // ── Logging ────────────────────────────────────────────────────────────
         let _autoScroll = true;
@@ -1453,7 +1457,7 @@
                 if (!websocket || websocket.readyState !== WebSocket.OPEN) return;
                 try {
                     websocket.send(JSON.stringify({ type: 'report', relay_offered: session.relayOffered,
-                        relay_ready: session.relayOffered && session.relayReady, ...fields }));
+                        relay_ready: session.relayOffered && session.relayReady, version: PLAYER_VERSION, ...fields }));
                 } catch (_) {}
             },
             failed(error) { this.send({ result: 'failed', error }); },

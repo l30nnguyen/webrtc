@@ -186,7 +186,7 @@ Send once per viewing attempt, on the control connection:
 {"type":"report","result":"failed","error":"unauthorized|camera_offline|no_offer|no_answer|no_path|timeout|closed|other","relay_offered":true,"relay_ready":false}
 ```
 
-`relay_protocol` only when connected through a relay. The role (camera or viewer) comes from the ticket. Reports feed `matrix-fleet stats`, `/admin/statistic` and the connection log, and are never forwarded. **The web player sends them; the mobile app does not yet.**
+`relay_protocol` only when connected through a relay. Optional `"version":"2.6.6"`: the reporter's software version (up to 32 of `0-9A-Za-z._+-`, otherwise dropped), kept in the connection log (2.6.6; the web player sends it). The role (camera or viewer) comes from the ticket. Reports feed `matrix-fleet stats`, `/admin/statistic` and the connection log, and are never forwarded. **The web player sends them; the mobile app does not yet.**
 
 ---
 
@@ -202,7 +202,7 @@ Send once per viewing attempt, on the control connection:
 | `GET /admin/statistic` | This control server and the relay stream servers reporting here: state, clients by UDP/TCP/TLS, load, machine CPU/memory/disk (2.6.0), charts over `?hours=24..8784`, daily for 30 days, and the connection log search (50 events a page, newest first, `page=N`). Only for `-statistic-allow` IPs; `404` for everyone else, and for everyone when it is not set |
 | `GET /admin/statistic/data` | The same statistics as rows for charting tools: `from`, `to` (RFC 3339 or YYYY-MM-DD), `step` (30m, hour, day), `source` (control, relay), `name`, `format` (json, csv). Same allow list. Format in `src/relay/README.md` |
 | `GET /admin/statistic/events` | The connection log: `from`, `to` (UTC), `camera`, `viewer`, `type`, `result`, `format` (json, csv); newest first, at most 5000. Same allow list |
-| `GET /api/health` | `{"status":"ok","clients":N,"version":"2.6.5","ticket_admission":true}`; a control node adds `"center":"https://matrix.5gen.care"`, which its player page uses for `/v1/view` |
+| `GET /api/health` | `{"status":"ok","clients":N,"version":"2.6.6","ticket_admission":true}`; a control node adds `"center":"https://matrix.5gen.care"`, which its player page uses for `/v1/view` |
 | `GET /downloads/<path>` | Files under `/opt/matrix/downloads/` (firmware) |
 | `GET /v1/demo/resolve?ref=<64 hex>` | Center only, only with `-demo-tenant` (development): unauthenticated 2.2 for the demo tenant |
 

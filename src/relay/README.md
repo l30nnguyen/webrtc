@@ -8,7 +8,7 @@ the control server need no change.
 |---|---|---|
 | Client transports | UDP | UDP, TCP and TLS, each on its own port (default 3478, 80, 443) |
 | Credentials | fixed `--credentials` | fixed users, and the control server's expiring ones (`relay.Credentials`, coturn's use-auth-secret) |
-| Limits | `--max`, `--quota` | `-max` in all, `-max-per-user` (per camera id) |
+| Limits | `--max`, `--quota` | `-max` in all (production: 8000, as each session holds 2 allocations), `-max-per-user` (per camera id) |
 | Status | STUN probe only | STUN probe, and `/metrics` with live `turn_total_*` counters |
 | Peer filter | none | refuses loopback, private and link-local peers |
 

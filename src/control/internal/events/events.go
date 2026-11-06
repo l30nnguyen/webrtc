@@ -57,6 +57,7 @@ type Event struct {
 	Relay         string   `json:"relay,omitempty"`  // a relay event's relay
 	From          string   `json:"from,omitempty"`   // source address of a refusal
 	Detail        string   `json:"detail,omitempty"`
+	Version       string   `json:"version,omitempty"` // the reporter's software version
 }
 
 // Log appends events to day files and removes files older than Days.

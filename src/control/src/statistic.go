@@ -497,7 +497,7 @@ func (s *Server) handleStatisticEvents(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Content-Disposition", `attachment; filename="events.csv"`)
 	out := csv.NewWriter(w)
 	out.Write([]string{"time", "type", "result", "error", "camera", "viewer", "role", "path", "relay_protocol",
-		"relay_offered", "relay_ready", "setup_ms", "relays", "relay", "from", "detail"})
+		"relay_offered", "relay_ready", "setup_ms", "relays", "relay", "from", "detail", "version"})
 	flag := func(b *bool) string {
 		if b == nil {
 			return ""
@@ -510,7 +510,7 @@ func (s *Server) handleStatisticEvents(w http.ResponseWriter, r *http.Request) {
 			setup = strconv.Itoa(e.SetupMillis)
 		}
 		out.Write([]string{e.T, e.Type, e.Result, e.Error, e.Camera, e.Viewer, e.Role, e.Path, e.RelayProtocol,
-			flag(e.RelayOffered), flag(e.RelayReady), setup, strings.Join(e.Relays, " "), e.Relay, e.From, e.Detail})
+			flag(e.RelayOffered), flag(e.RelayReady), setup, strings.Join(e.Relays, " "), e.Relay, e.From, e.Detail, e.Version})
 	}
 	out.Flush()
 }
@@ -607,7 +607,7 @@ table.events td{font-size:13px}tr.bad td:nth-child(3),tr.bad td:nth-child(4){col
 <a href="{{eventsLink .Search "csv"}}">CSV</a><a href="{{eventsLink .Search "json"}}">JSON</a></form>
 {{if .Events}}<table class="events">
 <tr><th>Time (UTC)</th><th>Event</th><th>Result</th><th>Cause</th><th>Path</th><th class="n">Setup</th><th>Relays / from</th><th>Camera</th><th>Viewer</th></tr>
-{{range .Events}}<tr class="{{if or (eq .Result "failed") (eq .Result "camera_offline") (eq .Result "silent") (eq .Type "refused")}}bad{{end}}"><td>{{.T}}</td><td>{{.Type}}{{with .Role}} ({{.}}){{end}}</td><td>{{.Result}}</td><td>{{.Error}}{{.Detail}}</td>
+{{range .Events}}<tr class="{{if or (eq .Result "failed") (eq .Result "camera_offline") (eq .Result "silent") (eq .Type "refused")}}bad{{end}}"><td>{{.T}}</td><td>{{.Type}}{{with .Role}} ({{.}}){{end}}{{with .Version}} v{{.}}{{end}}</td><td>{{.Result}}</td><td>{{.Error}}{{.Detail}}</td>
 <td>{{.Path}}{{with .RelayProtocol}} over {{.}}{{end}}</td><td class="n">{{if .SetupMillis}}{{.SetupMillis}} ms{{end}}</td><td>{{range .Relays}}{{.}} {{end}}{{.Relay}}{{.From}}</td><td>{{.Camera}}</td><td>{{.Viewer}}</td></tr>{{end}}
 </table>
 <p class="pager">Page {{.Search.Page}}{{if gt .Search.Page 1}} · <a href="{{pageLink .Search .Hours 1}}">newest</a> · <a href="{{pageLink .Search .Hours (add .Search.Page -1)}}">← newer</a>{{end}}{{if .More}} · <a href="{{pageLink .Search .Hours (add .Search.Page 1)}}">older →</a>{{end}}</p>

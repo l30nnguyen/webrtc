@@ -17,7 +17,8 @@ LimitNOFILE=65536
 # Ports 80 and 443 without root.
 AmbientCapabilities=CAP_NET_BIND_SERVICE
 CapabilityBoundingSet=CAP_NET_BIND_SERVICE
-MemoryMax=128M
+# About 23 KB per allocation: -max 8000 needs about 190 MB.
+MemoryMax=384M
 NoNewPrivileges=yes
 ProtectSystem=strict
 ProtectHome=yes
