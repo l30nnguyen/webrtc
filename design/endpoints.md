@@ -196,7 +196,7 @@ Send once per viewing attempt, on the control connection:
 | --- | --- |
 | `wss://<host>/<id>?ticket=...` | Control connections (1.3, 2.3) |
 | `GET /` | Plain text `OK` (no page) |
-| `GET /demo/<tenant>` | Web player (`ws.html`), only when `-discovery-tenant <tenant>` is set; limited to `-player-allow` IPs when that is set (Center: `/demo/test01`, `115.78.12.186`) |
+| `GET /demo/<tenant>` | Web player (`ws.html`), only when `-discovery-tenant <tenant>` is set; limited to `-player-allow` IPs when that is set (Center: `/demo/test01`, `115.78.12.186`). Sent with `Cache-Control: no-cache` (2.6.6), so a reload after a deploy gets the new player |
 | `GET /api/devices[?type=producer]` | Cameras online in the discovery tenant: `{"count":N,"devices":[{"id","nickname","tenant","connected_at","path","type","rtt","sid"}]}`. Only with `-discovery-tenant` or `-demo-tenant`; limited by `-player-allow`. |
 | `POST /v1/relay/report` | With `-relay-dir`: a relay stream server (`matrix-relay -control`) reports its addresses, load, version and (1.2.0 on) its machine's CPU, memory, disk and network (`"machine"`) every 15 s. Accepted only for a name with a shared secret in `cfg/relay-secrets.json`, signed with it (`X-Relay-Signature`), within a minute of this server's clock; `204` when taken, `403` otherwise |
 | `GET /admin/statistic` | This control server and the relay stream servers reporting here: state, clients by UDP/TCP/TLS, load, machine CPU/memory/disk (2.6.0), charts over `?hours=24..8784`, daily for 30 days, and the connection log search (50 events a page, newest first, `page=N`). Only for `-statistic-allow` IPs; `404` for everyone else, and for everyone when it is not set |
