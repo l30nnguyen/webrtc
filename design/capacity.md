@@ -226,3 +226,4 @@ kernel's network work and 6–8% steal):
 |---|---|---|---|---|---|
 | 2026-11-03 | 2.4.0 / relay 1.1.0 | 56 KB a connection, 5,000 cameras planned; 711 sessions/s | **33,000 pps, 137 sessions, ~20,000 cameras** | $9,221 a month, $0.0092 a camera | first measurement; relay estimated from the test PC; DO prices of 2026-11-03 |
 | 2026-11-04 | relay 1.2.0 | (unchanged) | 16,000 pps at 100% (UDP), 67 sessions planned, ~10,000 cameras | about the same (more relays, more pooled transfer) | measured on `mx-relay-us00` (nyc3) from the office; UDP path loss Vietnam → US above ~40 Mbps |
+| 2026-11-06 | 2.6.6 / relay 1.2.0 | (unchanged) | `-max 8000` (4,000 sessions), `MemoryMax=384M` | (unchanged) | each session holds 2 allocations even over LAN or direct; the default 1000 was only 500 sessions (roll-out.md R19) |
