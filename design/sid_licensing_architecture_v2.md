@@ -3,6 +3,7 @@
 Status: **current architecture and integration contract**, checked against
 the code on 2026-11-04: control server 2.6.0 (`9808bcf`), camera 2.1.4
 (`libdatachannel_c14` `062c4228`), relay stream server `matrix-relay` 1.2.0.
+Later changes (server 2.6.6, camera 2.1.6) are listed under *History*.
 This is the single authoritative SID contract. Older 107-character SID
 details (`sid_licensing_v2_changelog.xlsx`) are historical. LicenseServer is a
 separate future entitlement service, not part of the `matrix_cc` binary; it is
@@ -300,6 +301,7 @@ and never forwards it:
 | `error` (failed) | `unauthorized`, `camera_offline`, `no_offer`, `no_answer` (camera side: the viewer never answered), `no_path`, `timeout`, `closed`, `other` |
 | `relay_offered` / `relay_ready` | a relay was offered / it gave an address |
 | `setup_ms` | request to connected |
+| `version` (optional, 2.6.6) | the reporter's software version, e.g. the web player's `2.6.6`; shown in the connection log |
 
 The role comes from the ticket. The web player and the camera send reports;
 the mobile app will not (decided 2026-11-05). From 2.7.0 a session counts as
