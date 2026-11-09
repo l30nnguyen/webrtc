@@ -9,7 +9,7 @@ server is the **control server**, TURN is the **relay stream server**.
 | `src/relay` | `matrix-relay` (Go, pion/turn): the relay stream server over UDP, TCP and TLS, reporting to its region's control node |
 | `player/ws.html` | Web player (demo at `/demo/<tenant>`, office IP only) |
 | `release/` | `make_release.sh` (the package), `setup.sh` (install, install-node, upgrade on a droplet), `README.md` (operating guide) |
-| `cfg/version` | Server version (2.6.0) |
+| `cfg/version` | Server version (2.6.6) |
 | `tools/capacity/` | Load tests behind `design/capacity.md` |
 | `design/` | Architecture and plans (below) |
 

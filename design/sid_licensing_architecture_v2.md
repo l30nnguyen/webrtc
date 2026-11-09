@@ -305,7 +305,7 @@ The role comes from the ticket. The web player and the camera send reports;
 the mobile app will not (decided 2026-11-05). From 2.7.0 a session counts as
 successful when the camera reports its data channel open and a ping
 answered, and the camera adds stream quality from the viewer's RTCP feedback
-([roll-out.md](roll-out.md) phase 1, step 3).
+([roll-out.md](roll-out.md) phase 1, step 4).
 
 ## Future entitlement and revocation target
 
@@ -351,3 +351,6 @@ None of this is built. Today the blocklist is a file on each server
   fixes the relay login and 2.1.6 the ICE role check for TCP/TLS-relayed
   viewers ([roll-out.md](roll-out.md) R15, R16); server 2.6.3 (player relay
   fallback after 5 s).
+- 2026-11-06: server 2.6.5 and 2.6.6: the player answers without waiting
+  for address gathering to finish, is not cached, and reports its version;
+  relays allow 8000 allocations ([roll-out.md](roll-out.md) R18–R20).

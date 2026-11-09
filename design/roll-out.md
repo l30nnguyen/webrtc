@@ -1,6 +1,6 @@
 # Roll-out of matrix
 
-Updated 2026-11-05. This covers:
+Updated 2026-11-09. This covers:
 - what is released and where it runs
 - the code review findings
 - what matrix still needs to be run the way vrelay is run (`~/code/vrelay`,
@@ -21,7 +21,7 @@ sheet `todo` (Google Drive, matrix docs folder).
 | --- | --- | --- | --- |
 | Control server `matrix_cc` | 2.5.0 | `a091483` (tag `release_2.5.0`) | Ran on the Center `matrix.5gen.care` (DO nyc3) and node `matrix-sg00` (DO sgp1) 2026-11-04 to 2026-11-05 |
 | Control server `matrix_cc` | 2.6.6 | tag `release_2.6.6` | Deployed 2026-11-06 to the Center and sg00. 2.6.0 adds machine load and the server version to `matrix-fleet status` and `/admin/statistic`; 2.6.1 lists reporting relays in the Center's status; 2.6.2/2.6.3: the player moves a session to the next relay URL (TCP, then TLS) when the chosen one gives no relay address within **5 s** (2.6.2 used 3 s, which sent slow UDP sessions to TCP); 2.6.4: the connection log on `/admin/statistic` shows 50 events a page with newer/older links, and Path, Setup and Relays come before Camera and Viewer; 2.6.5: the player sends its answer 1 s after the relay address (6 s at most) instead of waiting for gathering to finish (R18); 2.6.6: the player page is sent with `Cache-Control: no-cache` and carries its own version (`PLAYER_VERSION`, shown in its log and in every report; a test keeps it equal to `cfg/version`), shown as `report (viewer) v2.6.6` on `/admin/statistic` and in the CSV `version` column (R20) |
-| Relay stream server `matrix-relay` | 1.2.0 | `9808bcf` (sends its machine load) | Production since 2026-11-04 on `mx-relay-us00` (nyc3, reports to the Center) and `mx-relay-sg00` (sgp1, the former violet droplet, reports to sg00). See [Relay stream servers](#relay-stream-servers-2026-11-04) |
+| Relay stream server `matrix-relay` | 1.2.0 | `9808bcf` (sends its machine load) | Production since 2026-11-04 on `mx-relay-us00` (nyc3, reports to the Center) and `mx-relay-sg00` (sgp1, the former violet droplet, reports to sg00). Since 2026-11-06 both run with `-max 8000` and `MemoryMax=384M` (R19). See [Relay stream servers](#relay-stream-servers-2026-11-04) |
 | Camera `matrix` (HCX130) | **2.1.6** published 2026-11-05 (cameras take it at their next boot) | `libdatachannel_c14` tag `release_2.6.3` | 2.1.5 fixes the relay login (R15); 2.1.6 patches libjuice to accept ICE checks with a zero tie-breaker (R16) |
 
 Camera 2.1.4 is 2.1.3 plus the UDP bind address (`IPv4:PORT` media sources).
@@ -92,9 +92,10 @@ keeping both sides.
 | R10 | Low | **Hand-made host setup.** `ufw` was set by hand on each droplet, `setup.sh` does not set it, and journald keeps its default retention (vrelay's `export_log.sh` keeps 30 days of gzip) | `setup.sh install`/`install-node` open 22, 80 and 443 in ufw; set `SystemMaxUse=` for journald | Open |
 | R12 | High | **One relay per region, no backup.** A reporting relay is known only to the control server it reports to, so the Center hands out only `mx-relay-us00` and sg00 only `mx-relay-sg00`. The cross-region backup exists only for relays listed in `config.json`. While a region's relay is down, relayed sessions there fail (direct and LAN still work); `cfg/turn.conf` is not used as a fallback once a reporting relay is configured | A second relay per region (N+1), or list the other region's relay in `config.json` with its secret on every node, or let a relay report to several control servers | Open |
 | R13 | Medium | **No TLS on the SG relay.** | Done 2026-11-05: `mx-relay-sg00.5gen.care`, certbot with pre/post hooks | Done |
-| R14 | Medium | **UDP quality is not verified from a real viewer network.** The office line lets in only about 100–150 UDP packets a second from outside (about 1.2 Mbps), so office tests of relayed UDP show heavy loss that the relays don't cause (their counters show every packet forwarded) | Check relayed UDP from a phone on 4G and from a home line | Open |
+| R14 | Medium | **UDP quality is not verified from a real viewer network.** The office line lets in only about 100–150 UDP packets a second from outside (about 1.2 Mbps), so office tests of relayed UDP show heavy loss that the relays don't cause (their counters show every packet forwarded) | Check relayed UDP from a phone on 4G and from a home line. 2026-11-06: from the office, viewers played over UDP to the camera's relay address (sg00 log 08:12 and 08:13 UTC); quality not measured | Open |
 | R15 | High | **Cameras up to 2.1.4 can't log in to matrix-relay.** The camera built its relay address as `turn:USER:PASS@host`; the per-session user name `<expiry>:<camera id>` has a `:`, so libdatachannel split it and the relay refused the login (`auth_failures` on the relay, one per session). The camera then offers no relay candidate of its own; the viewer's side can still be relayed, so most sessions still connect. Found by the user on 2026-11-05 (viewing on sg00) | Camera 2.1.5 passes host, port, user and password as fields (`11be1993`). Checked 2026-11-05 with the camera's libdatachannel against `mx-relay-sg00`: URL form refused, fields form got a relay candidate. Published 2026-11-05. The C port (`matrix_c`) already passes fields | Fixed, published; on-device check by the user |
 | R16 | High | **Cameras up to 2.1.5 reject a TCP/TLS-relayed viewer.** Chrome's ICE checks over a TCP or TLS relay carry `ICE-CONTROLLED=0`. libjuice 1.6.2 keeps the role attributes by value and reads 0 as "absent", so it saw neither attribute and answered every check with 400: the viewer stayed in `checking → disconnected` and no stream came up (found by the user with a viewer on a VPN, 2026-11-05; reproduced with the camera's library and a packet capture on the relay) | Camera 2.1.6: `patches/libjuice-ice-role-presence.patch` records presence separately, applied by `compile.sh`. Checked: 240 s of data both ways, camera relay UDP ↔ Chrome relay TCP. `matrix_c` pins the same libjuice and needs the same patch | Fixed, published |
+| R17 | Medium | **A VPN viewer's stream stopped after about 110 s.** Camera 2.1.6, server 2.6.2, viewer on a VPN over a TCP relay: the stream played, then stopped; the servers logged no error (found by the user, 2026-11-05) | Needs a `chrome://webrtc-internals` dump of a failing run, or the same run without the VPN, to tell the VPN from the relay or the camera | Open |
 | R18 | High | **The player never answered on a PC with several network adapters.** `sendAnswer` waited for address gathering to complete with no limit. With a Tailscale/VPN adapter, Chrome gathers on every interface; one that drops the relay request keeps gathering open about 40 s, so the answer was never sent and the camera closed the session after 30 s (`no_answer`; viewer `timeout`). The VPN extension hid it by allowing only the relay. Found by the user on 2026-11-06 (incognito, office line, camera v130 on sg00: four `no_answer` in a row, the one TCP-relayed try connected) | Player 2.6.5 (deployed 2026-11-06): the answer goes out 1 s after the relay candidate, 6 s at most, with the candidates gathered so far (`ANSWER_GATHER_MS`). The mobile app must do the same (application_todo) | Fixed in the player. First retest 08:10 UTC still `no_answer` (most likely a tab still running the cached 2.6.4 page, R20); the next tries at 08:12 and 08:13 connected through the camera's relay over UDP. Retest with 2.6.6, where the log line `Player v2.6.6` proves the page |
 | R19 | High | **Each relay held only 500 viewing sessions, LAN and direct included.** Both sides of every session take a relay allocation while gathering (camera and viewer, both under the camera's login) and keep it until the session closes, even when the stream goes over LAN or direct. With the default `-max 1000`, a relay stopped at 500 concurrent sessions (about 5% of the 10k cameras a relay is sized for) and later viewers got no relay address. `-max-per-user 16` allows about 8 viewers per camera at once. Idle allocations cost about 23 KB and no CPU (capacity.md) | 2026-11-06: `-max 8000` (4,000 sessions) in `/etc/matrix-relay/env` on both relays, and `MemoryMax=384M` in `matrix-relay.service` (8000 × 23 KB ≈ 190 MB; it was 128M). Watch `matrix_relay_quota_rejects_total` | Done |
 | R20 | Medium | **Open tabs kept an old player after a deploy.** `/demo/<tenant>` was served with `Last-Modified` only, so Chrome could reuse the cached page, and nothing showed which player a viewer ran | 2.6.6: `Cache-Control: no-cache`; the player logs `Player v…`, warns when the server's version differs ("reload the page"), and sends `version` in its reports. The camera and the mobile app may send `version` too (up to 32 of `0-9A-Za-z._+-`) | Done |
@@ -121,7 +122,7 @@ ran no load, runtime or chaos tests. Its findings, with today's status:
 | P1 | **Legacy rollout behind a Center-only load balancer** | **No longer applies.** There is no load balancer. Old cameras on the legacy service are a separate system (vrelay_parity_gap.md decision A); old matrix cameras (proto 2) are served on their configured server |
 | P1 | **Regional recovery capacity.** The emergency capacity in the plan conflicted with the admission cap | **Open, smaller.** If a region is down or full its cameras go to the least loaded node anywhere. If every node is full, Center sends cameras to its own fallback address, which can overload it. Plan N+1 control nodes per region with capacity.md's numbers (5,000 cameras per 1 GB node at 70%), and test a node loss once on droplets (phase 3) |
 | P2 | **Relay recovery.** A live stream on a failed relay is not moved; ICE restart and new credentials are needed, and relay choice needs bandwidth and allocation load | **Load done, recovery open.** Relays report allocations and Mbps and are chosen by load. A backup from another region is offered only for relays listed in `config.json`; the reporting relays of 2026-11-04 have none (R12). A stream on a relay that dies still drops: the app and the camera reconnect (new request, new offer). ICE restart is not built |
-| — | **Blind spot:** a healthy WebSocket and a successful assignment don't prove playable video | **Partly done.** Every viewing attempt reports connected or failed, the path, the relay protocol and the setup time (the web player and the camera). Decided 2026-11-05: a connection counts as working when the camera's data channel is open and answers a ping; a viewer who then sees no picture points at bandwidth or the video source, measured by the camera from the viewer's RTCP feedback (2.7.0, phase 1 step 3) |
+| — | **Blind spot:** a healthy WebSocket and a successful assignment don't prove playable video | **Partly done.** Every viewing attempt reports connected or failed, the path, the relay protocol and the setup time (the web player and the camera). Decided 2026-11-05: a connection counts as working when the camera's data channel is open and answers a ping; a viewer who then sees no picture points at bandwidth or the video source, measured by the camera from the viewer's RTCP feedback (2.7.0, phase 1 step 4) |
 
 ## 4. Parity with vrelay
 
@@ -149,26 +150,33 @@ ran no load, runtime or chaos tests. Its findings, with today's status:
 3. Decide the takeover policy (R1). At least alert on `sid_takeover`.
 4. sg00's relay: done 2026-11-04, `mx-relay-sg00` on the former violet
    droplet.
-5. Deploy 2.6.x to the Center and sg00: done 2026-11-05 (2.6.4); 2.6.5 on 2026-11-06.
+5. Deploy 2.6.x to the Center and sg00: done 2026-11-05 (2.6.4); 2.6.5 and
+   2.6.6 on 2026-11-06.
 6. Push and tag `release_2.5.0`. Done 2026-11-04.
 
 ### Phase 1: pilot (testers, up to about 100 cameras, Center plus sg00)
 
-1. Camera 2.1.5 (2.1.4 plus the relay login fix, R15):
-   - test it on one camera: verify, view over LAN, direct and relay (the
-     camera's own relay candidate on `mx-relay-sg00`), and an RTSP or UDP
-     `IPv4:PORT` source
-   - publish it
-   - keep 2.1.3 for rollback
+1. Camera 2.1.6 (2.1.4 plus the relay login fix R15 and the ICE role fix
+   R16): published 2026-11-05.
+   - seen working 2026-11-06 on sg00: viewers connected through the
+     camera's own relay candidate on `mx-relay-sg00` (UDP) and over a TCP
+     relay (VPN viewer)
+   - still to test on one camera: an RTSP or UDP `IPv4:PORT` source, and a
+     long stream over a VPN (R17)
+   - keep the previous binary for rollback
 2. A production `matrix-relay` per region: `mx-relay-us00` and
    `mx-relay-sg00` in service since 2026-11-04, violet retired. Add a backup
-   relay (R12). SG TLS done 2026-11-05.
-3. Statistics 2.7.0 (decided 2026-11-05): the control server counts the
+   relay (R12). SG TLS done 2026-11-05. `-max 8000` (4,000 sessions a relay)
+   since 2026-11-06 (R19).
+3. The player (done in 2.6.5/2.6.6) and the mobile app answer without
+   waiting for address gathering to finish (R18), and say their version in
+   reports (R20). The app's part is in application_todo.
+4. Statistics 2.7.0 (decided 2026-11-05): the control server counts the
    requests; a session succeeds when the **camera** reports its data channel
    open and a ping answered. The camera also reports stream quality from the
    viewer's RTCP feedback (loss, jitter, RTT, the viewer's bandwidth
    estimate). The mobile app adds nothing; country comes from the Center.
-4. Watch for 7 days on `/admin/statistic` and `matrix-fleet status`:
+5. Watch for 7 days on `/admin/statistic` and `matrix-fleet status`:
    - verify success
    - `viewer_connected` against `viewer_failed`, and the error codes
    - relayed share by protocol
@@ -207,8 +215,8 @@ ran no load, runtime or chaos tests. Its findings, with today's status:
 
 | Part | How |
 |---|---|
-| Control server | `/opt/matrix/backups/<time>/` holds the previous binary and player: copy it back as `/opt/matrix/matrix_cc` and run `systemctl restart matrix`, or run `setup.sh upgrade` from the previous package. 2.5.0 and 2.6.0 change no data format; a takeover writes ordinary activation records (2.4.0 reads them); 2.6.0's extra statistics gauges are ignored by older versions |
+| Control server | `/opt/matrix/backups/<time>/` holds the previous binary and player: copy it back as `/opt/matrix/matrix_cc` and run `systemctl restart matrix`, or run `setup.sh upgrade` from the previous package. 2.5.0 and 2.6.0 change no data format; a takeover writes ordinary activation records (2.4.0 reads them); 2.6.0's extra statistics gauges are ignored by older versions; 2.6.6's `version` field in the connection log is ignored by older versions |
 | Fleet configuration | `sudo matrix-fleet rollback [VERSION]` |
 | Takeover only | Per tenant: `"no_takeover": true` in `tenants.json`. For the whole server there is no flag yet: set `TakeoverAfter: -1` in the Center config and rebuild, or roll back to 2.4.0 |
-| Relay | A new relay binary: keep the old one, replace `/usr/local/bin/matrix-relay`, `systemctl restart matrix-relay` (sessions on it drop and reconnect). There is no violet to go back to on the relay droplets; in an emergency a control server can hand out fixed relays again from a `cfg/turn.conf` once `cfg/relay-secrets.json` is removed (read per request, no restart) |
+| Relay | Flags and limits are in `/etc/matrix-relay/env` and `matrix-relay.service` (since 2026-11-06 `-max 8000`, `MemoryMax=384M`); remove `-max 8000` to go back to 1000. A new relay binary: keep the old one, replace `/usr/local/bin/matrix-relay`, `systemctl restart matrix-relay` (sessions on it drop and reconnect). There is no violet to go back to on the relay droplets; in an emergency a control server can hand out fixed relays again from a `cfg/turn.conf` once `cfg/relay-secrets.json` is removed (read per request, no restart) |
 | Camera | Publish the previous binary to the download URL; cameras take it at their next boot |

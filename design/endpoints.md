@@ -1,6 +1,6 @@
 # Matrix endpoints
 
-Every endpoint of `matrix_cc`, by who calls it. Checked against the code on 2026-11-04: control server 2.6.0 (`9808bcf`), `matrix-relay` 1.2.0.
+Every endpoint of `matrix_cc`, by who calls it. Checked against the code on 2026-11-04: control server 2.6.0 (`9808bcf`), `matrix-relay` 1.2.0; updated for 2.6.6 (`0c1c89a`, 2026-11-06).
 
 Both server roles run the same binary:
 
