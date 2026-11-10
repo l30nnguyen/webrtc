@@ -22,6 +22,7 @@ server is the **control server**, TURN is the **relay stream server**.
 | [design/roll-out.md](design/roll-out.md) | Versions, code review, the 2026-10-08 strategy review, parity with vrelay, plan and rollback |
 | [design/capacity.md](design/capacity.md) | Measured limits, servers for 1K–1M cameras, DigitalOcean cost per camera |
 | [design/vrelay_parity_gap.md](design/vrelay_parity_gap.md) | Product decisions against vrelay and the status of each item |
+| [design/server_operation.md](design/server_operation.md) | Hand-over for operators: servers, logins (where, not what), adding/removing servers with the pre-deployment check, scaling, deploys, monitoring |
 | [release/README.md](release/README.md) | Installing and operating a Center, a node, relays and the fleet |
 | [src/relay/README.md](src/relay/README.md) | The relay, its reports, the statistics and the connection log |
 | [../application_todo.md](../application_todo.md) | What the mobile app implements, with [details and tests](../application_todo_details.md) |
