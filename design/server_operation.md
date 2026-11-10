@@ -6,6 +6,8 @@ matrix servers and deploys them. It covers:
 - how to add or remove one
 - how to check a new server before it takes traffic
 - what to watch
+- the planned target: several Center servers behind a load balancer
+  (section 1.4; not built yet)
 
 Other docs, all in `server/design/` and the Drive folder `Matrix/v2/design`:
 
@@ -27,7 +29,12 @@ can't reach each other directly.
 
 ## 1. High-level architecture
 
-### 1.1 Servers and how they connect
+### 1.1 Servers and how they connect (current, 2026-11-10)
+
+Today there is **one** Center and no load balancer. While the Center is down
+or restarting, cameras and viewers that are already connected keep working.
+No new camera connection and no new viewing session can start anywhere until
+it is back. Section 1.4 has the plan to fix this (R21).
 
 ```
                         VIEWERS (mobile app, ws.html player)
@@ -166,6 +173,136 @@ at 70% load, and a 1 GB relay about 67 relayed sessions (about 10,000
 cameras) at 70% CPU. Adjust them once real traffic shows the true numbers,
 and add a line to capacity.md's tracking table.
 
+### 1.4 Target: the Center behind a load balancer (planned, R21)
+
+**Status 2026-11-10: planned, not built.** Everything above section 1.4
+describes the fleet as it runs today. The code changes listed below are
+needed before a second Center can run.
+
+**Why.** The Center is the one server every new connection and every new
+viewing session passes through. The goal is 99.9% successful views from any
+viewer network. For that, the Center must survive the loss of one droplet,
+and an upgrade, without stopping new connections.
+
+```
+ CAMERAS, VIEWERS, PAIRING SYSTEM   (still https://matrix.5gen.care: nothing changes on them)
+                 |
+                 v   DNS: matrix.5gen.care -> load balancer IP
+ ┌──────────────────────────────────────────────────────────┐
+ │ LOAD BALANCER (DigitalOcean, nyc3)                       │
+ │ TCP 443 passed through to the Centers + PROXY protocol   │
+ │ health check: GET /api/health on each Center every 10 s  │
+ └─────────────┬─────────────────────────────┬──────────────┘
+               v                             v
+ ┌──────────────────────────┐  ┌──────────────────────────┐
+ │ Center A                 │  │ Center B                 │   add C, D ...
+ │ center-a.5gen.care       │  │ center-b.5gen.care       │   the same way
+ │ tickets, routing,        │  │ same keys, KID and       │   (section 3.5)
+ │ activation; no cameras   │  │ config version as A      │
+ └─────────────┬────────────┘  └─────────────┬────────────┘
+               │ activations, takeover state,│
+               v revocations, config         v
+ ┌──────────────────────────────────────────────────────────┐
+ │ SHARED STORE: DigitalOcean Managed PostgreSQL (nyc3),    │
+ │ primary + standby, daily backups (also closes R3)        │
+ └──────────────────────────────────────────────────────────┘
+
+ CONTROL NODES link to EVERY Center directly (not through the load balancer),
+ so each Center knows where every camera is:
+
+   node us00 (nyc3, NEW: takes the US cameras off the Center) ──link──> A, B
+   node sg00 (sgp1)                                           ──link──> A, B
+
+ RELAYS report to their region's node, never to a Center:
+
+   mx-relay-us00 ──report──> us00         mx-relay-sg00 ──report──> sg00
+```
+
+| | Today | Target |
+|---|---|---|
+| Center | one droplet, which is also the US control node | 2 or more droplets, Center role only, behind the load balancer |
+| US cameras | on the Center (node `center`) | on a new node `us00` in nyc3 |
+| `mx-relay-us00` reports to | the Center | `us00` |
+| Activations, takeover state, revocations | files on the Center (`cfg/sid/`) | shared PostgreSQL |
+| Node link | to `matrix.5gen.care` | to each Center by its own name |
+| One Center lost | no new connection or view until it is back | the load balancer stops sending to it within about 30 s; the others serve |
+| Center upgrade | all of its connections drop for a few seconds | one Center at a time, taken out of the pool first: no drop |
+| Backup (R3) | none off-host | managed database backups; keys kept in the password manager |
+
+**Code work needed (R21). None of it is built yet:**
+
+1. **Client address behind the load balancer.** Several features read the
+   TCP source address: rate limits, the refused log, `PLAYER_ALLOW` and
+   `STATISTIC_ALLOW`, and the node-link IP check. Behind a load balancer,
+   that address is the load balancer. Fix: read the PROXY protocol header,
+   and accept it only from the load balancer's addresses.
+2. **Shared activation store.** `activations.jsonl` is a local file, so two
+   Centers could each bind the same SID to a different device. Fix: keep it
+   in PostgreSQL, with a compare-and-set per SID. This is the "registry
+   ownership" item of the 2026-10-08 review (roll-out.md section 3).
+3. **Takeover and revocation.** A takeover is decided from the camera list
+   that the node links feed in, and the revocation is written to the local
+   blocklist. Fix: every Center sees every node (item 4), and revocations go
+   to the shared store.
+4. **A node links to several Centers.** `LINK_TO` takes one address; it must
+   take a list. `matrix-fleet apply` must reach every Center: either keep
+   the configuration versions in the shared store, or apply on each Center.
+5. **A Center with no node of its own.** Today `center` is also a node in
+   `config.json`. Check, and fix if needed, that a Center runs with no node
+   of its own.
+6. **Statistics and the connection log are per server.** Each Center's
+   `/admin/statistic` would show only its own share: add a merged view, or
+   link the instances' pages to each other.
+7. **Secrets on every Center.** The Center ticket key and `admin.token` must
+   be on every Center. Copy them over SSH, never through the load balancer,
+   and keep them in the password manager.
+
+**Migration.** Each step has its own check before it takes traffic, and
+today's setup keeps running until step 6:
+
+1. R3 first: an off-host backup of the Center, restored once on a scratch
+   droplet.
+2. Add node `us00` in nyc3 (section 3.2, with its checks). Move
+   `mx-relay-us00` to report to `us00`: put its secret in `us00`'s
+   `relay-secrets.json`, then change its `-control`. Once item 5 is checked,
+   take node `center` out of `config.json`; US cameras then move to `us00`
+   as they reconnect. Check: a US test camera is on `us00` and can be
+   watched.
+3. Build the R21 code, and test it on the dev box: a local load balancer
+   (haproxy), 2 Centers and 1 node. Tests:
+   - stop one Center during viewing;
+   - upgrade one Center;
+   - send the same SID to both Centers at the same moment: only one bind
+     may win.
+4. Create the managed PostgreSQL, move the activations into it, create
+   Center B, and create the load balancer with A and B. A day before the
+   switch, lower the DNS TTL of `matrix.5gen.care` to 60 s.
+5. **Check before the switch:**
+   - section 3.5 passes on each Center;
+   - the load balancer shows both Centers healthy;
+   - through the load balancer, with DNS not yet changed:
+     `curl --resolve matrix.5gen.care:443:<LB IP> https://matrix.5gen.care/api/health`
+     answers;
+   - a test camera and a test view work through the same `--resolve` path.
+6. Point the DNS A record of `matrix.5gen.care` at the load balancer, and
+   watch for 24 hours. **Rollback:** point DNS back at Center A's IP
+   (Center A keeps running).
+
+**Cost:** about $12 a month for the load balancer (DO small). Managed
+PostgreSQL starts at about $15 a month, or about $30 with a standby. Add one
+more $6–12 droplet for each extra Center. Check the current DO prices before
+ordering.
+
+**Once built, also watch:**
+- the load balancer's health of each Center (DO console);
+- PostgreSQL CPU, connections and backups;
+- that every node shows a link to every Center;
+- that all Centers run the same version and config version.
+
+A whole-region outage of nyc3 would still stop the Centers, because the
+load balancer and the database are in one region. A second region with DNS
+failover is a later step, not part of R21.
+
 ---
 
 ## 2. The servers
@@ -184,6 +321,9 @@ Ubuntu 24.04 LTS, $6 a month.
 
 The droplets' own host names don't match their roles (sg00 is `matrix-02`,
 mx-relay-us00 is `matrix-03`). Always go by IP or DNS name.
+
+There is one Center and no load balancer yet. The planned Center pool
+(`center-a`, `center-b`, load balancer, `us00`) is in section 1.4.
 
 **Not part of the fleet. Do not change:**
 - The AWS dev VPS `webrtc.5gen.care` (3.95.228.203) will become the license
@@ -415,11 +555,44 @@ shred -u ~/new-relay.json ~/relay-secrets.json      # and /root/new-relay.json o
 **If it goes wrong**: put the backup `relay-secrets.bak-<date>` back. The
 relay stops being handed out to new sessions at once.
 
-### 3.4 A new Center
+### 3.4 A new Center (today)
 
-A new Center is needed only to replace the current one. That is disaster
-recovery, and it needs the off-host backup, which does not exist yet (R3).
-Follow INSTALL.md section 2, and do not try it without the project owner.
+Today a new Center is needed only to replace the current one. That is
+disaster recovery, and it needs the off-host backup, which does not exist
+yet (R3). Follow INSTALL.md section 2, and do not try it without the project
+owner.
+
+### 3.5 Adding or removing a Center behind the load balancer (after R21)
+
+This applies only once section 1.4 is built.
+
+**Add:**
+1. Create a droplet in the same DO region as the load balancer. Give it its
+   own DNS name, `center-<x>.5gen.care`.
+2. Install it as a Center, with the keys copied over SSH and the shared
+   store's address.
+3. **Verify before it joins the pool (required):**
+
+   | # | Check | Pass when |
+   |---|---|---|
+   | 1 | `curl -s https://center-<x>.5gen.care/api/health` | ok, the same version as the other Centers |
+   | 2 | `KID`, `sha256sum` of the Center ticket keys and of `admin.token` | equal to Center A's |
+   | 3 | `journalctl -u matrix -n 50` | connected to the shared store; no errors |
+   | 4 | `matrix-fleet status` on the new Center | every node linked; the same config version as the others |
+   | 5 | a test `/v1/view` sent to it directly (`curl --resolve matrix.5gen.care:443:<its IP> ...`) | answered |
+   | 6 | `timedatectl` | synchronised |
+
+4. Add it to the load balancer pool (the DO tag `matrix-center`). Check that
+   the load balancer shows it healthy.
+
+**Remove:**
+1. Take it out of the pool (remove the tag).
+2. Wait 2 minutes. Center requests are short, apart from the node links,
+   which go to it directly.
+3. Stop the service. Remove it from the nodes' link lists, then destroy the
+   droplet.
+
+Keep at least 2 Centers in the pool at all times.
 
 ---
 
@@ -549,3 +722,4 @@ Certificates on 2026-11-10: `matrix.5gen.care` to 2027-01-25 and
 | R5 | No alerting | the daily check above is the only monitoring |
 | R6 | No `deploy.sh all`, relay installer or new-node script | follow section 3 by hand |
 | R12 | No cross-region backup relay | if a region's only relay dies, relayed views in that region fail until it is back |
+| R21 | One Center, no load balancer | while the Center is down or restarting, no new connection or view can start anywhere. Plan: section 1.4 |

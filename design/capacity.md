@@ -33,7 +33,11 @@ they are measured on a real droplet (see [Limits of the test](#limits-of-the-tes
 Add to every row:
 
 - **The Control Center**: one server (it only issues tickets, activates and
-  routes; a camera reaches it once per view), plus a standby.
+  routes; a camera reaches it once per view), plus a standby. Planned
+  (R21, server_operation.md section 1.4): 2 or more Centers behind a
+  DigitalOcean load balancer (about $12 a month), with a managed PostgreSQL
+  (about $15 a month, or $30 with a standby). That adds about $45 a month
+  to every row below. Today it is still one droplet.
 - **One spare** control node and one spare relay per region (N+1), so a
   server can fail or be upgraded without dropping its cameras.
 - **Per region**: every region needs at least one control node and one relay,
