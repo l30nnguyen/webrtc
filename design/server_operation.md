@@ -33,8 +33,8 @@ can't reach each other directly.
                         VIEWERS (mobile app, ws.html player)
                                     │
                 1. ask for a view   │ HTTPS 443  /v1/view
-                                    ▼
- CAMERAS ──── WSS 443 ────▶ ┌───────────────────────────────┐
+                                    v
+ CAMERAS ──── WSS 443 ────> ┌───────────────────────────────┐
  (ask which node,           │ CONTROL CENTER                │
   then stay connected)      │ matrix.5gen.care  (DO nyc3)   │
                             │ - SID tickets, activation     │
@@ -54,12 +54,12 @@ can't reach each other directly.
  RELAY STREAM SERVERS: each one reports to the control server of its region
  every 15 s over HTTPS (POST /v1/relay/report, signed with a shared secret)
 
-   mx-relay-us00 (nyc3) ──report──▶ Center  ──hands it out to US sessions
-   mx-relay-sg00 (sgp1) ──report──▶ sg00    ──hands it out to SG sessions
+   mx-relay-us00 (nyc3) ──report──> Center  ──hands it out to US sessions
+   mx-relay-sg00 (sgp1) ──report──> sg00    ──hands it out to SG sessions
 
  VIDEO (after the control server has set up the session):
-   camera ◀──── LAN / direct (peer to peer) ────▶ viewer
-   camera ◀──UDP──▶ relay of the region ◀──UDP / TCP 80 / TLS 443──▶ viewer
+   camera <──── LAN / direct (peer to peer) ────> viewer
+   camera <──UDP──> relay of the region <──UDP / TCP 80 / TLS 443──> viewer
 ```
 
 - **One Center** (`matrix.5gen.care`). It is the only server that knows the
@@ -85,17 +85,17 @@ can't reach each other directly.
  ──────────────────                            ─────────────────────
  droplet + DNS + firewall                      Center: matrix-fleet apply
         │                                        (config without the node)
-        ▼                                             │  link drops; new
- setup.sh install-node  ──prints──▶ node entry        │  cameras go elsewhere
-        │                                             ▼
-        ▼                                      node: systemctl stop matrix
- ★ VERIFY (section 3.2) ── fail? fix, don't add       │  its cameras reconnect
+        v                                             │  link drops; new
+ setup.sh install-node  ──prints──> node entry        │  cameras go elsewhere
+        │                                             v
+        v                                      node: systemctl stop matrix
+ * VERIFY (section 3.2) ── fail? fix, don't add       │  its cameras reconnect
         │ pass                                        │  through the Center
-        ▼                                             ▼
+        v                                             v
  Center: matrix-fleet check + apply            fleet status: 0 cameras on it
    (adds the node to config.json)                     │
-        │                                             ▼
-        ▼                                      destroy droplet, DNS record,
+        │                                             v
+        v                                      destroy droplet, DNS record,
  node links within seconds,                    deploy.sh target
  takes NEW cameras of its region
 
@@ -103,17 +103,17 @@ can't reach each other directly.
  ───────────                                   ──────────────
  droplet + DNS + firewall + cert               control server: remove its
         │                                        name from relay-secrets.json
-        ▼                                        (no new sessions get it)
+        v                                        (no new sessions get it)
  install matrix-relay, env, service                   │
-        │ (reports, but gets 403 until step 3)        ▼
-        ▼                                      wait: allocations = 0
- ★ VERIFY (section 3.3) ── fail? fix, don't add       │  (or sessions drop and
+        │ (reports, but gets 403 until step 3)        v
+        v                                      wait: allocations = 0
+ * VERIFY (section 3.3) ── fail? fix, don't add       │  (or sessions drop and
         │ pass                                        │   reconnect elsewhere)
-        ▼                                             ▼
+        v                                             v
  control server: add its secret to             systemctl disable --now
    relay-secrets.json (read per request)         matrix-relay, destroy droplet
         │
-        ▼
+        v
  handed out to new sessions by load
 ```
 
@@ -129,23 +129,23 @@ graceful drain yet (R4), so remove servers at a quiet hour.
                  │ every day: matrix-fleet status on Center  │
                  │ + /admin/statistic (per region, 7 days)   │
                  └─────────────────────┬─────────────────────┘
-                                       ▼
-         ┌──────────────── any SCALE-UP trigger, sustained 3 days ──────────┐
+                                       v
+         ┌──────────────── any SCALE-UP trigger, sustained 3 days ───────────┐
          │  control node: cameras > 3,500, or memory > 70%,                  │
          │                or CPU > 70% at peak                               │
          │  relay:        CPU > 60%, or Mbps > 60% of capacity,              │
          │                or allocations > 6,000 (of -max 8000),             │
          │                or ANY quota_rejects                               │
-         └───────┬───────────────────────────────────────────────┬──────────┘
-                 │ yes                                            │ no
-                 ▼                                                ▼
-     add one server of that type in      ┌── every SCALE-DOWN condition, 14 days ──┐
+         └───────┬───────────────────────────────────────────────┬───────────┘
+                 │ yes                                           │ no
+                 v                                               v
+     add one server of that type in      ┌── every SCALE-DOWN condition, 14 days ───┐
      that region (section 3)             │  region has more than 2 of that type,    │
      (or resize the droplet: one         │  and with one server fewer the rest      │
       reboot, at a quiet hour)           │  would stay under 40%                    │
                  │                       └───────┬─────────────────────────┬────────┘
-                 ▼                               │ yes                     │ no
-     check the load spreads (1–2 days):          ▼                         ▼
+                 v                               │ yes                     │ no
+     check the load spreads (1–2 days):          v                         v
      new CAMERAS go to the least loaded   remove one (section 1.2),     do nothing
      node, but cameras already connected  at a quiet hour
      stay where they are until they
