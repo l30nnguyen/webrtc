@@ -35,8 +35,8 @@ Add to every row:
 - **The Control Center**: one server (it only issues tickets, activates and
   routes; a camera reaches it once per view), plus a standby. Planned
   (R21, server_operation.md section 1.4): 2 or more Centers behind a
-  DigitalOcean load balancer (about $12 a month), with a managed PostgreSQL
-  (about $15 a month, or $30 with a standby). That adds about $45 a month
+  DigitalOcean load balancer (about $12 a month), with a managed Redis
+  (DO Valkey, about $15 a month for one node). That adds about $40 a month
   to every row below. Today it is still one droplet.
 - **One spare** control node and one spare relay per region (N+1), so a
   server can fail or be upgraded without dropping its cameras.

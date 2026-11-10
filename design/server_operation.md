@@ -203,8 +203,10 @@ and an upgrade, without stopping new connections.
                │ activations, takeover state,│
                v revocations, config         v
  ┌──────────────────────────────────────────────────────────┐
- │ SHARED STORE: DigitalOcean Managed PostgreSQL (nyc3),    │
- │ primary + standby, daily backups (also closes R3)        │
+ │ SHARED STORE: Redis (DO Managed Valkey, nyc3)            │
+ │ SID binds (SET NX), takeover, revocations (pub/sub),     │
+ │ shared rate limits. Each bind is also written to the     │
+ │ Center's activations.jsonl, which R3 backs up off-host   │
  └──────────────────────────────────────────────────────────┘
 
  CONTROL NODES link to EVERY Center directly (not through the load balancer),
@@ -223,11 +225,12 @@ and an upgrade, without stopping new connections.
 | Center | one droplet, which is also the US control node | 2 or more droplets, Center role only, behind the load balancer |
 | US cameras | on the Center (node `center`) | on a new node `us00` in nyc3 |
 | `mx-relay-us00` reports to | the Center | `us00` |
-| Activations, takeover state, revocations | files on the Center (`cfg/sid/`) | shared PostgreSQL |
+| Activations, takeover state, revocations | files on the Center (`cfg/sid/`) | shared Redis; each Center still writes `activations.jsonl` as the durable record |
+| Rate limits | per Center | shared in Redis, so a client can't double its limit by reaching two Centers |
 | Node link | to `matrix.5gen.care` | to each Center by its own name |
 | One Center lost | no new connection or view until it is back | the load balancer stops sending to it within about 30 s; the others serve |
 | Center upgrade | all of its connections drop for a few seconds | one Center at a time, taken out of the pool first: no drop |
-| Backup (R3) | none off-host | managed database backups; keys kept in the password manager |
+| Backup (R3) | none off-host | nightly off-host copy of each Center's `cfg/sid/` (DO Managed Valkey has no backups); keys kept in the password manager |
 
 **Code work needed (R21). None of it is built yet:**
 
@@ -238,12 +241,14 @@ and an upgrade, without stopping new connections.
    and accept it only from the load balancer's addresses.
 2. **Shared activation store.** `activations.jsonl` is a local file, so two
    Centers could each bind the same SID to a different device. Fix: keep it
-   in PostgreSQL, with a compare-and-set per SID. This is the "registry
+   in Redis: `SET sid:<id> <device> NX` decides the bind, so only one Center
+   can win. The Center then appends the bind to its own `activations.jsonl`
+   as today. This is the "registry
    ownership" item of the 2026-10-08 review (roll-out.md section 3).
 3. **Takeover and revocation.** A takeover is decided from the camera list
    that the node links feed in, and the revocation is written to the local
    blocklist. Fix: every Center sees every node (item 4), and revocations go
-   to the shared store.
+   to the shared store and are pushed to every Center over Redis pub/sub.
 4. **A node links to several Centers.** `LINK_TO` takes one address; it must
    take a list. `matrix-fleet apply` must reach every Center: either keep
    the configuration versions in the shared store, or apply on each Center.
@@ -256,6 +261,25 @@ and an upgrade, without stopping new connections.
 7. **Secrets on every Center.** The Center ticket key and `admin.token` must
    be on every Center. Copy them over SSH, never through the load balancer,
    and keep them in the password manager.
+
+**Why Redis, and its limit.** The shared state is small key-value data:
+one bind per SID, takeover markers, revocations and rate-limit counters.
+Redis fits it: `SET NX` makes the bind atomic, pub/sub pushes revocations to
+every Center at once, and keys with a TTL suit rate limits and takeover
+windows. The limit is durability: DO Managed Valkey saves RDB snapshots
+only and offers **no backups or restore**, so a failover or restart can lose
+the last minutes of writes. Rules that cover this:
+- Redis is never the only copy. Each Center appends every bind and
+  revocation to its local `activations.jsonl` and blocklist, and R3 copies
+  `cfg/sid/` off-host every night.
+- If Redis loses data, rebuild it from the union of all Centers' files,
+  earliest bind per SID wins (a `matrix-fleet redis-rebuild` command, part
+  of the R21 code).
+- While Redis is unreachable, SIDs that are already bound keep working from
+  each Center's local copy; a first-time bind waits until Redis is back,
+  so no SID can be bound twice.
+- Eviction policy `noeviction` (the DO default). Never switch it to an LRU
+  policy: that would silently drop binds.
 
 **Migration.** Each step has its own check before it takes traffic, and
 today's setup keeps running until step 6:
@@ -274,7 +298,8 @@ today's setup keeps running until step 6:
    - upgrade one Center;
    - send the same SID to both Centers at the same moment: only one bind
      may win.
-4. Create the managed PostgreSQL, move the activations into it, create
+4. Create the managed Redis (DO Valkey), load the activations into it from
+   `activations.jsonl`, create
    Center B, and create the load balancer with A and B. A day before the
    switch, lower the DNS TTL of `matrix.5gen.care` to 60 s.
 5. **Check before the switch:**
@@ -289,18 +314,20 @@ today's setup keeps running until step 6:
    (Center A keeps running).
 
 **Cost:** about $12 a month for the load balancer (DO small). Managed
-PostgreSQL starts at about $15 a month, or about $30 with a standby. Add one
+Redis (DO Managed Valkey) starts at about $15 a month for one node with
+automatic failover; a high-availability pair starts at about $60. One node
+is enough, because the data is small and can be rebuilt (below). Add one
 more $6–12 droplet for each extra Center. Check the current DO prices before
 ordering.
 
 **Once built, also watch:**
 - the load balancer's health of each Center (DO console);
-- PostgreSQL CPU, connections and backups;
+- Redis memory (eviction policy must stay `noeviction`), connections and failovers;
 - that every node shows a link to every Center;
 - that all Centers run the same version and config version.
 
 A whole-region outage of nyc3 would still stop the Centers, because the
-load balancer and the database are in one region. A second region with DNS
+load balancer and Redis are in one region. A second region with DNS
 failover is a later step, not part of R21.
 
 ---
