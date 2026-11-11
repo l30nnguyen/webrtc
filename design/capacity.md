@@ -34,10 +34,10 @@ Add to every row:
 
 - **The Control Center**: one server (it only issues tickets, activates and
   routes; a camera reaches it once per view), plus a standby. Planned
-  (R21, server_operation.md section 1.4): 2 or more Centers behind a
-  DigitalOcean load balancer (about $12 a month), with a managed Redis
-  (DO Valkey, about $15 a month for one node). That adds about $40 a month
-  to every row below. Today it is still one droplet.
+  (R21, server_operation.md section 1.4): a Center in each region (US,
+  Asia, later EU), each one on an existing node of its region, with
+  Route53 latency routing (about $2 a month). It needs no extra droplet, so
+  the rows below stay as they are. Today it is still one droplet.
 - **One spare** control node and one spare relay per region (N+1), so a
   server can fail or be upgraded without dropping its cameras.
 - **Per region**: every region needs at least one control node and one relay,

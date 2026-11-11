@@ -1,6 +1,6 @@
 # Roll-out of matrix
 
-Updated 2026-11-10. This covers:
+Updated 2026-11-11. This covers:
 - what is released and where it runs
 - the code review findings
 - what matrix still needs to be run the way vrelay is run (`~/code/vrelay`,
@@ -99,7 +99,7 @@ keeping both sides.
 | R18 | High | **The player never answered on a PC with several network adapters.** `sendAnswer` waited for address gathering to complete with no limit. With a Tailscale/VPN adapter, Chrome gathers on every interface; one that drops the relay request keeps gathering open about 40 s, so the answer was never sent and the camera closed the session after 30 s (`no_answer`; viewer `timeout`). The VPN extension hid it by allowing only the relay. Found by the user on 2026-11-06 (incognito, office line, camera v130 on sg00: four `no_answer` in a row, the one TCP-relayed try connected) | Player 2.6.5 (deployed 2026-11-06): the answer goes out 1 s after the relay candidate, 6 s at most, with the candidates gathered so far (`ANSWER_GATHER_MS`). The mobile app must do the same (application_todo) | Fixed in the player. First retest 08:10 UTC still `no_answer` (most likely a tab still running the cached 2.6.4 page, R20); the next tries at 08:12 and 08:13 connected through the camera's relay over UDP. Retest with 2.6.6, where the log line `Player v2.6.6` proves the page |
 | R19 | High | **Each relay held only 500 viewing sessions, LAN and direct included.** Both sides of every session take a relay allocation while gathering (camera and viewer, both under the camera's login) and keep it until the session closes, even when the stream goes over LAN or direct. With the default `-max 1000`, a relay stopped at 500 concurrent sessions (about 5% of the 10k cameras a relay is sized for) and later viewers got no relay address. `-max-per-user 16` allows about 8 viewers per camera at once. Idle allocations cost about 23 KB and no CPU (capacity.md) | 2026-11-06: `-max 8000` (4,000 sessions) in `/etc/matrix-relay/env` on both relays, and `MemoryMax=384M` in `matrix-relay.service` (8000 × 23 KB ≈ 190 MB; it was 128M). Watch `matrix_relay_quota_rejects_total` | Done |
 | R20 | Medium | **Open tabs kept an old player after a deploy.** `/demo/<tenant>` was served with `Last-Modified` only, so Chrome could reuse the cached page, and nothing showed which player a viewer ran | 2.6.6: `Cache-Control: no-cache`; the player logs `Player v…`, warns when the server's version differs ("reload the page"), and sends `version` in its reports. The camera and the mobile app may send `version` too (up to 32 of `0-9A-Za-z._+-`) | Done |
-| R21 | High | **One Center, no load balancer.** Every new camera connection and every new viewing session passes through the single Center (`matrix.5gen.care`, nyc3), which is also the US control node. While it is down or restarting, connected cameras and viewers keep working, but nothing new can start anywhere. The code assumes one Center: activations are a local file, each node links to one Center, and rate limits and allow lists read the TCP source address, which would be the load balancer's | Target (2026-11-10, user's decision): 2 or more Centers behind a DigitalOcean load balancer (TCP 443 + PROXY protocol), a shared Redis store (DO Managed Valkey; each Center keeps its activations.jsonl as the durable record), nodes linked to every Center, US cameras moved to a new node `us00`. Code work, migration and checks: server_operation.md section 1.4 | Planned |
+| R21 | High | **One Center.** Every new camera connection and every new viewing session passes through the single Center (`matrix.5gen.care`, nyc3), which is also the US control node. While it is down or restarting, connected cameras and viewers keep working, but nothing new can start anywhere. The code assumes one Center: activations are a local file and each node links to one Center | Target (2026-11-11, user's decision): a Center in each region (US, Asia on sg00, later EU) that back each other up. Route53 latency routing with a health check per Center sends each device to the nearest healthy one. One activation writer (US); the others forward first-time binds and keep a copy. Every node links to every Center. About $2 a month, no new droplet. A load balancer, Redis, a bigger droplet and active/standby were considered and not chosen (reasons in server_operation.md section 1.4, with the code work, migration and checks) | Planned |
 | R11 | Low | **`LimitNOFILE=65536`** in `matrix.service`, while a 4 GB node is rated at 62,500 connections (capacity.md) | Raise to 262144 (as vrelay) when 4 GB nodes are used | Open |
 
 Takeover itself worked as designed in the unit tests and in a local
@@ -118,9 +118,9 @@ ran no load, runtime or chaos tests. Its findings, with today's status:
 |---|---|---|
 | P1 | **Authentication prerequisite.** The licensing design took an Ed25519 signature for 32 bytes (it is 64). Admission needed an authenticated camera identity, and tokens had to bind role and URL | **Resolved.** The SID is 118 characters (24-byte payload, 64-byte signature). The camera proves its device key over the nonce, the SID digest and the assigned node (`center-activate-v2`). Tickets carry role, tenant, camera scope and an audience equal to one node |
 | P1 | **Player authorization.** Checking only `request.id` left the answer and other forwarded messages unchecked; every non-`bye` message was forwarded by destination ID | **Resolved.** A viewer can message only the camera of its ticket (anything else answers `Device offline`), a camera's messages reach only viewers whose ticket is for that camera, all within one tenant |
-| P1 | **Fallback contract.** One five-minute node-bound token could not authenticate at other nodes or after a 24-hour cache, and a Center outage had no reconnect path | **Changed, partly open.** Every connection gets a fresh 60 s ticket from Center for one node, so nothing is cached. If the Center is down, connected cameras and viewers keep working and nodes keep their configuration, but **no new camera connection or viewing session can start** until the Center is back. Accepted for now. A second Center (shared store) is the fix, and R3 (backup) comes first 2026-11-10: planned as R21 (several Centers behind a load balancer, shared store). |
+| P1 | **Fallback contract.** One five-minute node-bound token could not authenticate at other nodes or after a 24-hour cache, and a Center outage had no reconnect path | **Changed, partly open.** Every connection gets a fresh 60 s ticket from Center for one node, so nothing is cached. If the Center is down, connected cameras and viewers keep working and nodes keep their configuration, but **no new camera connection or viewing session can start** until the Center is back. Accepted for now. A second Center (shared store) is the fix, and R3 (backup) comes first 2026-11-10: planned as R21. 2026-11-11: R21 is now a Center in each region (US, Asia, later EU), with no load balancer and no shared store. |
 | P1 | **Registry ownership.** Shared storage, atomic epochs, compare-and-set, fencing of a partitioned old node | **Resolved for one Center.** Center is the only registry, fed by the node links. One link per node, with link generations so a replaced link's late messages are ignored. A node whose link is down counts as unhealthy (no assignments, and takeover waits for it). Several Centers would need this again (deferred) |
-| P1 | **Legacy rollout behind a Center-only load balancer** | **No longer applies.** There is no load balancer. Old cameras on the legacy service are a separate system (vrelay_parity_gap.md decision A); old matrix cameras (proto 2) are served on their configured server 2026-11-10: a load balancer in front of several Centers is now planned for availability (R21), not for legacy cameras. |
+| P1 | **Legacy rollout behind a Center-only load balancer** | **No longer applies.** There is no load balancer. Old cameras on the legacy service are a separate system (vrelay_parity_gap.md decision A); old matrix cameras (proto 2) are served on their configured server 2026-11-11: still no load balancer. R21 uses a Center in each region with Route53 latency routing instead. |
 | P1 | **Regional recovery capacity.** The emergency capacity in the plan conflicted with the admission cap | **Open, smaller.** If a region is down or full its cameras go to the least loaded node anywhere. If every node is full, Center sends cameras to its own fallback address, which can overload it. Plan N+1 control nodes per region with capacity.md's numbers (5,000 cameras per 1 GB node at 70%), and test a node loss once on droplets (phase 3) |
 | P2 | **Relay recovery.** A live stream on a failed relay is not moved; ICE restart and new credentials are needed, and relay choice needs bandwidth and allocation load | **Load done, recovery open.** Relays report allocations and Mbps and are chosen by load. A backup from another region is offered only for relays listed in `config.json`; the reporting relays of 2026-11-04 have none (R12). A stream on a relay that dies still drops: the app and the camera reconnect (new request, new offer). ICE restart is not built |
 | — | **Blind spot:** a healthy WebSocket and a successful assignment don't prove playable video | **Partly done.** Every viewing attempt reports connected or failed, the path, the relay protocol and the setup time (the web player and the camera). Decided 2026-11-05: a connection counts as working when the camera's data channel is open and answers a ping; a viewer who then sees no picture points at bandwidth or the video source, measured by the camera from the viewer's RTCP feedback (2.7.0, phase 1 step 4) |
@@ -196,19 +196,20 @@ ran no load, runtime or chaos tests. Its findings, with today's status:
    (R6).
 4. Firmware channels (R7).
 5. ufw in `setup.sh`, journald retention, revocations over the link (R8–R10).
-6. The Center behind a load balancer (R21, server_operation.md section
-   1.4):
-   - node `us00` takes the US cameras and `mx-relay-us00` off the Center;
-   - the R21 code: PROXY protocol, a shared store, links to several Centers;
-   - Center B, a managed Redis (DO Valkey) and the load balancer;
-   - then the DNS switch.
+6. A Center in each region (R21, server_operation.md section 1.4):
+   - the R21 code: links to several Centers, writer and reader Centers,
+     `matrix-fleet apply` to every Center, DNS-validated certificates;
+   - sg00 becomes the Asia Center (reader);
+   - then Route53 latency routing with health checks;
+   - the EU Center later, with the first EU node.
 
 **Gate:**
 - a restart of each server type in the pilot without complaints
 - an alert seen for a stopped node, a stopped relay and an expiring certificate
 - a restore of the Center from backup
-- one Center stopped behind the load balancer while cameras connect and
-  viewers start sessions, without failures (R21)
+- one Center stopped while cameras connect and viewers start sessions:
+  its devices move to the other Center, and only first-time binds wait
+  if it was the writer (R21)
 
 ### Phase 3: scale (1,000 to 50,000 cameras)
 
@@ -217,10 +218,10 @@ ran no load, runtime or chaos tests. Its findings, with today's status:
 - Measure the first ones on droplets.
 - Drill a node loss and a Center outage.
 - Re-check costs against the DO bill.
-- Consider ICE restart for relay failover (section 3, P2). The second Center
-  with a shared store is now planned for phase 2 (R21).
-- Consider Centers in a second region with DNS failover: R21 still leaves
-  nyc3 as a single region.
+- Consider ICE restart for relay failover (section 3, P2). A second Center
+  is now planned for phase 2 (R21, a Center in each region).
+- Add the EU Center with the first EU node (R21, server_operation.md
+  section 3.5).
 
 ## 6. Rollback
 

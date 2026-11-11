@@ -1,13 +1,13 @@
 # Server operation
 
-Updated 2026-11-10. This is the hand-over guide for the person who runs the
+Updated 2026-11-11. This is the hand-over guide for the person who runs the
 matrix servers and deploys them. It covers:
 - how the servers fit together
 - how to add or remove one
 - how to check a new server before it takes traffic
 - what to watch
-- the planned target: several Center servers behind a load balancer
-  (section 1.4; not built yet)
+- the planned target: a Center in each region (US, Asia, later EU) that
+  back each other up (section 1.4; not built yet)
 
 Other docs, all in `server/design/` and the Drive folder `Matrix/v2/design`:
 
@@ -31,7 +31,7 @@ can't reach each other directly.
 
 ### 1.1 Servers and how they connect (current, 2026-11-10)
 
-Today there is **one** Center and no load balancer. While the Center is down
+Today there is **one** Center. While the Center is down
 or restarting, cameras and viewers that are already connected keep working.
 No new camera connection and no new viewing session can start anywhere until
 it is back. Section 1.4 has the plan to fix this (R21).
@@ -173,162 +173,148 @@ at 70% load, and a 1 GB relay about 67 relayed sessions (about 10,000
 cameras) at 70% CPU. Adjust them once real traffic shows the true numbers,
 and add a line to capacity.md's tracking table.
 
-### 1.4 Target: the Center behind a load balancer (planned, R21)
+### 1.4 Target: a Center in each region (planned, R21)
 
-**Status 2026-11-10: planned, not built.** Everything above section 1.4
+**Status 2026-11-11: planned, not built.** Everything above section 1.4
 describes the fleet as it runs today. The code changes listed below are
 needed before a second Center can run.
 
 **Why.** The Center is the one server every new connection and every new
 viewing session passes through. The goal is 99.9% successful views from any
-viewer network. For that, the Center must survive the loss of one droplet,
-and an upgrade, without stopping new connections.
+viewer network, at the lowest cost. For that, the Center must survive the
+loss of one droplet, an upgrade, and even a whole region, without stopping
+new connections. The money goes to control nodes and relays, which decide
+how many devices the fleet serves. The Center tier only has to be
+available, and its work (tickets, routing, activation) is light.
+
+**Design.** Up to 3 Centers that back each other up: US, Asia, later EU.
+- **All of them serve:** tickets, node choice, `/v1/view` and statistics.
+  They hold the same keys, the same `config.json` and a link from every
+  node, so each one answers a device directly. A Center never sends a device
+  to another Center.
+- **One activation writer, the US Center.** The others forward first-time
+  SID binds (and takeovers) to it, server to server, and keep a copy of
+  `activations.jsonl` and the blocklist. That way no SID is ever bound twice.
+- **The Center role runs on an existing node** of its region, as it does in
+  the US today. So it needs no extra droplet.
+- **Route53 sends each device to the nearest healthy Center**, using latency
+  routing with a health check per Center. If a Center is down, its devices
+  go to the next nearest one.
+- **Start with 2 Centers** (US, and Asia on sg00), both of which exist today.
+  Add EU when the first EU node is needed. Adding a Center needs no new code
+  (section 3.5).
 
 ```
  CAMERAS, VIEWERS, PAIRING SYSTEM   (still https://matrix.5gen.care: nothing changes on them)
-                 |
-                 v   DNS: matrix.5gen.care -> load balancer IP
- ┌──────────────────────────────────────────────────────────┐
- │ LOAD BALANCER (DigitalOcean, nyc3)                       │
- │ TCP 443 passed through to the Centers + PROXY protocol   │
- │ health check: GET /api/health on each Center every 10 s  │
- └─────────────┬─────────────────────────────┬──────────────┘
-               v                             v
- ┌──────────────────────────┐  ┌──────────────────────────┐
- │ Center A                 │  │ Center B                 │   add C, D ...
- │ center-a.5gen.care       │  │ center-b.5gen.care       │   the same way
- │ tickets, routing,        │  │ same keys, KID and       │   (section 3.5)
- │ activation; no cameras   │  │ config version as A      │
- └─────────────┬────────────┘  └─────────────┬────────────┘
-               │ activations, takeover state,│
-               v revocations, config         v
- ┌──────────────────────────────────────────────────────────┐
- │ SHARED STORE: Redis (DO Managed Valkey, nyc3)            │
- │ SID binds (SET NX), takeover, revocations (pub/sub),     │
- │ shared rate limits. Each bind is also written to the     │
- │ Center's activations.jsonl, which R3 backs up off-host   │
- └──────────────────────────────────────────────────────────┘
+                                    │
+         Route53 latency routing + a health check per Center:
+         each device gets the NEAREST HEALTHY Center
+            ┌───────────────────────┼───────────────────────┐
+            v                       v                       v
+ ┌─────────────────────┐ ┌─────────────────────┐ ┌─────────────────────┐
+ │ Center US (nyc3)    │ │ Center ASIA (sgp1)  │ │ Center EU (fra1)    │
+ │ center-us.5gen.care │ │ center-sg.5gen.care │ │ center-eu.5gen.care │
+ │ + node "center"     │ │ on node sg00        │ │ later, on node eu00 │
+ │ ACTIVATION WRITER   │ │ reader              │ │ reader              │
+ └─────────────────────┘ └─────────────────────┘ └─────────────────────┘
 
- CONTROL NODES link to EVERY Center directly (not through the load balancer),
- so each Center knows where every camera is:
+ Between Centers, server to server (country blocking does not apply here):
+   Center ASIA, Center EU  ── first-time SID binds ──────────────>  Center US
+   Center US               ── activations.jsonl, blocklist ──────>  the others
+   matrix-fleet apply      ── config.json ───────────────────────>  every Center
 
-   node us00 (nyc3, NEW: takes the US cameras off the Center) ──link──> A, B
-   node sg00 (sgp1)                                           ──link──> A, B
+ CONTROL NODES link to EVERY Center by its own name (today's signed link, one per Center):
+   node sg00, node eu00, node usNN ... ──link──> Center US, Center ASIA, Center EU
 
- RELAYS report to their region's node, never to a Center:
-
-   mx-relay-us00 ──report──> us00         mx-relay-sg00 ──report──> sg00
+ RELAYS: unchanged. Each one reports to its region's control server.
 ```
 
 | | Today | Target |
 |---|---|---|
-| Center | one droplet, which is also the US control node | 2 or more droplets, Center role only, behind the load balancer |
-| US cameras | on the Center (node `center`) | on a new node `us00` in nyc3 |
-| `mx-relay-us00` reports to | the Center | `us00` |
-| Activations, takeover state, revocations | files on the Center (`cfg/sid/`) | shared Redis; each Center still writes `activations.jsonl` as the durable record |
-| Rate limits | per Center | shared in Redis, so a client can't double its limit by reaching two Centers |
-| Node link | to `matrix.5gen.care` | to each Center by its own name |
-| One Center lost | no new connection or view until it is back | the load balancer stops sending to it within about 30 s; the others serve |
-| Center upgrade | all of its connections drop for a few seconds | one Center at a time, taken out of the pool first: no drop |
-| Backup (R3) | none off-host | nightly off-host copy of each Center's `cfg/sid/` (DO Managed Valkey has no backups); keys kept in the password manager |
+| Centers | 1 (nyc3), also the US node | 2 now (US; Asia on sg00), 3 later (EU). Each one is also a node of its region |
+| How a device finds a Center | `matrix.5gen.care` resolves to one IP | `matrix.5gen.care` resolves to the nearest healthy Center |
+| Activations | one file on the Center | one writer (US); the others forward first-time binds and keep a copy |
+| Node link | to `matrix.5gen.care` | to every Center, by its own name |
+| One Center lost | no new connection or view until it is back | its devices go to the next nearest Center within about 1–2 minutes. If it was the writer, only first-time binds wait |
+| A whole region lost | as above | covered: the other Centers serve |
+| Center upgrade | all its connections drop for a few seconds | one Center at a time |
+| Start of a view from Asia | about 4 round trips to the US (about 0.9 s) | about 4 round trips to Singapore (about 0.1 s) |
+| Extra cost | | about $2 a month now (Route53); $6 more with the EU Center |
+
+**Considered, not chosen:**
+
+| Option | Why not |
+|---|---|
+| Load balancer with 2+ Centers in one region | It covers one region only, so a region outage or a country that can't reach it still stops new connections. It costs about $12 a month per region. To see client IPs it needs PROXY protocol code, or TLS ending at the load balancer (`-trust-proxy-tls`). It also needs separate Center droplets (camera connections count against its limits). Certificates get harder, and nodes still have to link to each Center by name |
+| Redis as the shared store, or as the bus between Centers and nodes | **Not the best choice.** Redis becomes the single point of failure, so it needs an HA pair (about $60 a month) in one region. DO Managed Valkey has no backups, so activations still need files. Every node would hold write credentials. And this design needs no shared store: node links plus one activation writer cover it |
+| One bigger droplet | It adds capacity, which the Center doesn't need. It is still one server in one place |
+| 2 Centers, active plus standby (Route53 failover) | It works, but the standby sits idle, and devices in Asia and EU pay about 0.8 s more at every start. Latency routing gives the same failover plus that speed |
 
 **Code work needed (R21). None of it is built yet:**
 
-1. **Client address behind the load balancer.** Several features read the
-   TCP source address: rate limits, the refused log, `PLAYER_ALLOW` and
-   `STATISTIC_ALLOW`, and the node-link IP check. Behind a load balancer,
-   that address is the load balancer. Fix: read the PROXY protocol header,
-   and accept it only from the load balancer's addresses.
-2. **Shared activation store.** `activations.jsonl` is a local file, so two
-   Centers could each bind the same SID to a different device. Fix: keep it
-   in Redis: `SET sid:<id> <device> NX` decides the bind, so only one Center
-   can win. The Center then appends the bind to its own `activations.jsonl`
-   as today. This is the "registry
-   ownership" item of the 2026-10-08 review (roll-out.md section 3).
-3. **Takeover and revocation.** A takeover is decided from the camera list
-   that the node links feed in, and the revocation is written to the local
-   blocklist. Fix: every Center sees every node (item 4), and revocations go
-   to the shared store and are pushed to every Center over Redis pub/sub.
-4. **A node links to several Centers.** `LINK_TO` takes one address; it must
-   take a list. `matrix-fleet apply` must reach every Center: either keep
-   the configuration versions in the shared store, or apply on each Center.
-5. **A Center with no node of its own.** Today `center` is also a node in
-   `config.json`. Check, and fix if needed, that a Center runs with no node
-   of its own.
-6. **Statistics and the connection log are per server.** Each Center's
-   `/admin/statistic` would show only its own share: add a merged view, or
-   link the instances' pages to each other.
-7. **Secrets on every Center.** The Center ticket key and `admin.token` must
-   be on every Center. Copy them over SSH, never through the load balancer,
-   and keep them in the password manager.
+1. **A node links to several Centers.** `LINK_TO` takes one address; it must
+   take a list. Each Center keeps its own link to the node, and tickets
+   signed by any Center are accepted, because they all use the same key.
+2. **Writer and reader Centers.** A reader forwards first-time binds and
+   takeovers to the writer over an authenticated server-to-server call, and
+   receives `activations.jsonl` and the blocklist from it. If the writer is
+   unreachable, only a first-time bind waits (`503`, retry); SIDs that are
+   already bound keep working.
+3. **`matrix-fleet apply` reaches every Center**, and `matrix-fleet status`
+   shows each Center, its config version and its copy of the activations.
+4. **Promote a writer:** a `matrix-fleet promote` command, run by hand only
+   when the writer is lost for a long time. The old writer must be stopped
+   first, so there is never more than one writer.
+5. **Challenge then verify may reach different Centers** (after a DNS
+   change). The camera restarts from `/v1/challenge` when `/verify` answers
+   that the nonce is unknown. Check that the firmware does this (`matrix_c`).
+6. **The same secrets on every Center:** the Center ticket key, KID and
+   `admin.token`. Copy them over SSH, and keep them in the password manager.
+7. **A certificate for `matrix.5gen.care` on every Center.** The port-80
+   check of Let's Encrypt can land on another Center, so use DNS validation
+   through Route53, with an AWS key that may only write the `_acme-challenge`
+   record.
+8. **Old cameras (proto 2)** sign for the Center's own address. Check that
+   this is `matrix.5gen.care` on every Center, not each Center's own name.
 
-**Why Redis, and its limit.** The shared state is small key-value data:
-one bind per SID, takeover markers, revocations and rate-limit counters.
-Redis fits it: `SET NX` makes the bind atomic, pub/sub pushes revocations to
-every Center at once, and keys with a TTL suit rate limits and takeover
-windows. The limit is durability: DO Managed Valkey saves RDB snapshots
-only and offers **no backups or restore**, so a failover or restart can lose
-the last minutes of writes. Rules that cover this:
-- Redis is never the only copy. Each Center appends every bind and
-  revocation to its local `activations.jsonl` and blocklist, and R3 copies
-  `cfg/sid/` off-host every night.
-- If Redis loses data, rebuild it from the union of all Centers' files,
-  earliest bind per SID wins (a `matrix-fleet redis-rebuild` command, part
-  of the R21 code).
-- While Redis is unreachable, SIDs that are already bound keep working from
-  each Center's local copy; a first-time bind waits until Redis is back,
-  so no SID can be bound twice.
-- Eviction policy `noeviction` (the DO default). Never switch it to an LRU
-  policy: that would silently drop binds.
+Rate limits stay per Center: a client that reaches two Centers gets at most
+twice the limit, which is acceptable.
 
 **Migration.** Each step has its own check before it takes traffic, and
-today's setup keeps running until step 6:
+today's setup keeps running until step 5:
 
 1. R3 first: an off-host backup of the Center, restored once on a scratch
    droplet.
-2. Add node `us00` in nyc3 (section 3.2, with its checks). Move
-   `mx-relay-us00` to report to `us00`: put its secret in `us00`'s
-   `relay-secrets.json`, then change its `-control`. Once item 5 is checked,
-   take node `center` out of `config.json`; US cameras then move to `us00`
-   as they reconnect. Check: a US test camera is on `us00` and can be
-   watched.
-3. Build the R21 code, and test it on the dev box: a local load balancer
-   (haproxy), 2 Centers and 1 node. Tests:
-   - stop one Center during viewing;
-   - upgrade one Center;
-   - send the same SID to both Centers at the same moment: only one bind
-     may win.
-4. Create the managed Redis (DO Valkey), load the activations into it from
-   `activations.jsonl`, create
-   Center B, and create the load balancer with A and B. A day before the
-   switch, lower the DNS TTL of `matrix.5gen.care` to 60 s.
-5. **Check before the switch:**
-   - section 3.5 passes on each Center;
-   - the load balancer shows both Centers healthy;
-   - through the load balancer, with DNS not yet changed:
-     `curl --resolve matrix.5gen.care:443:<LB IP> https://matrix.5gen.care/api/health`
-     answers;
-   - a test camera and a test view work through the same `--resolve` path.
-6. Point the DNS A record of `matrix.5gen.care` at the load balancer, and
-   watch for 24 hours. **Rollback:** point DNS back at Center A's IP
-   (Center A keeps running).
+2. Build the R21 code, and test it on the dev box with 2 Centers and 1 node:
+   - stop one Center while cameras connect and viewers start sessions;
+   - a first-time bind through the reader Center;
+   - the same SID sent to both Centers at the same moment: only one bind may
+     win;
+   - the writer down: bound SIDs still work, and first-time binds wait;
+   - `matrix-fleet apply` changes both Centers.
+3. Add the names `center-us.5gen.care` (138.197.12.238) and
+   `center-sg.5gen.care` (152.42.232.159). Issue the `matrix.5gen.care`
+   certificate by DNS validation on both. Deploy the new version with sg00
+   as a reader Center, and give every node both Centers in its link list.
+4. **Check before the switch:** section 3.5 passes for the Asia Center, and
+   `matrix-fleet status` shows every node linked to both Centers. A day
+   before the switch, lower the DNS TTL of `matrix.5gen.care` to 60 s.
+5. In Route53, replace the single A record of `matrix.5gen.care` with
+   latency records: `us-east-1` for the US IP and `ap-southeast-1` for the
+   SG IP, each with its health check. Watch for 24 hours. **Rollback:** put
+   the single A record back, pointing at the US Center.
+6. EU later: a node in fra1 (section 3.2), then section 3.5 on it, with the
+   latency region `eu-central-1`.
 
-**Cost:** about $12 a month for the load balancer (DO small). Managed
-Redis (DO Managed Valkey) starts at about $15 a month for one node with
-automatic failover; a high-availability pair starts at about $60. One node
-is enough, because the data is small and can be rebuilt (below). Add one
-more $6–12 droplet for each extra Center. Check the current DO prices before
-ordering.
+**Cost:** about $2 a month for Route53 (one health check per Center, and the
+latency queries), with no new droplet. The EU Center comes with the first EU
+node, which is needed anyway once EU devices arrive.
 
 **Once built, also watch:**
-- the load balancer's health of each Center (DO console);
-- Redis memory (eviction policy must stay `noeviction`), connections and failovers;
+- the Route53 health check of each Center;
 - that every node shows a link to every Center;
-- that all Centers run the same version and config version.
-
-A whole-region outage of nyc3 would still stop the Centers, because the
-load balancer and Redis are in one region. A second region with DNS
-failover is a later step, not part of R21.
+- that all Centers run the same version and config version;
+- that each reader's activation count equals the writer's.
 
 ---
 
@@ -349,8 +335,8 @@ Ubuntu 24.04 LTS, $6 a month.
 The droplets' own host names don't match their roles (sg00 is `matrix-02`,
 mx-relay-us00 is `matrix-03`). Always go by IP or DNS name.
 
-There is one Center and no load balancer yet. The planned Center pool
-(`center-a`, `center-b`, load balancer, `us00`) is in section 1.4.
+There is one Center today. The planned Centers (`center-us`, `center-sg`,
+later `center-eu`) are in section 1.4.
 
 **Not part of the fleet. Do not change:**
 - The AWS dev VPS `webrtc.5gen.care` (3.95.228.203) will become the license
@@ -589,37 +575,41 @@ disaster recovery, and it needs the off-host backup, which does not exist
 yet (R3). Follow INSTALL.md section 2, and do not try it without the project
 owner.
 
-### 3.5 Adding or removing a Center behind the load balancer (after R21)
+### 3.5 Adding or removing a Center (after R21)
 
 This applies only once section 1.4 is built.
 
 **Add:**
-1. Create a droplet in the same DO region as the load balancer. Give it its
-   own DNS name, `center-<x>.5gen.care`.
-2. Install it as a Center, with the keys copied over SSH and the shared
-   store's address.
-3. **Verify before it joins the pool (required):**
+1. Use a node in the new region. If there is none, create one first
+   (sections 3.1 and 3.2). Give the Center its own name,
+   `center-<region>.5gen.care`.
+2. Turn on the Center role in reader mode, with the writer's address and
+   the keys copied over SSH. Issue the `matrix.5gen.care` certificate by
+   DNS validation. Add the new Center to every node's link list
+   (`matrix-fleet apply`).
+3. **Verify before it gets any DNS traffic (required):**
 
    | # | Check | Pass when |
    |---|---|---|
-   | 1 | `curl -s https://center-<x>.5gen.care/api/health` | ok, the same version as the other Centers |
-   | 2 | `KID`, `sha256sum` of the Center ticket keys and of `admin.token` | equal to Center A's |
-   | 3 | `journalctl -u matrix -n 50` | connected to the shared store; no errors |
-   | 4 | `matrix-fleet status` on the new Center | every node linked; the same config version as the others |
-   | 5 | a test `/v1/view` sent to it directly (`curl --resolve matrix.5gen.care:443:<its IP> ...`) | answered |
-   | 6 | `timedatectl` | synchronised |
+   | 1 | `curl -s https://center-<region>.5gen.care/api/health` | ok, the same version as the other Centers |
+   | 2 | `KID`, `sha256sum` of the Center ticket keys and of `admin.token` | equal to the writer's |
+   | 3 | `openssl s_client -connect <its IP>:443 -servername matrix.5gen.care </dev/null \| grep Verify` | Verify return code: 0 (ok) |
+   | 4 | `matrix-fleet status` on the new Center | every node linked; the same config version as the others; the writer reachable |
+   | 5 | the activation count on it | equal to the writer's |
+   | 6 | a test camera connection and a test `/v1/view` sent to it directly (`curl --resolve matrix.5gen.care:443:<its IP> ...`) | answered |
+   | 7 | `timedatectl` | synchronised |
 
-4. Add it to the load balancer pool (the DO tag `matrix-center`). Check that
-   the load balancer shows it healthy.
+4. Add its Route53 health check and latency record. Check that the health
+   check is healthy, and that a lookup from that region gets its IP.
 
 **Remove:**
-1. Take it out of the pool (remove the tag).
-2. Wait 2 minutes. Center requests are short, apart from the node links,
-   which go to it directly.
-3. Stop the service. Remove it from the nodes' link lists, then destroy the
-   droplet.
+1. Delete its latency record. Wait for the TTL plus 2 minutes.
+2. Remove it from the nodes' link lists, then turn off the Center role (or
+   destroy the droplet).
+3. Never remove the writer this way: promote another Center first
+   (`matrix-fleet promote`, with the old writer stopped).
 
-Keep at least 2 Centers in the pool at all times.
+Keep at least 2 Centers at all times.
 
 ---
 
@@ -749,4 +739,4 @@ Certificates on 2026-11-10: `matrix.5gen.care` to 2027-01-25 and
 | R5 | No alerting | the daily check above is the only monitoring |
 | R6 | No `deploy.sh all`, relay installer or new-node script | follow section 3 by hand |
 | R12 | No cross-region backup relay | if a region's only relay dies, relayed views in that region fail until it is back |
-| R21 | One Center, no load balancer | while the Center is down or restarting, no new connection or view can start anywhere. Plan: section 1.4 |
+| R21 | One Center | while the Center is down or restarting, no new connection or view can start anywhere. Plan: section 1.4 |
