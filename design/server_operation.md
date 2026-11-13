@@ -615,9 +615,9 @@ Keep at least 2 Centers at all times.
 
 ### 3.6 Backup and restore (R3)
 
-Status 2026-11-13: in place except the pull from the admin server, which
-waits for the DigitalOcean Cloud Firewall to allow SSH from it
-(3.95.228.203). A restore drill of all four servers passed on 2026-11-13.
+Status 2026-11-13: in place. The admin server pulls from all four servers
+every night (the DigitalOcean Cloud Firewall allows SSH from 3.95.228.203),
+and a copy it pulled was restored on the PC with a matching manifest.
 
 **The admin server.** `admin@ec2-3-95-228-203.compute-1.amazonaws.com`
 (AWS, `../vps.sh dev` until renamed) is where operations start. It holds,
@@ -784,6 +784,8 @@ for h in matrix.5gen.care matrix-sg00.5gen.care; do curl -s --max-time 10 https:
 sudo matrix-fleet status
 sudo matrix-fleet stats 1
 journalctl -u matrix --since "24 hours ago" | grep -E "ALERT|sid_takeover|panic" | tail
+# on the admin server: last night's backups (no line may say OLD)
+matrix-admin list
 ```
 
 Then open `/admin/statistic` on both control servers and look at the last
@@ -814,7 +816,7 @@ Certificates on 2026-11-10: `matrix.5gen.care` to 2027-01-25 and
 
 | # | Gap | Effect for the operator |
 |---|---|---|
-| R3 | No off-host Center backup | losing the Center droplet loses activations and keys. Take a DO snapshot of the Center before each risky change |
+| R3 | Off-host backup done 2026-11-13 (section 3.6) | check `matrix-admin list` daily; the backup private key is offline with the owner |
 | R4 | No graceful shutdown | every restart drops sessions for a few seconds |
 | R5 | No alerting | the daily check above is the only monitoring |
 | R6 | No `deploy.sh all`, relay installer or new-node script | follow section 3 by hand |
