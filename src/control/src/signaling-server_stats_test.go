@@ -126,3 +126,35 @@ func TestCameraQualityReportsAreCountedNotForwarded(t *testing.T) {
 		t.Fatalf("quality = %+v", q)
 	}
 }
+
+func TestQualityEndKeepsTheViewersCountryAfterItLeft(t *testing.T) {
+	n := newNode(t, func(s *Server) { s.SetStats(stats.New(nil)) })
+	today := func() stats.Day { return n.srv.stats.Snapshot()[time.Now().UTC().Format(time.DateOnly)] }
+	camera := n.connect("camera0", "acme01", admission.RoleCamera)
+	viewerID := strings.Repeat("v", 43)
+	ticket := n.ticket(viewerID, "acme01", admission.RolePlayer, func(c *admission.Claims) { c.CameraID, c.Country = "camera0", "VN" })
+	viewer, response := n.dial("/" + viewerID + "?ticket=" + url.QueryEscape(ticket))
+	if response.StatusCode != http.StatusSwitchingProtocols {
+		t.Fatalf("viewer status = %d", response.StatusCode)
+	}
+	n.waitRegistered("acme01", viewerID)
+	send(t, viewer, map[string]any{"type": "request", "id": "camera0", "password": "pw"})
+	if request := receive(camera, time.Second); request == nil {
+		t.Fatal("request not forwarded")
+	}
+	viewer.Close()
+	waitFor(t, "viewer gone", func() bool {
+		n.srv.mu.RLock()
+		defer n.srv.mu.RUnlock()
+		_, ok := n.srv.clients[clientKey("acme01", viewerID)]
+		return !ok
+	})
+	send(t, camera, map[string]any{"type": "quality", "id": viewerID, "stage": "end", "duration_s": 90, "video_kbps": 700, "loss_pct": 0.1})
+	waitFor(t, "quality end", func() bool { return today().Quality.Sessions == 1 })
+	if got := today().Countries["VN"]; got.QualitySessions != 1 || got.Requests != 1 {
+		t.Fatalf("VN = %+v (countries %+v)", got, today().Countries)
+	}
+	if _, ok := n.srv.viewerCountries.entries[clientKey("acme01", viewerID)]; ok {
+		t.Fatal("country kept after the end report")
+	}
+}

@@ -7,6 +7,7 @@ import (
 	"os/signal"
 	"regexp"
 	"strings"
+	"sync"
 	"syscall"
 	"time"
 
@@ -137,13 +138,18 @@ func (s *Server) recordQuality(c *Client, msg map[string]interface{}) {
 		MaxLossPct: value("max_loss_pct"), JitterMs: value("jitter_ms"), RTTMs: value("rtt_ms"),
 		REMBKbps: value("remb_kbps"), PLI: count("pli"), NACK: count("nack"),
 	}
-	// The viewer's country, while the viewer is still connected.
+	// The viewer's country: remembered from its request (the viewer has
+	// often left by the "end" report), else from the connected viewer.
 	if viewerID != "" {
-		s.mu.RLock()
-		if v, ok := s.clients[clientKey(c.Tenant, viewerID)]; ok && v.Role == admission.RolePlayer {
-			q.Country = v.Country
+		key := clientKey(c.Tenant, viewerID)
+		q.Country = s.viewerCountries.lookup(key, stage == "end")
+		if q.Country == "" {
+			s.mu.RLock()
+			if v, ok := s.clients[key]; ok && v.Role == admission.RolePlayer {
+				q.Country = v.Country
+			}
+			s.mu.RUnlock()
 		}
-		s.mu.RUnlock()
 	}
 	if stage == "end" {
 		if s.stats != nil {
@@ -254,4 +260,60 @@ func (s *Server) saveStatsLoop(path string) {
 			log.Printf("stats: cannot save %s: %v", path, err)
 		}
 	}
+}
+
+// viewerCountryCache maps a viewer (tenant/id) to its country for a day at
+// most, bounded so a flood of requests can't grow it without limit.
+type viewerCountryCache struct {
+	mu      sync.Mutex
+	entries map[string]viewerCountry
+}
+
+type viewerCountry struct {
+	country string
+	at      time.Time
+}
+
+const (
+	viewerCountryTTL = 24 * time.Hour
+	viewerCountryMax = 100000
+)
+
+func (v *viewerCountryCache) remember(key, country string) {
+	if country == "" {
+		return
+	}
+	v.mu.Lock()
+	defer v.mu.Unlock()
+	if v.entries == nil {
+		v.entries = map[string]viewerCountry{}
+	}
+	now := time.Now()
+	if len(v.entries) >= viewerCountryMax {
+		for k, e := range v.entries {
+			if now.Sub(e.at) > viewerCountryTTL {
+				delete(v.entries, k)
+			}
+		}
+		if len(v.entries) >= viewerCountryMax {
+			return
+		}
+	}
+	v.entries[key] = viewerCountry{country: country, at: now}
+}
+
+// lookup returns the remembered country ("" when none or expired); forget
+// drops the entry (the session ended).
+func (v *viewerCountryCache) lookup(key string, forget bool) string {
+	v.mu.Lock()
+	defer v.mu.Unlock()
+	e, ok := v.entries[key]
+	if !ok || time.Since(e.at) > viewerCountryTTL {
+		delete(v.entries, key)
+		return ""
+	}
+	if forget {
+		delete(v.entries, key)
+	}
+	return e.country
 }

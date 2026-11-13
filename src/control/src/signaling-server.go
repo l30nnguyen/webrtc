@@ -92,11 +92,15 @@ type Server struct {
 	// lastAddresses (Center only) is saved at stop with the statistics.
 	lastAddresses *center.LastAddresses
 	clients       map[string]*Client // keyed by clientKey(tenant, id)
-	mu            sync.RWMutex
-	upgrader      websocket.Upgrader
-	playerPath    string
-	rootDir       string
-	admission     *admission.Validator
+	// viewerCountries remembers each viewer's country from its request until
+	// the camera's quality "end" report, which often arrives after the viewer
+	// has left (ST-3).
+	viewerCountries viewerCountryCache
+	mu              sync.RWMutex
+	upgrader        websocket.Upgrader
+	playerPath      string
+	rootDir         string
+	admission       *admission.Validator
 	// demoTenant, when set together with admission, lets unauthenticated
 	// "Player*" web-demo clients join that one tenant. Development only.
 	demoTenant      string
@@ -614,6 +618,7 @@ func (s *Server) readPump(c *Client) {
 					msg["turn"] = servers
 				}
 				s.countStat("requests", func(counters *stats.Counters) { counters.RequestFrom(c.Country) })
+				s.viewerCountries.remember(clientKey(c.Tenant, c.ID), c.Country)
 				s.addEvent(events.Event{Type: events.Request, Camera: dest.ID, Viewer: c.ID, Result: "forwarded", Relays: s.relayNames(servers), Country: c.Country})
 			}
 			if c.Role == admission.RoleCamera && dest.Role == admission.RolePlayer && msg["type"] == "offer" {
