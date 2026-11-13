@@ -1,0 +1,156 @@
+#!/bin/bash
+# matrix-admin: the admin server's tool (roll-out.md R3, later R6 deploys).
+# The admin server (AWS, admin@ec2-3-95-228-203) is where operations start:
+# it holds the server list and the SSH key to every server, pulls encrypted
+# backups from them, and stores the SID batches. Installed as
+# /usr/local/bin/matrix-admin; data in /opt/matrix-admin (owner admin, 0700).
+#
+#   matrix-admin servers                  the server list (servers.conf)
+#   matrix-admin push-tool [NAME...]      install matrix-backup and the backup public key on servers
+#   matrix-admin backup [NAME...]         pull an encrypted copy from each server (default: all)
+#   matrix-admin store NAME < file.gpg    store an already encrypted file (SID batches: NAME=sids)
+#   matrix-admin list                     copies per server, newest first; warns when the newest is old
+#   sudo matrix-admin install-timer       nightly backup of all servers at 03:17 UTC
+#
+# Nothing here can read a copy: they are encrypted to the backup public key
+# and the private key stays offline with the project owner.
+set -euo pipefail
+
+HOME_DIR=/opt/matrix-admin
+SERVERS=$HOME_DIR/servers.conf          # name host role(center|node|relay)
+SSH_KEY=$HOME_DIR/keys/ssh.pem          # root login to every server
+PUBKEY=$HOME_DIR/keys/backup.pub.asc    # backup public key
+STORE=$HOME_DIR/backups
+KEEP=${KEEP:-90}                        # copies kept per server
+MAX_AGE_HOURS=${MAX_AGE_HOURS:-36}
+TOOL_SRC=$HOME_DIR/tools/matrix-backup  # copy of server/release/matrix-backup
+SSH_OPTS=(-i "$SSH_KEY" -o BatchMode=yes -o ConnectTimeout=20 -o ServerAliveInterval=15
+    -o StrictHostKeyChecking=accept-new -o UserKnownHostsFile=$HOME_DIR/keys/known_hosts)
+
+die() { echo "matrix-admin: $*" >&2; exit 1; }
+valid_name() { [[ "$1" =~ ^[a-z0-9][a-z0-9-]{0,31}$ ]] || die "invalid name '$1'"; }
+
+# servers NAME... -> "name host role" lines (all when no names).
+servers() {
+    [[ -f "$SERVERS" ]] || die "missing $SERVERS"
+    local lines; lines="$(grep -Ev '^\s*(#|$)' "$SERVERS")"
+    if [[ $# -eq 0 ]]; then echo "$lines"; return; fi
+    local n line
+    for n in "$@"; do
+        line="$(awk -v n="$n" '$1 == n' <<<"$lines")"
+        [[ -n "$line" ]] || die "no server '$n' in $SERVERS"
+        echo "$line"
+    done
+}
+
+cmd_push_tool() {
+    [[ -f "$TOOL_SRC" && -f "$PUBKEY" ]] || die "missing $TOOL_SRC or $PUBKEY"
+    local name host role
+    while read -r name host role; do
+        scp "${SSH_OPTS[@]}" -q "$TOOL_SRC" "$PUBKEY" "root@$host:/tmp/" &&
+        ssh "${SSH_OPTS[@]}" "root@$host" </dev/null 'install -m 755 /tmp/matrix-backup /usr/local/sbin/matrix-backup &&
+            matrix-backup install-key /tmp/backup.pub.asc && rm -f /tmp/matrix-backup /tmp/backup.pub.asc' |
+            sed "s/^/$name: /" || echo "$name: FAILED"
+    done < <(servers "$@")
+}
+
+# keep NAME: drop all but the newest KEEP copies.
+keep() {
+    { ls -1 "$STORE/$1"/*.gpg 2>/dev/null || true; } | sort | head -n -"$KEEP" | xargs -r rm -f
+}
+
+# is_encrypted FILE: an OpenPGP message encrypted to a public key.
+is_encrypted() {
+    # gpg exits non-zero here (no secret key), so look at its output only.
+    local g out; g="$(mktemp -d)"
+    out="$(gpg --homedir "$g" --batch --list-packets "$1" 2>/dev/null || true)"
+    rm -rf "$g"
+    grep -q '^:pubkey enc packet:' <<<"$out"
+}
+
+cmd_backup() {
+    local name host role failed=0 file tmp size
+    while read -r name host role; do
+        install -d -m 700 "$STORE/$name"
+        file="$STORE/$name/$(date -u +%Y%m%dT%H%M%SZ).tar.gz.gpg"
+        tmp="$STORE/$name/.incoming"
+        if ssh "${SSH_OPTS[@]}" "root@$host" 'matrix-backup snapshot' > "$tmp" </dev/null && is_encrypted "$tmp"; then
+            chmod 600 "$tmp"; mv "$tmp" "$file"; keep "$name"
+            size="$(stat -c %s "$file")"
+            echo "$name: ok, $size bytes -> $(basename "$file")"
+        else
+            rm -f "$tmp"; failed=1
+            echo "$name: FAILED (host $host)" >&2
+        fi
+    done < <(servers "$@")
+    return $failed
+}
+
+cmd_store() {
+    local name="${1:-}"; valid_name "$name"
+    install -d -m 700 "$STORE/$name"
+    local tmp="$STORE/$name/.incoming"
+    head -c $((500 * 1024 * 1024)) > "$tmp"
+    is_encrypted "$tmp" || { rm -f "$tmp"; rmdir "$STORE/$name" 2>/dev/null || true; die "refused: not encrypted to a public key"; }
+    local file; file="$STORE/$name/$(date -u +%Y%m%dT%H%M%SZ).tar.gz.gpg"
+    chmod 600 "$tmp"; mv "$tmp" "$file"; keep "$name"
+    echo "$name: stored $(stat -c %s "$file") bytes -> $(basename "$file")"
+}
+
+cmd_list() {
+    local now; now="$(date +%s)"
+    local d name newest age warn=0
+    for d in "$STORE"/*/; do
+        [[ -d "$d" ]] || continue
+        name="$(basename "$d")"
+        newest="$(ls -1 "$d"*.gpg 2>/dev/null | sort | tail -n 1 || true)"
+        [[ -n "$newest" ]] || { echo "$name: no copies  OLD"; warn=1; continue; }
+        age=$(( (now - $(stat -c %Y "$newest")) / 3600 ))
+        printf '%-14s %3d copies, newest %s (%dh ago, %s bytes)' "$name" \
+            "$(ls -1 "$d"*.gpg | wc -l)" "$(basename "$newest")" "$age" "$(stat -c %s "$newest")"
+        if [[ "$name" != sids && $age -ge $MAX_AGE_HOURS ]]; then printf '  OLD'; warn=1; fi
+        echo
+    done
+    return $warn
+}
+
+cmd_install_timer() {
+    [[ $EUID -eq 0 ]] || die "run with sudo"
+    local user; user="$(stat -c %U "$HOME_DIR")"
+    cat > /etc/systemd/system/matrix-admin-backup.service <<EOF
+[Unit]
+Description=Pull encrypted backups from every Matrix server
+Wants=network-online.target
+After=network-online.target
+
+[Service]
+Type=oneshot
+User=$user
+ExecStart=/usr/local/bin/matrix-admin backup
+EOF
+    cat > /etc/systemd/system/matrix-admin-backup.timer <<'EOF'
+[Unit]
+Description=Nightly backup of every Matrix server
+
+[Timer]
+OnCalendar=*-*-* 03:17:00 UTC
+RandomizedDelaySec=10m
+Persistent=true
+
+[Install]
+WantedBy=timers.target
+EOF
+    systemctl daemon-reload
+    systemctl enable --now matrix-admin-backup.timer
+    systemctl list-timers matrix-admin-backup.timer --no-pager | head -n 2
+}
+
+case "${1:-}" in
+    servers) servers ;;
+    push-tool) shift; cmd_push_tool "$@" ;;
+    backup) shift; cmd_backup "$@" ;;
+    store) shift; cmd_store "$@" ;;
+    list) cmd_list ;;
+    install-timer) cmd_install_timer ;;
+    *) sed -n '2,17p' "$0" | sed 's/^# \{0,1\}//'; exit 2 ;;
+esac

@@ -1,43 +1,22 @@
 #!/bin/bash
-# matrix-backup: a nightly encrypted copy of a control server's state, kept on
-# another server (roll-out.md R3). Installed as /usr/local/sbin/matrix-backup
-# by setup.sh.
+# matrix-backup: an encrypted copy of this server's state (roll-out.md R3).
+# Installed as /usr/local/sbin/matrix-backup on every control server (by
+# setup.sh) and relay. The admin server pulls the copies (matrix-admin backup);
+# servers never send anything themselves.
 #
-# The copy is a tar.gz of the state (cfg/sid, config.json and its versions,
-# relay secrets, matrix.conf) with a MANIFEST.sha256, encrypted to a public
-# key. Only the holder of the private key (the operator, offline) can read it;
-# the servers hold only the public key. The receiving server's login can only
-# store a file: it cannot list, read or delete copies.
+#   sudo matrix-backup install-key backup.pub.asc   once: the public key copies are encrypted to
+#   sudo matrix-backup snapshot > copy.tar.gz.gpg   write one encrypted copy to stdout
+#   sudo matrix-backup paths                        what a copy holds on this server
 #
-# On the sending server (Center; a node can send too):
-#   sudo matrix-backup install-sender --to matrixbak@<other server> --pubkey backup.pub.asc [--name center]
-#   -> prints the install-receiver command to run on the other server.
-# On the receiving server:
-#   sudo matrix-backup install-receiver --from center --key 'ssh-ed25519 AAAA... matrix-backup:center'
-# Then, on the sender:
-#   sudo matrix-backup run        one copy now (the timer runs it every night)
-#   sudo matrix-backup status     timer, last run and its result
-# On the receiver:
-#   sudo matrix-backup list       stored copies per sender, newest last
-#
-# Restore (on the operator's PC, with the private key imported in gpg):
-#   gpg --decrypt <time>.tar.gz.gpg | tar -xz -C restore/
-#   (cd restore && sha256sum -c MANIFEST.sha256)
-# then put the files back as in server_operation.md section 3.6.
+# A copy is a tar.gz of the state below plus MANIFEST.sha256, encrypted to the
+# backup public key. Only the holder of the private key (kept offline) can
+# read it. Restore: server_operation.md section 3.6.
 set -euo pipefail
 
-CONF=/etc/matrix/backup.conf
-PUBKEY=/etc/matrix/backup.pub.asc
-SSH_KEY=/etc/matrix/backup_ssh_ed25519
-UNIT_DIR=/etc/systemd/system
-STORE=/var/backups/matrix
-RECV_USER=matrixbak
-RECV_HOME=/var/lib/matrixbak
-SELF=/usr/local/sbin/matrix-backup
-KEEP=${KEEP:-60}                    # copies kept per sender on the receiver
-MAX_BYTES=$((200 * 1024 * 1024))    # refuse anything larger
+PUBKEY=/etc/matrix-backup.pub.asc
 
-# What is copied, relative to /. Missing paths are skipped.
+# What is copied, relative to /. Missing paths are skipped, so one list fits
+# the Center, control nodes and relays.
 STATE_PATHS=(
     opt/matrix/cfg/sid
     opt/matrix/cfg/config.json
@@ -47,21 +26,44 @@ STATE_PATHS=(
     opt/matrix/cfg/version
     opt/matrix/RELEASE
     etc/matrix/matrix.conf
+    etc/matrix-relay
+    etc/systemd/system/matrix.service
+    etc/systemd/system/matrix-relay.service
 )
+# Data inside the paths above that is not worth copying (none today).
+EXCLUDES=()
 
 die() { echo "matrix-backup: $*" >&2; exit 1; }
-need_root() { [[ $EUID -eq 0 ]] || die "run with sudo"; }
-valid_name() { [[ "$1" =~ ^[a-z0-9][a-z0-9-]{0,31}$ ]] || die "invalid name '$1' (a-z, 0-9, -)"; }
+[[ $EUID -eq 0 ]] || die "run with sudo"
 
-cmd_run() {
-    need_root
-    [[ -f "$CONF" ]] || die "not set up; run install-sender first"
-    # shellcheck source=/dev/null
-    . "$CONF"
-    [[ -f "$PUBKEY" && -f "$SSH_KEY" ]] || die "missing $PUBKEY or $SSH_KEY"
+cmd_install_key() {
+    local file="${1:-}"
+    [[ -f "$file" ]] || die "usage: matrix-backup install-key FILE"
+    local check; check="$(mktemp -d)"
+    trap 'rm -rf "$check"' RETURN
+    local keys; keys="$(gpg --homedir "$check" --batch --show-keys --with-colons "$file" 2>/dev/null)" ||
+        die "$file is not a gpg key"
+    grep -q '^sec' <<<"$keys" && die "$file holds a private key; give the public key only"
+    grep -q '^pub' <<<"$keys" || die "$file holds no public key"
+    install -m 644 "$file" "$PUBKEY"
+    echo "installed $PUBKEY ($(awk -F: '/^fpr/ {print $10; exit}' <<<"$keys"))"
+}
 
-    local tmp; tmp="$(mktemp -d)"
-    trap 'rm -rf "$tmp"' EXIT
+cmd_paths() {
+    local p
+    for p in "${STATE_PATHS[@]}"; do
+        [[ -e "/$p" ]] && echo "/$p"
+    done
+    return 0
+}
+
+cmd_snapshot() {
+    [[ -f "$PUBKEY" ]] || die "no key; run install-key first"
+    [[ -t 1 ]] && die "write the copy to a file or pipe, not the terminal"
+    # Global, so the EXIT trap still sees it after the function returns.
+    SNAP_TMP="$(mktemp -d)"
+    trap 'rm -rf "$SNAP_TMP"' EXIT
+    local tmp="$SNAP_TMP"
     mkdir -m 700 "$tmp/state" "$tmp/gnupg"
     local p found=0
     for p in "${STATE_PATHS[@]}"; do
@@ -69,149 +71,24 @@ cmd_run() {
         cp -a --parents "/$p" "$tmp/state/"
         found=1
     done
-    [[ $found -eq 1 ]] || die "nothing to back up"
-    (cd "$tmp/state" && find . -type f ! -name MANIFEST.sha256 -print0 | sort -z |
-        xargs -0 sha256sum > MANIFEST.sha256)
-    local files; files="$(wc -l < "$tmp/state/MANIFEST.sha256")"
-
+    [[ $found -eq 1 ]] || die "nothing to back up on this server"
+    for p in "${EXCLUDES[@]}"; do rm -rf "${tmp:?}/state/$p"; done
+    {
+        echo "host=$(hostname)"
+        echo "taken=$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+        [[ -f /opt/matrix/RELEASE ]] && sed -n 's/^version=/server_version=/p' /opt/matrix/RELEASE
+        command -v matrix-relay >/dev/null && echo "relay_binary_sha256=$(sha256sum "$(command -v matrix-relay)" | cut -d" " -f1)"
+    } > "$tmp/state/BACKUP_INFO"
+    (cd "$tmp/state" && find . -type f -print0 | sort -z | xargs -0 sha256sum > "$tmp/MANIFEST.sha256" &&
+        mv "$tmp/MANIFEST.sha256" MANIFEST.sha256)
     tar -C "$tmp/state" -czf - . |
         gpg --homedir "$tmp/gnupg" --batch --quiet --no-tty --trust-model always \
-            --recipient-file "$PUBKEY" --encrypt --output "$tmp/copy.gpg"
-    local size; size="$(stat -c %s "$tmp/copy.gpg")"
-
-    local reply
-    reply="$(ssh -i "$SSH_KEY" -o BatchMode=yes -o ConnectTimeout=20 \
-        -o StrictHostKeyChecking=accept-new -o UserKnownHostsFile=/etc/matrix/backup_known_hosts \
-        "$BACKUP_TO" < "$tmp/copy.gpg")" || die "sending to $BACKUP_TO failed"
-    echo "backup ok: $files files, $size bytes encrypted, sent to $BACKUP_TO ($reply)"
-}
-
-# Forced command of the receiver's login: stores stdin as one copy.
-cmd_receive() {
-    local name="${1:-}"; valid_name "$name"
-    [[ "$(id -un)" == "$RECV_USER" ]] || die "receive runs only as $RECV_USER"
-    local dir="$STORE/$name"
-    mkdir -p -m 700 "$dir"
-    local tmp="$dir/.incoming.$$"
-    trap 'rm -f "$tmp"' EXIT
-    head -c $((MAX_BYTES + 1)) > "$tmp"
-    local size; size="$(stat -c %s "$tmp")"
-    [[ $size -gt 0 ]] || die "empty copy refused"
-    [[ $size -le $MAX_BYTES ]] || die "copy larger than $MAX_BYTES bytes refused"
-    local file; file="$(date -u +%Y%m%dT%H%M%SZ).tar.gz.gpg"
-    chmod 600 "$tmp"
-    mv "$tmp" "$dir/$file"
-    # Keep the newest KEEP copies.
-    ls -1 "$dir"/*.tar.gz.gpg | sort | head -n -"$KEEP" | xargs -r rm -f
-    echo "stored $name/$file, $size bytes"
-}
-
-cmd_install_sender() {
-    need_root
-    local to="" pubkey="" name="center"
-    while [[ $# -gt 0 ]]; do
-        case "$1" in
-            --to) to="$2"; shift 2 ;;
-            --pubkey) pubkey="$2"; shift 2 ;;
-            --name) name="$2"; shift 2 ;;
-            *) die "unknown option $1" ;;
-        esac
-    done
-    [[ "$to" =~ ^[a-z_][a-z0-9_-]*@[A-Za-z0-9.-]+$ ]] || die "--to USER@HOST required"
-    [[ -f "$pubkey" ]] || die "--pubkey FILE required"
-    valid_name "$name"
-    local check; check="$(mktemp -d)"
-    gpg --homedir "$check" --batch --quiet --show-keys "$pubkey" >/dev/null 2>&1 ||
-        { rm -rf "$check"; die "$pubkey is not a gpg public key"; }
-    gpg --homedir "$check" --batch --quiet --show-keys "$pubkey" 2>/dev/null | grep -q '^sec' &&
-        { rm -rf "$check"; die "$pubkey holds a private key; give the public key only"; }
-    rm -rf "$check"
-
-    install -d -m 755 /etc/matrix
-    install -m 644 "$pubkey" "$PUBKEY"
-    printf 'BACKUP_TO=%s\nBACKUP_NAME=%s\n' "$to" "$name" > "$CONF"
-    chmod 644 "$CONF"
-    [[ -f "$SSH_KEY" ]] || ssh-keygen -q -t ed25519 -N '' -C "matrix-backup:$name" -f "$SSH_KEY"
-    chmod 600 "$SSH_KEY"
-
-    cat > "$UNIT_DIR/matrix-backup.service" <<EOF
-[Unit]
-Description=Matrix encrypted state backup to $to
-Wants=network-online.target
-After=network-online.target
-
-[Service]
-Type=oneshot
-ExecStart=$SELF run
-EOF
-    cat > "$UNIT_DIR/matrix-backup.timer" <<'EOF'
-[Unit]
-Description=Nightly Matrix state backup
-
-[Timer]
-OnCalendar=*-*-* 03:17:00 UTC
-RandomizedDelaySec=20m
-Persistent=true
-
-[Install]
-WantedBy=timers.target
-EOF
-    systemctl daemon-reload
-    systemctl enable --now matrix-backup.timer >/dev/null
-    echo "Sender set up. On ${to#*@} run:"
-    echo "  sudo matrix-backup install-receiver --from $name --key '$(cat "$SSH_KEY.pub")'"
-    echo "Then here: sudo matrix-backup run"
-}
-
-cmd_install_receiver() {
-    need_root
-    local from="" key=""
-    while [[ $# -gt 0 ]]; do
-        case "$1" in
-            --from) from="$2"; shift 2 ;;
-            --key) key="$2"; shift 2 ;;
-            *) die "unknown option $1" ;;
-        esac
-    done
-    valid_name "$from"
-    [[ "$key" =~ ^ssh-ed25519\ [A-Za-z0-9+/=]+(\ .*)?$ ]] || die "--key 'ssh-ed25519 ...' required"
-    local keybody; keybody="$(awk '{print $1" "$2}' <<<"$key")"
-
-    id "$RECV_USER" >/dev/null 2>&1 ||
-        useradd --system --home-dir "$RECV_HOME" --create-home --shell /bin/sh "$RECV_USER"
-    install -d -m 700 -o "$RECV_USER" -g "$RECV_USER" "$RECV_HOME/.ssh" "$STORE"
-    local auth="$RECV_HOME/.ssh/authorized_keys"
-    touch "$auth"
-    # One line per sender; replace an older line for the same sender.
-    grep -v " matrix-backup:$from\$" "$auth" > "$auth.new" || true
-    echo "restrict,command=\"$SELF receive $from\" $keybody matrix-backup:$from" >> "$auth.new"
-    mv "$auth.new" "$auth"
-    chown "$RECV_USER:$RECV_USER" "$auth"; chmod 600 "$auth"
-    echo "Receiver set up for '$from': copies go to $STORE/$from/ (newest $KEEP kept)."
-}
-
-cmd_list() {
-    need_root
-    [[ -d "$STORE" ]] || die "no copies here ($STORE missing)"
-    local d
-    for d in "$STORE"/*/; do
-        [[ -d "$d" ]] || continue
-        echo "$(basename "$d"): $(ls -1 "$d" | grep -c '\.gpg$') copies"
-        ls -l --time-style=+%Y-%m-%dT%H:%MZ "$d" | grep '\.gpg$' | tail -n 3 | awk '{print "  "$6"  "$5" bytes  "$7}'
-    done
-}
-
-cmd_status() {
-    systemctl list-timers matrix-backup.timer --no-pager || true
-    journalctl -u matrix-backup.service -n 5 --no-pager -o cat || true
+            --recipient-file "$PUBKEY" --encrypt
 }
 
 case "${1:-}" in
-    run) cmd_run ;;
-    receive) shift; cmd_receive "$@" ;;
-    install-sender) shift; cmd_install_sender "$@" ;;
-    install-receiver) shift; cmd_install_receiver "$@" ;;
-    list) cmd_list ;;
-    status) cmd_status ;;
-    *) sed -n '2,28p' "$0" | sed 's/^# \{0,1\}//'; exit 2 ;;
+    install-key) shift; cmd_install_key "$@" ;;
+    snapshot) cmd_snapshot ;;
+    paths) cmd_paths ;;
+    *) sed -n '2,13p' "$0" | sed 's/^# \{0,1\}//'; exit 2 ;;
 esac

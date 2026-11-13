@@ -574,8 +574,7 @@ relay stops being handed out to new sessions at once.
 ### 3.4 A new Center (today)
 
 Today a new Center is needed only to replace the current one. That is
-disaster recovery, and it needs the off-host backup, which does not exist
-yet (R3). Follow INSTALL.md section 2, and do not try it without the project
+disaster recovery from the off-host backup (section 3.6). Follow INSTALL.md section 2, and do not try it without the project
 owner.
 
 ### 3.5 Adding or removing a Center (after R21)
@@ -616,42 +615,60 @@ Keep at least 2 Centers at all times.
 
 ### 3.6 Backup and restore (R3)
 
-Status 2026-11-13: tool written (`release/matrix-backup`), not yet installed
-on the servers.
+Status 2026-11-13: in place except the pull from the admin server, which
+waits for the DigitalOcean Cloud Firewall to allow SSH from it
+(3.95.228.203). A restore drill of all four servers passed on 2026-11-13.
 
-**What is copied.** Every night (03:17 UTC, up to 20 minutes later) each
-control server sends an encrypted copy of its state to the other region:
-the Center to sg00, sg00 to the Center. The copy holds `cfg/sid/`
-(activations, Center ticket key, tenants, admin token, blocklist, relay
-registry, statistics, connection log), `config.json` and `config.d/`,
-`relay-secrets.json`, `turn.conf`, `cfg/version`, `RELEASE` and
-`/etc/matrix/matrix.conf`, with a `MANIFEST.sha256`. It is under 1 MB today.
+**The admin server.** `admin@ec2-3-95-228-203.compute-1.amazonaws.com`
+(AWS, `../vps.sh dev` until renamed) is where operations start. It holds,
+in `/opt/matrix-admin/` (owner `admin`, mode 0700):
 
-**Who can read it.** Each copy is encrypted to the backup public key. The
-private key is **not on any server**: the project owner keeps it
-(`matrix_backup.key.asc`) in the password manager. Without it no copy can
-be restored, so keep two copies of it in separate places. The receiving
-login (`matrixbak`) can only store a file: it cannot list, read or delete
-copies. Each sender keeps its newest 60 copies.
+| Path | What |
+|---|---|
+| `servers.conf` | every server: name, IP, role (center, node, relay). Add each new server here |
+| `keys/ssh.pem` | root login to every DigitalOcean server |
+| `keys/backup.pub.asc` | the backup public key |
+| `backups/<server>/<time>.tar.gz.gpg` | encrypted copies, newest 90 per server |
+| `backups/sids/` | encrypted copies of `sid_gen` (SID signing key, issued list, batches) |
+| `tools/matrix-backup` | the copy installed on servers by `push-tool` |
 
-**Set up** (once per server; `setup.sh` installs the tool):
+It is not needed while the servers run: if it is down, cameras and viewers
+are not affected; only backups and deploys wait.
+
+**What a copy holds.** `matrix-backup snapshot` on a server writes one
+encrypted copy: `cfg/sid/` (activations, Center ticket key, node link key,
+tenants, admin token, blocklist, relay registry, statistics, connection
+log), `config.json` and `config.d/`, `relay-secrets.json`, `turn.conf`,
+`matrix.conf`, the unit files, and on relays `/etc/matrix-relay/` (secrets,
+flags). Each copy has `MANIFEST.sha256` and `BACKUP_INFO` (host, time,
+versions). Today a copy is 5–50 KB. Certificates are not copied; certbot
+issues new ones.
+
+**Who can read it.** Copies are encrypted on the server to the backup public
+key. The private key is on **no server**: the project owner keeps
+`matrix_backup.key.asc` in the password manager, in two places. Without it
+nothing can be restored. The admin server refuses any file that is not
+encrypted.
+
+**Commands** (on the admin server):
 
 ```bash
-# on the sender (Center: --name center; sg00: --name sg00)
-sudo matrix-backup install-sender --to matrixbak@<other server IP> --pubkey matrix_backup.pub.asc --name center
-# it prints a command; run it on the other server
-sudo matrix-backup install-receiver --from center --key 'ssh-ed25519 AAAA... matrix-backup:center'
-# back on the sender: one copy now
-sudo matrix-backup run
+matrix-admin backup [NAME...]   # pull a copy now (default: every server); the timer runs it nightly, 03:17 UTC
+matrix-admin list               # copies per server; "OLD" when the newest is over 36 h or missing
+matrix-admin push-tool [NAME]   # install matrix-backup and the public key on a (new) server
+# after generating SIDs, on the PC:
+tar -czf - sid_gen | gpg --batch --trust-model always --recipient-file matrix_backup.pub.asc --encrypt |
+  ssh admin@<admin server> 'matrix-admin store sids'
 ```
 
-**Check it** (daily check, section 5.2): `sudo matrix-backup list` on the
-receiver shows the newest copy of each sender from the last night;
-`sudo matrix-backup status` on the sender shows the timer and the last
-result. Until alerting exists (R5), a failed copy shows only there.
+A new server: add it to `servers.conf`, run `matrix-admin push-tool NAME`,
+then `matrix-admin backup NAME`.
 
-**Restore** (on the operator's PC; fetch the copy from the receiver with
-root's login, `/var/backups/matrix/<sender>/`):
+**Check it** (daily check, section 5.2): `matrix-admin list` shows no
+`OLD`. Until alerting exists (R5), a failed night shows only there and in
+`journalctl -u matrix-admin-backup`.
+
+**Restore** (on the operator's PC; copy the file from the admin server):
 
 ```bash
 gpg --import matrix_backup.key.asc        # once
@@ -660,19 +677,19 @@ mkdir restore && gpg --decrypt <time>.tar.gz.gpg | tar -xz -C restore
 ```
 
 Then, on a new droplet: install from the release package (INSTALL.md
-section 2, using the restored `cfg/sid/` keys), copy the restored
-`opt/matrix/cfg/` and `etc/matrix/matrix.conf` over the new ones (owner
-`matrix`, `cfg/sid/` mode 0700, files 0600), `systemctl restart matrix`,
-and point DNS at it. The nodes keep their link because the Center ticket
-key and `config.json` are the same.
+section 2, using the restored `cfg/sid/` keys; for a relay, section 3),
+copy the restored `opt/matrix/cfg/` and `etc/matrix/matrix.conf` (or
+`etc/matrix-relay/`) over the new ones (owner `matrix`, `cfg/sid/` mode
+0700, files 0600), restart the service, and point DNS at it. Nodes keep
+their link because the Center ticket key and `config.json` are the same.
 
-**Drill.** Restore the newest copy once a quarter, and after any change to
-what is copied: decrypt, check the manifest, and compare its
-`activations.jsonl` line count with the live one.
+**Drill.** Once a quarter, and after any change to what is copied: decrypt
+the newest copy of each server, check the manifest, and compare the Center's
+`activations.jsonl` line count and key checksums with the live ones.
 
-DigitalOcean droplet backups (weekly, 20% of the droplet price, about
-$1.20 a month each) are a second layer; turn them on in the DO console for
-the Center and sg00.
+DigitalOcean droplet backups (weekly, 20% of the droplet price, about $1.20
+a month each) and an AWS snapshot of the admin server are a second layer;
+turn them on in each console.
 
 ---
 

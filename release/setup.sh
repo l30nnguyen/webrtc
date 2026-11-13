@@ -62,9 +62,9 @@
 # 404. LINK_LISTEN=host:port in /etc/matrix/matrix.conf also serves the links on
 # a separate (private) address.
 #
-# Backup: setup.sh installs /usr/local/sbin/matrix-backup, a nightly encrypted
-# copy of this server's state to another server (sudo matrix-backup for usage;
-# server_operation.md section 3.6).
+# Backup: setup.sh installs /usr/local/sbin/matrix-backup, which writes an
+# encrypted copy of this server's state; the admin server pulls one every
+# night (server_operation.md section 3.6).
 #
 # Upgrade an installed Center or node to this package (config, keys and data
 # are kept; edit /etc/matrix/matrix.conf first to change a setting):
