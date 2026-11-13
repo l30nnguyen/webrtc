@@ -1,10 +1,12 @@
 package main
 
 import (
+	"fmt"
 	"log"
 	"os"
 	"os/signal"
 	"regexp"
+	"strings"
 	"syscall"
 	"time"
 
@@ -91,6 +93,96 @@ func (s *Server) recordReport(c *Client, msg map[string]interface{}) {
 		e.Version = version
 	}
 	s.addEvent(e)
+}
+
+// qualityLimits bound each number of a quality message; a value outside
+// (or missing) is "not measured".
+var qualityLimits = map[string]float64{
+	"duration_s": 7 * 24 * 3600, "video_kbps": 100000, "loss_pct": 100, "max_loss_pct": 100,
+	"jitter_ms": 60000, "rtt_ms": 60000, "remb_kbps": 1000000, "pli": 1e7, "nack": 1e9,
+}
+
+// recordQuality handles a camera's {"type":"quality"} message (ST-3): its view
+// of one viewing session's stream from the viewer's RTCP feedback, sent about
+// 10 s after the session connects (stage "start") and when it closes ("end").
+// Both go to the connection log; "end" is counted in the statistics. Only
+// cameras send it, and it is never forwarded.
+func (s *Server) recordQuality(c *Client, msg map[string]interface{}) {
+	if c.Role != admission.RoleCamera {
+		return
+	}
+	stage, _ := msg["stage"].(string)
+	if stage != "start" && stage != "end" {
+		return
+	}
+	value := func(key string) float64 {
+		v, ok := msg[key].(float64)
+		if !ok || v < 0 || v > qualityLimits[key] || v != v {
+			return -1
+		}
+		return v
+	}
+	count := func(key string) int {
+		if v := value(key); v > 0 {
+			return int(v)
+		}
+		return 0
+	}
+	viewerID, _ := msg["id"].(string)
+	if !admission.ValidDeviceID(viewerID) {
+		viewerID = ""
+	}
+	q := stats.QualityReport{
+		DurationS: value("duration_s"), VideoKbps: value("video_kbps"), LossPct: value("loss_pct"),
+		MaxLossPct: value("max_loss_pct"), JitterMs: value("jitter_ms"), RTTMs: value("rtt_ms"),
+		REMBKbps: value("remb_kbps"), PLI: count("pli"), NACK: count("nack"),
+	}
+	// The viewer's country, while the viewer is still connected.
+	if viewerID != "" {
+		s.mu.RLock()
+		if v, ok := s.clients[clientKey(c.Tenant, viewerID)]; ok && v.Role == admission.RolePlayer {
+			q.Country = v.Country
+		}
+		s.mu.RUnlock()
+	}
+	if stage == "end" {
+		if s.stats != nil {
+			s.stats.RecordQuality(q)
+		}
+		counts := map[string]int64{"quality_sessions": 1}
+		if q.Poor() {
+			counts["quality_poor"] = 1
+		}
+		if q.Streamed() {
+			counts["quality_streamed"] = 1
+		}
+		s.countHistory(counts)
+	}
+	result := "quality " + stage
+	if q.Poor() {
+		result += " poor"
+	}
+	s.addEvent(events.Event{Type: events.Report, Role: "camera", Camera: c.ID, Viewer: viewerID,
+		Result: result, Detail: qualityText(q), Country: q.Country})
+}
+
+// qualityText is a quality report for the connection log.
+func qualityText(q stats.QualityReport) string {
+	parts := []string{}
+	add := func(v float64, format string) {
+		if v >= 0 {
+			parts = append(parts, fmt.Sprintf(format, v))
+		}
+	}
+	add(q.DurationS, "%.0f s")
+	add(q.VideoKbps, "%.0f kbps")
+	add(q.LossPct, "loss %.1f%%")
+	add(q.MaxLossPct, "max %.1f%%")
+	add(q.RTTMs, "rtt %.0f ms")
+	add(q.JitterMs, "jitter %.0f ms")
+	add(q.REMBKbps, "estimate %.0f kbps")
+	parts = append(parts, fmt.Sprintf("pli %d", q.PLI), fmt.Sprintf("nack %d", q.NACK))
+	return strings.Join(parts, ", ")
 }
 
 // LocalReport is this node's state as it reports it to Center: the cameras

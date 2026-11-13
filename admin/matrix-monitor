@@ -160,7 +160,8 @@ from datetime import datetime, timezone, timedelta
 since_alerts, window = float(sys.argv[1]), float(sys.argv[2])
 d, now = sys.argv[3], time.time()
 start = min(since_alerts, now - window)
-out = {"connected": 0, "failed": 0, "errors": {}, "requests": 0, "alerts": [], "takeovers": 0, "last_t": since_alerts}
+out = {"connected": 0, "failed": 0, "errors": {}, "requests": 0, "alerts": [], "takeovers": 0, "last_t": since_alerts,
+       "quality": 0, "poor": 0}
 day = datetime.fromtimestamp(start, timezone.utc).date()
 while day <= datetime.now(timezone.utc).date():
     try:
@@ -183,6 +184,10 @@ while day <= datetime.now(timezone.utc).date():
             continue
         if e.get("type") == "request":
             out["requests"] += 1
+        elif e.get("type") == "report" and e.get("role") == "camera" and e.get("result", "").startswith("quality end"):
+            out["quality"] += 1
+            if e["result"].endswith("poor"):
+                out["poor"] += 1
         elif e.get("type") == "report" and e.get("role") == "viewer":
             if e.get("result") == "connected":
                 out["connected"] += 1
@@ -405,7 +410,8 @@ def summary_text(st):
                 pct = f"{100 * ev['connected'] / total:.1f}%" if total else "-"
                 errs = ", ".join(f"{k} {v}" for k, v in ev["errors"].items())
                 lines.append(f"{s['name']}: {ev['requests']} view requests, {ev['connected']} connected, "
-                             f"{ev['failed']} failed ({pct} ok){' — ' + errs if errs else ''}")
+                             f"{ev['failed']} failed ({pct} ok){' — ' + errs if errs else ''}"
+                             + (f"; stream quality {ev['quality']} sessions, {ev['poor']} poor" if ev.get("quality") else ""))
             except Exception as e:
                 lines.append(f"{s['name']}: cannot read events ({e})")
     if st.get("versions"):

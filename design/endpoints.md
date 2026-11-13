@@ -92,6 +92,7 @@ The server pings every 30 s. Messages the camera sends:
 | `{"id":"<viewer id>","type":"offer","sdp":"...","candidates":[{"url":"host:port?transport=udp","username":"...","password":"..."}]}` | Forwarded to that viewer, if the viewer's ticket is for this camera |
 | `{"id":"<viewer id>","type":"error","msg":"Unauthorized"}` | Forwarded (wrong viewing password) |
 | `{"type":"report","result":"connected","path":"relay","relay_offered":true,"relay_ready":true,"setup_ms":840}` | Counted for statistics, never forwarded (see 2.4) |
+| `{"type":"quality","id":"<viewer id>","stage":"start\|end",...}` | Stream quality of one viewing session (2.5, server 2.7.0); counted, never forwarded |
 | `{"type":"bye"}` | The server closes the connection cleanly |
 | Anything else with `"id"` | Forwarded unchanged to that viewer, within the same tenant and ticket scope |
 
@@ -187,6 +188,33 @@ Send once per viewing attempt, on the control connection:
 ```
 
 `relay_protocol` only when connected through a relay. Optional `"version":"2.6.6"`: the reporter's software version (up to 32 of `0-9A-Za-z._+-`, otherwise dropped), kept in the connection log (2.6.6; the web player sends it). The role (camera or viewer) comes from the ticket. Reports feed `matrix-fleet stats`, `/admin/statistic` and the connection log, and are never forwarded. **The web player sends them; the mobile app does not yet.**
+
+### 2.5 Stream quality (camera, server 2.7.0, ST-3)
+
+The camera sends, for each viewing session, its view of the stream from the
+viewer's RTCP feedback: about 10 s after the session connects (`start`) and
+when it closes (`end`):
+
+```json
+{"type":"quality","id":"<viewer id>","stage":"end","duration_s":312,"video_kbps":950,"loss_pct":0.4,"max_loss_pct":2.1,"jitter_ms":12,"rtt_ms":180,"remb_kbps":1200,"pli":3,"nack":40}
+```
+
+| Field | Meaning |
+| --- | --- |
+| `duration_s` | seconds since the session connected |
+| `video_kbps` | video the camera sent, average over the session |
+| `loss_pct`, `max_loss_pct` | packet loss the viewer reported (RTCP receiver reports): average, worst |
+| `jitter_ms`, `rtt_ms` | jitter and round trip from the same reports |
+| `remb_kbps` | the viewer's last bandwidth estimate (REMB) |
+| `pli`, `nack` | keyframe and resend requests from the viewer |
+
+Every number is optional; a missing or out-of-range one counts as not
+measured. Only camera tickets may send it. Both stages go to the connection
+log (`quality start`, `quality end`, plus `poor` when loss is 3 % or more or the
+round trip 1 s or more); `end` is counted in `matrix-fleet stats` (sessions,
+streamed 5 s or more, poor, loss and round-trip bands) and per viewer
+country. Servers before 2.7.0 would forward it to the viewer, so cameras
+send it only to 2.7.0 and later (deploy the servers first).
 
 ---
 

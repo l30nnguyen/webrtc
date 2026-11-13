@@ -103,3 +103,26 @@ func TestRequestsAndReportsAreCountedByTicketCountry(t *testing.T) {
 		t.Fatalf("countries = %+v", day.Countries)
 	}
 }
+
+func TestCameraQualityReportsAreCountedNotForwarded(t *testing.T) {
+	n := newNode(t, func(s *Server) { s.SetStats(stats.New(nil)) })
+	today := func() stats.Day { return n.srv.stats.Snapshot()[time.Now().UTC().Format(time.DateOnly)] }
+	camera := n.connect("camera0", "acme01", admission.RoleCamera)
+	viewerID := strings.Repeat("v", 43)
+	viewer := n.connectScopedViewer(viewerID, "acme01", "camera0")
+
+	send(t, camera, map[string]any{"type": "quality", "id": viewerID, "stage": "start", "duration_s": 10, "video_kbps": 800, "loss_pct": 0.2})
+	send(t, camera, map[string]any{"type": "quality", "id": viewerID, "stage": "end", "duration_s": 120, "video_kbps": 900,
+		"loss_pct": 4.5, "max_loss_pct": 9, "rtt_ms": 200, "jitter_ms": 15, "pli": 3, "nack": 40, "remb_kbps": "x"})
+	// A viewer can't send one, and bad stages are ignored.
+	send(t, viewer, map[string]any{"type": "quality", "id": "camera0", "stage": "end", "duration_s": 5})
+	send(t, camera, map[string]any{"type": "quality", "id": viewerID, "stage": "middle"})
+	waitFor(t, "quality end", func() bool { return today().Quality.Sessions == 1 })
+	if got := receive(viewer, 200*time.Millisecond); got != nil {
+		t.Fatalf("quality was forwarded: %v", got)
+	}
+	q := today().Quality
+	if q.Sessions != 1 || q.Poor != 1 || q.Streamed != 1 || q.LossBands["3-10%"] != 1 || q.PLI != 3 || q.NACK != 40 || q.RTTSum != 200 {
+		t.Fatalf("quality = %+v", q)
+	}
+}

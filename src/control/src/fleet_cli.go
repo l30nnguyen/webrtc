@@ -558,6 +558,7 @@ func (c fleetCLI) stats(days int) error {
 	}
 	table.Flush()
 
+	printQuality(c.out, t.Quality)
 	printCountries(c.out, t.Countries)
 
 	fmt.Fprintln(c.out)
@@ -652,7 +653,7 @@ func printCountries(out io.Writer, countries map[string]stats.CountryCounts) {
 		return
 	}
 	busy := func(c stats.CountryCounts) int {
-		return c.Requests + c.ViewerConnected + c.ViewerFailed + c.CameraConnected + c.CameraFailed
+		return c.Requests + c.ViewerConnected + c.ViewerFailed + c.CameraConnected + c.CameraFailed + c.QualitySessions
 	}
 	keys := make([]string, 0, len(countries))
 	for cc := range countries {
@@ -681,20 +682,49 @@ func printCountries(out io.Writer, countries map[string]stats.CountryCounts) {
 		other.ViewerFailed += c.ViewerFailed
 		other.CameraConnected += c.CameraConnected
 		other.CameraFailed += c.CameraFailed
+		other.QualitySessions += c.QualitySessions
+		other.PoorQuality += c.PoorQuality
 	}
 	if len(keys) > topCountries {
 		rows = append(rows, row{fmt.Sprintf("other (%d)", len(keys)-topCountries), other})
 	}
 	fmt.Fprintln(out)
 	table := tabwriter.NewWriter(out, 0, 0, 2, ' ', 0)
-	fmt.Fprintln(table, "COUNTRY\tREQUESTS\tVIEWER OK/FAILED\tVIEWER OK %\tCAMERA OK/FAILED")
+	fmt.Fprintln(table, "COUNTRY\tREQUESTS\tVIEWER OK/FAILED\tVIEWER OK %\tCAMERA OK/FAILED\tQUALITY POOR/ALL")
 	for _, r := range rows {
 		pct := "-"
 		if n := r.c.ViewerConnected + r.c.ViewerFailed; n > 0 {
 			pct = fmt.Sprintf("%.1f%%", 100*float64(r.c.ViewerConnected)/float64(n))
 		}
-		fmt.Fprintf(table, "%s\t%d\t%d/%d\t%s\t%d/%d\n", r.name, r.c.Requests, r.c.ViewerConnected, r.c.ViewerFailed, pct, r.c.CameraConnected, r.c.CameraFailed)
+		fmt.Fprintf(table, "%s\t%d\t%d/%d\t%s\t%d/%d\t%d/%d\n", r.name, r.c.Requests, r.c.ViewerConnected, r.c.ViewerFailed, pct, r.c.CameraConnected, r.c.CameraFailed, r.c.PoorQuality, r.c.QualitySessions)
 	}
 	table.Flush()
 	fmt.Fprintln(out, "Viewers count by the viewer's country, cameras by the camera's; -- is unknown.")
+}
+
+// printQuality prints the cameras' end-of-session quality reports (ST-3).
+func printQuality(out io.Writer, q stats.Quality) {
+	if q.Sessions == 0 {
+		return
+	}
+	avg := func(sum float64, n int, format string) string {
+		if n == 0 {
+			return "-"
+		}
+		return fmt.Sprintf(format, sum/float64(n))
+	}
+	fmt.Fprintf(out, "\nStream quality (camera reports at session end): %d sessions, %d streamed video 5 s or more, %d poor (loss >= 3%% or round trip >= 1 s)\n",
+		q.Sessions, q.Streamed, q.Poor)
+	fmt.Fprintf(out, "Average: loss %s, round trip %s, jitter %s, video %s, %s per session; viewer asked for %d keyframes and %d resends\n",
+		avg(q.LossSum, q.LossCount, "%.2f%%"), avg(q.RTTSum, q.RTTCount, "%.0f ms"), avg(q.JitterSum, q.JitterN, "%.0f ms"),
+		avg(q.KbpsSum, q.KbpsCount, "%.0f kbps"), avg(q.DurationS, q.Sessions, "%.0f s"), q.PLI, q.NACK)
+	band := func(name string, bands map[string]int, order []string) {
+		parts := []string{}
+		for _, b := range order {
+			parts = append(parts, fmt.Sprintf("%s %d", b, bands[b]))
+		}
+		fmt.Fprintf(out, "%s: %s\n", name, strings.Join(parts, ", "))
+	}
+	band("Loss", q.LossBands, []string{"<1%", "1-3%", "3-10%", ">=10%"})
+	band("Round trip", q.RTTBands, []string{"<100ms", "100-300ms", "300-1000ms", ">=1s"})
 }

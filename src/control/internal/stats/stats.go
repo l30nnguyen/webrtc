@@ -82,6 +82,10 @@ type CountryCounts struct {
 	ViewerFailed    int `json:"viewer_failed,omitempty"`
 	CameraConnected int `json:"camera_connected,omitempty"`
 	CameraFailed    int `json:"camera_failed,omitempty"`
+	// QualitySessions counts end-of-session quality reports, PoorQuality
+	// those with Poor quality (by the viewer's country when it is known).
+	QualitySessions int `json:"quality_sessions,omitempty"`
+	PoorQuality     int `json:"poor_quality,omitempty"`
 }
 
 func (c *CountryCounts) add(o CountryCounts) {
@@ -90,6 +94,8 @@ func (c *CountryCounts) add(o CountryCounts) {
 	c.ViewerFailed += o.ViewerFailed
 	c.CameraConnected += o.CameraConnected
 	c.CameraFailed += o.CameraFailed
+	c.QualitySessions += o.QualitySessions
+	c.PoorQuality += o.PoorQuality
 }
 
 func (d *Day) country(cc string, change func(*CountryCounts)) {
@@ -184,6 +190,8 @@ type Day struct {
 	Player      Outcomes `json:"player"`
 	// Countries splits requests and outcomes by country (ST-1).
 	Countries map[string]CountryCounts `json:"countries,omitempty"`
+	// Quality sums the cameras' end-of-session stream quality reports (ST-3).
+	Quality Quality `json:"quality"`
 }
 
 // Add adds other's counters into d.
@@ -194,6 +202,7 @@ func (d *Day) Add(other Day) {
 	d.RateLimited += other.RateLimited
 	d.Camera.add(other.Camera)
 	d.Player.add(other.Player)
+	d.Quality.add(other.Quality)
 	for cc, counts := range other.Countries {
 		d.country(cc, func(c *CountryCounts) { c.add(counts) })
 	}
@@ -385,4 +394,135 @@ func Range(days Days, n int, now time.Time) (Days, Day) {
 		total.Add(day)
 	}
 	return out, total
+}
+
+// QualityReport is one camera's view of a viewing session's stream (ST-3),
+// from the viewer's RTCP feedback. A negative value means not measured.
+type QualityReport struct {
+	Country    string  // the viewer's country, "" when unknown
+	DurationS  float64 // seconds since the session connected
+	VideoKbps  float64 // video the camera sent, average
+	LossPct    float64 // average packet loss the viewer reported
+	MaxLossPct float64 // worst single report
+	JitterMs   float64
+	RTTMs      float64
+	REMBKbps   float64 // the viewer's bandwidth estimate, last
+	PLI, NACK  int     // keyframe and resend requests from the viewer
+}
+
+// Poor reports whether a session's quality was poor: average loss 3 % or
+// more, or a round trip of 1 s or more.
+func (q QualityReport) Poor() bool { return q.LossPct >= 3 || q.RTTMs >= 1000 }
+
+// Streamed reports whether video went out for at least 5 s: the stricter
+// success check (a session that connects but sends nothing is not one).
+func (q QualityReport) Streamed() bool { return q.DurationS >= 5 && q.VideoKbps > 0 }
+
+// LossBand and RTTBand name the band a value falls in.
+func LossBand(pct float64) string {
+	switch {
+	case pct < 1:
+		return "<1%"
+	case pct < 3:
+		return "1-3%"
+	case pct < 10:
+		return "3-10%"
+	}
+	return ">=10%"
+}
+
+func RTTBand(ms float64) string {
+	switch {
+	case ms < 100:
+		return "<100ms"
+	case ms < 300:
+		return "100-300ms"
+	case ms < 1000:
+		return "300-1000ms"
+	}
+	return ">=1s"
+}
+
+// Quality sums end-of-session quality reports. Sums with their counts give
+// averages; values not measured are left out of both.
+type Quality struct {
+	Sessions  int            `json:"sessions"`
+	Streamed  int            `json:"streamed"`
+	Poor      int            `json:"poor"`
+	LossBands map[string]int `json:"loss_bands,omitempty"`
+	RTTBands  map[string]int `json:"rtt_bands,omitempty"`
+	LossSum   float64        `json:"loss_pct_sum"`
+	LossCount int            `json:"loss_count"`
+	RTTSum    float64        `json:"rtt_ms_sum"`
+	RTTCount  int            `json:"rtt_count"`
+	JitterSum float64        `json:"jitter_ms_sum"`
+	JitterN   int            `json:"jitter_count"`
+	KbpsSum   float64        `json:"video_kbps_sum"`
+	KbpsCount int            `json:"video_kbps_count"`
+	DurationS float64        `json:"duration_s_sum"`
+	PLI       int            `json:"pli"`
+	NACK      int            `json:"nack"`
+}
+
+func (q *Quality) add(o Quality) {
+	q.Sessions += o.Sessions
+	q.Streamed += o.Streamed
+	q.Poor += o.Poor
+	q.LossBands = addMap(q.LossBands, o.LossBands)
+	q.RTTBands = addMap(q.RTTBands, o.RTTBands)
+	q.LossSum += o.LossSum
+	q.LossCount += o.LossCount
+	q.RTTSum += o.RTTSum
+	q.RTTCount += o.RTTCount
+	q.JitterSum += o.JitterSum
+	q.JitterN += o.JitterN
+	q.KbpsSum += o.KbpsSum
+	q.KbpsCount += o.KbpsCount
+	q.DurationS += o.DurationS
+	q.PLI += o.PLI
+	q.NACK += o.NACK
+}
+
+// RecordQuality counts one end-of-session quality report.
+func (c *Counters) RecordQuality(r QualityReport) {
+	c.update(func(d *Day) {
+		q := &d.Quality
+		q.Sessions++
+		if r.Streamed() {
+			q.Streamed++
+		}
+		poor := r.Poor()
+		if poor {
+			q.Poor++
+		}
+		if r.LossPct >= 0 {
+			q.LossBands = addMap(q.LossBands, map[string]int{LossBand(r.LossPct): 1})
+			q.LossSum += r.LossPct
+			q.LossCount++
+		}
+		if r.RTTMs >= 0 {
+			q.RTTBands = addMap(q.RTTBands, map[string]int{RTTBand(r.RTTMs): 1})
+			q.RTTSum += r.RTTMs
+			q.RTTCount++
+		}
+		if r.JitterMs >= 0 {
+			q.JitterSum += r.JitterMs
+			q.JitterN++
+		}
+		if r.VideoKbps >= 0 {
+			q.KbpsSum += r.VideoKbps
+			q.KbpsCount++
+		}
+		if r.DurationS > 0 {
+			q.DurationS += r.DurationS
+		}
+		q.PLI += r.PLI
+		q.NACK += r.NACK
+		d.country(r.Country, func(cc *CountryCounts) {
+			cc.QualitySessions++
+			if poor {
+				cc.PoorQuality++
+			}
+		})
+	})
 }

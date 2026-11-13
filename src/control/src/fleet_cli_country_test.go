@@ -31,3 +31,19 @@ func TestPrintCountriesTopTwentyAndOther(t *testing.T) {
 		t.Fatalf("empty map printed %q", out.String())
 	}
 }
+
+func TestPrintQuality(t *testing.T) {
+	var out bytes.Buffer
+	printQuality(&out, stats.Quality{})
+	if out.Len() != 0 {
+		t.Fatal("printed an empty quality block")
+	}
+	printQuality(&out, stats.Quality{Sessions: 4, Streamed: 3, Poor: 1, LossSum: 2, LossCount: 2, RTTSum: 400, RTTCount: 2,
+		LossBands: map[string]int{"<1%": 3, ">=10%": 1}, RTTBands: map[string]int{"100-300ms": 2}, DurationS: 400, PLI: 5})
+	text := out.String()
+	for _, want := range []string{"4 sessions, 3 streamed", "1 poor", "loss 1.00%", "round trip 200 ms", "100 s per session", "Loss: <1% 3, 1-3% 0, 3-10% 0, >=10% 1"} {
+		if !strings.Contains(text, want) {
+			t.Fatalf("missing %q in:\n%s", want, text)
+		}
+	}
+}

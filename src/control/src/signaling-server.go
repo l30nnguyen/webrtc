@@ -546,6 +546,10 @@ func (s *Server) readPump(c *Client) {
 			s.recordReport(c, msg)
 			continue
 		}
+		if msg["type"] == "quality" {
+			s.recordQuality(c, msg)
+			continue
+		}
 
 		isViewerRequest := c.Role == admission.RolePlayer && msg["type"] == "request"
 		if isViewerRequest {
