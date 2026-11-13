@@ -749,8 +749,8 @@ has its own folder, and a binary goes only to the models it was built for:
 
 | Model | Build | Folder |
 |---|---|---|
-| HCX130, HCX330L | C++ (`libdatachannel_c14/compile.sh`, toolchain anykav330); publish with `publish_firmware.sh MODEL`, once per model | `/downloads/HCX130/`, `/downloads/HCX330L/` (the same file) |
-| GIRAFFE_HD (old cameras that can't run C++) | C (`matrix_c`: `./build.sh anykav200`, then `scripts/package_anykav200.sh`) | `/downloads/GIRAFFE_HD/` |
+| HCX130 | C++ (`libdatachannel_c14/compile.sh`, toolchain anykav330); publish with `publish_firmware.sh HCX130` | `/downloads/HCX130/` |
+| GIRAFFE_HD (old cameras that can't run C++); HCX330L | C (`matrix_c`): `./build.sh anykav200` for GIRAFFE_HD, `./build.sh anykav500` for HCX330L, then `scripts/package_anykav200.sh <platform>` | `/downloads/GIRAFFE_HD/`, `/downloads/HCX330L/` (different builds) |
 
 Before a publish, copy the folder's current files to
 `/opt/matrix/backups/firmware-<MODEL>-<time>/` on the Center. Rollback: put

@@ -199,13 +199,13 @@ external pairing/product system.
 ### Camera
 
 Build with the trusted raw SID public key (64 hex characters) and the minimum
-issue time; there is no unprovisioned build. For the HCX130 and HCX330L
-(ARM, the same C++ build): `libdatachannel_c14/compile.sh` (toolchain
-`anykav330.cmake`, binary `build/examples/streamer/matrix_<version>`),
-published to `https://matrix.5gen.care/downloads/HCX130/matrix` and
-`.../HCX330L/matrix` with `publish_firmware.sh MODEL` (once per model). The
-old GIRAFFE_HD cameras, which can't run C++, use the C client `matrix_c`
-(toolchain anykav200), published to `.../GIRAFFE_HD/matrix`. Cameras
+issue time; there is no unprovisioned build. For the HCX130 (ARM, C++):
+`libdatachannel_c14/compile.sh` (toolchain `anykav330.cmake`, binary
+`build/examples/streamer/matrix_<version>`), published to
+`https://matrix.5gen.care/downloads/HCX130/matrix` with
+`publish_firmware.sh`. The GIRAFFE_HD and HCX330L cameras use the C client
+`matrix_c` (toolchains anykav200 and anykav500), published to
+`.../GIRAFFE_HD/matrix` and `.../HCX330L/matrix`. Cameras
 download it to `/tmp/matrix` at boot.
 
 The camera's only run-time option is `--config FOLDER` (also `-h`, `-V`,
