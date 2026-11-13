@@ -742,10 +742,20 @@ and restart.
 
 ### 4.3 Camera firmware
 
-Camera firmware is out of scope for server operation. It is published from
-`libdatachannel_c14/publish_firmware.sh` to
-`https://matrix.5gen.care/downloads/HCX130/matrix`, and cameras take it at
-their next boot. Rollback: publish the previous binary.
+Camera firmware is published to
+`https://matrix.5gen.care/downloads/<MODEL>/matrix`, with `matrix.sha256`
+and `version` next to it, and cameras take it at their next boot. Each model
+has its own folder, and a binary goes only to the models it was built for:
+
+| Model | Build | Folder |
+|---|---|---|
+| HCX130, HCX330L | C++ (`libdatachannel_c14/compile.sh`, toolchain anykav330); publish with `publish_firmware.sh MODEL`, once per model | `/downloads/HCX130/`, `/downloads/HCX330L/` (the same file) |
+| GIRAFFE_HD (old cameras that can't run C++) | C (`matrix_c`: `./build.sh anykav200`, then `scripts/package_anykav200.sh`) | `/downloads/GIRAFFE_HD/` |
+
+Before a publish, copy the folder's current files to
+`/opt/matrix/backups/firmware-<MODEL>-<time>/` on the Center. Rollback: put
+them back. A publish reaches every camera of that model at its next boot
+(R7), so test on one camera first.
 
 ### 4.4 Changing a setting
 

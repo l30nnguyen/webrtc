@@ -105,7 +105,7 @@ Messages the camera receives:
 
 ### 1.4 `GET https://matrix.5gen.care/downloads/<MODEL>/matrix`
 
-Firmware binary. Next to it are `matrix.sha256` and `version`. These are plain files from `/opt/matrix/downloads/` and are served by every server (section 6).
+Firmware binary. Next to it are `matrix.sha256` and `version`. These are plain files from `/opt/matrix/downloads/` and are served by every server (section 6). Models today: `HCX130` and `HCX330L` (the same C++ build) and `GIRAFFE_HD` (the C build, `matrix_c`).
 
 ---
 
