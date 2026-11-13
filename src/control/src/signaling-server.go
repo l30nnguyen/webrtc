@@ -18,6 +18,7 @@ import (
 	"net/netip"
 	"net/url"
 	"os"
+	"path/filepath"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -87,12 +88,14 @@ func (c *Client) Close() {
 func clientKey(tenant, id string) string { return tenant + "/" + id }
 
 type Server struct {
-	clients    map[string]*Client // keyed by clientKey(tenant, id)
-	mu         sync.RWMutex
-	upgrader   websocket.Upgrader
-	playerPath string
-	rootDir    string
-	admission  *admission.Validator
+	// lastAddresses (Center only) is saved at stop with the statistics.
+	lastAddresses *center.LastAddresses
+	clients       map[string]*Client // keyed by clientKey(tenant, id)
+	mu            sync.RWMutex
+	upgrader      websocket.Upgrader
+	playerPath    string
+	rootDir       string
+	admission     *admission.Validator
 	// demoTenant, when set together with admission, lets unauthenticated
 	// "Player*" web-demo clients join that one tenant. Development only.
 	demoTenant      string
@@ -945,6 +948,20 @@ func configureServer(srv *Server, opts serverOptions) error {
 		if err != nil {
 			return fmt.Errorf("activation store is invalid: %w", err)
 		}
+		// Where each camera last verified from, next to the activations: a
+		// takeover from another network raises an alert (roll-out.md R1).
+		addresses, err := center.OpenLastAddresses(filepath.Join(filepath.Dir(opts.activationsPath), "last_addresses.json"))
+		if err != nil {
+			log.Printf("center: last_addresses.json is unreadable (%v); starting empty", err)
+		}
+		srv.lastAddresses = addresses
+		go func() {
+			for range time.Tick(time.Minute) {
+				if err := addresses.Save(); err != nil {
+					log.Printf("center: saving last_addresses.json: %v", err)
+				}
+			}
+		}()
 		handler, err := center.NewHandler(center.Config{
 			Fleet: registry, Country: country, LocalStats: localStats, LocalCamera: srv.CameraConnected,
 			SIDPublicKey: sidPublic, MinIssued: minIssued,
@@ -952,9 +969,18 @@ func configureServer(srv *Server, opts serverOptions) error {
 			MainAddress: opts.mainAddress, AssignAddress: opts.assignAddress, Blocklist: blocklist, Tenants: tenants, Activations: store,
 			ChallengeKey: deriveChallengeKey(centerPrivate), TrustProxyTLS: opts.trustProxyTLS,
 			DemoTenant: opts.demoTenant, ViewOrigin: opts.viewOrigin, AdminToken: adminToken,
-			OnTakeover: func(tenant, from, to string) {
-				srv.countHistory(map[string]int64{"sid_takeover": 1})
-				srv.addEvent(events.Event{Type: events.Camera, Camera: to, Result: "takeover", Detail: "SID of tenant " + tenant + " taken over from offline camera " + from})
+			Addresses: addresses,
+			OnTakeover: func(info center.TakeoverInfo) {
+				counts := map[string]int64{"sid_takeover": 1}
+				detail := "SID of tenant " + info.Tenant + " taken over from offline camera " + info.FromDevice + ", same network"
+				if !info.SameNetwork {
+					counts["sid_takeover_alert"] = 1
+					detail = "ALERT: SID of tenant " + info.Tenant + " taken over from offline camera " + info.FromDevice +
+						" from another network (before " + addrText(info.OldAddress, info.OldCountry) + ", now " + addrText(info.NewAddress, info.NewCountry) +
+						"). If the SID leaked: block it and issue a new one"
+				}
+				srv.countHistory(counts)
+				srv.addEvent(events.Event{Type: events.Camera, Camera: info.ToDevice, Result: "takeover", Detail: detail})
 			},
 		})
 		if err != nil {
@@ -1282,3 +1308,14 @@ func main() {
 func (c *Client) touch() { c.lastSeenNano.Store(time.Now().UnixNano()) }
 
 func (c *Client) lastSeenTime() time.Time { return time.Unix(0, c.lastSeenNano.Load()) }
+
+// addrText is "203.0.113.5 (VN)", or "unknown".
+func addrText(addr netip.Addr, country string) string {
+	if !addr.IsValid() {
+		return "unknown"
+	}
+	if country == "" {
+		return addr.String()
+	}
+	return addr.String() + " (" + country + ")"
+}

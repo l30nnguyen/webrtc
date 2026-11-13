@@ -43,6 +43,7 @@ type env struct {
 	tenants        StaticTenants
 	fleet          *fleet.Registry // set by fleetEnv
 	storeInterface Activations
+	remoteAddr     string // source address of requests; "" keeps httptest's 192.0.2.1
 }
 
 type logCapture struct {
@@ -121,6 +122,9 @@ func (e *env) do(method, path string, body any, headers map[string]string) *http
 	}
 	request := httptest.NewRequest(method, path, reader)
 	request.TLS = &tls.ConnectionState{}
+	if e.remoteAddr != "" {
+		request.RemoteAddr = e.remoteAddr
+	}
 	if body != nil {
 		request.Header.Set("Content-Type", "application/json")
 	}

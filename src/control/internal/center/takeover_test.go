@@ -19,6 +19,7 @@ type takeoverEnv struct {
 	clock     *time.Time
 	link      uint64
 	takeovers []string
+	infos     []TakeoverInfo
 }
 
 // newTakeoverEnv is a Center with a fleet of its own node and remoteNode
@@ -37,7 +38,10 @@ func newTakeoverEnv(t *testing.T, mutate ...func(*Config)) *takeoverEnv {
 	}
 	te.env = newEnv(t, append([]func(*Config){func(c *Config) {
 		c.Fleet, c.Now = registry, clock
-		c.OnTakeover = func(tenant, from, to string) { te.takeovers = append(te.takeovers, from+">"+to) }
+		c.OnTakeover = func(info TakeoverInfo) {
+			te.takeovers = append(te.takeovers, info.FromDevice+">"+info.ToDevice)
+			te.infos = append(te.infos, info)
+		}
 	}}, mutate...)...)
 	te.env.fleet = registry
 	if te.link, err = registry.Linked(fleet.Report{Address: remoteNode}, 0); err != nil {

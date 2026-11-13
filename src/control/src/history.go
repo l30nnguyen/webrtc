@@ -67,6 +67,11 @@ func (s *Server) saveOnStop(statsPath string) {
 	if s.events != nil {
 		s.events.Close()
 	}
+	if s.lastAddresses != nil {
+		if err := s.lastAddresses.Save(); err != nil {
+			log.Printf("center: saving last_addresses.json: %v", err)
+		}
+	}
 	if s.stats != nil && statsPath != "" {
 		if err := s.stats.Save(statsPath); err != nil {
 			log.Printf("stats: %v", err)

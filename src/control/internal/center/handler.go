@@ -93,9 +93,12 @@ type Config struct {
 	// are online; without Fleet a second key is always refused.
 	TakeoverAfter time.Duration
 	// OnTakeover, when set, is told about every takeover.
-	OnTakeover func(tenant, fromDevice, toDevice string)
-	Now        func() time.Time
-	Logf       func(format string, args ...any)
+	OnTakeover func(TakeoverInfo)
+	// Addresses remembers where each camera last verified from, so a
+	// takeover from another network raises an alert. Nil keeps it in memory.
+	Addresses *LastAddresses
+	Now       func() time.Time
+	Logf      func(format string, args ...any)
 }
 
 type Handler struct {
@@ -157,6 +160,9 @@ func NewHandler(config Config) (*Handler, error) {
 	}
 	if config.Logf == nil {
 		config.Logf = log.Printf
+	}
+	if config.Addresses == nil {
+		config.Addresses, _ = OpenLastAddresses("")
 	}
 	h := &Handler{config: config, nodes: map[string]string{}}
 	h.nonces = &admission.ReplayCache{Now: h.now}
@@ -347,14 +353,24 @@ func (h *Handler) assign(r *http.Request, device string) string {
 
 // country is the ISO code of the request's source address, or "".
 func (h *Handler) country(r *http.Request) string {
-	if h.config.Country == nil {
+	return h.countryOf(remoteAddr(r))
+}
+
+// countryOf is the ISO code of addr, or "".
+func (h *Handler) countryOf(addr netip.Addr) string {
+	if h.config.Country == nil || !addr.IsValid() {
 		return ""
 	}
+	return h.config.Country(addr)
+}
+
+// remoteAddr is the request's source address (invalid when unparsable).
+func remoteAddr(r *http.Request) netip.Addr {
 	addrPort, err := netip.ParseAddrPort(r.RemoteAddr)
 	if err != nil {
-		return ""
+		return netip.Addr{}
 	}
-	return h.config.Country(addrPort.Addr())
+	return addrPort.Addr().Unmap()
 }
 
 type verifyRequest struct {
@@ -520,7 +536,7 @@ func (h *Handler) handleVerify(w http.ResponseWriter, r *http.Request) {
 			IssuedAt: verified.IssuedAt.Unix(), ActivatedAt: h.now().Unix(),
 		}
 		var taken bool
-		if record, taken = h.takeOver(w, record, candidate, tenant, verified.IssuedAt); !taken {
+		if record, taken = h.takeOver(w, record, candidate, tenant, verified.IssuedAt, remoteAddr(r)); !taken {
 			return
 		}
 	}
@@ -535,6 +551,7 @@ func (h *Handler) handleVerify(w http.ResponseWriter, r *http.Request) {
 	}
 	if role == admission.RoleCamera {
 		h.rememberNode(deviceID, node)
+		h.config.Addresses.Set(deviceID, remoteAddr(r))
 		if h.config.Fleet != nil {
 			h.config.Fleet.Placed(deviceID, h.country(r))
 		}
@@ -555,7 +572,7 @@ func (h *Handler) handleVerify(w http.ResponseWriter, r *http.Request) {
 // tell (a node is down), the new camera is told to retry. The old key is
 // revoked on the nodes first and then refused for this SID forever. When it
 // does not take over, takeOver has answered the request.
-func (h *Handler) takeOver(w http.ResponseWriter, record, candidate activation.Record, tenant Tenant, issued time.Time) (activation.Record, bool) {
+func (h *Handler) takeOver(w http.ResponseWriter, record, candidate activation.Record, tenant Tenant, issued time.Time, from netip.Addr) (activation.Record, bool) {
 	short := record.Digest[:12]
 	after := h.config.TakeoverAfter
 	if after == 0 {
@@ -603,10 +620,21 @@ func (h *Handler) takeOver(w http.ResponseWriter, record, candidate activation.R
 		h.reject(w)
 		return replaced, false
 	}
-	h.config.Logf("center: SID %s tenant=%s taken over by device %s from device %s, offline for %s",
-		short, record.Tenant, candidate.DeviceID, record.DeviceID, offline.Round(time.Second))
+	info := TakeoverInfo{Tenant: record.Tenant, FromDevice: record.DeviceID, ToDevice: candidate.DeviceID, NewAddress: from}
+	info.OldAddress, _ = h.config.Addresses.Get(record.DeviceID)
+	info.OldCountry, info.NewCountry = h.countryOf(info.OldAddress), h.countryOf(from)
+	info.SameNetwork = sameNetwork(info.OldAddress, from)
+	if info.SameNetwork {
+		// Most likely the same camera after a factory reset: no alert.
+		h.config.Logf("center: SID %s tenant=%s taken over by device %s from device %s, offline for %s, same network (%s)",
+			short, record.Tenant, candidate.DeviceID, record.DeviceID, offline.Round(time.Second), from)
+	} else {
+		h.config.Logf("center: ALERT SID %s tenant=%s taken over by device %s from device %s, offline for %s, from another network: before %s, now %s. If the SID leaked: block it and issue a new one",
+			short, record.Tenant, candidate.DeviceID, record.DeviceID, offline.Round(time.Second),
+			describeAddr(info.OldAddress, info.OldCountry), describeAddr(from, info.NewCountry))
+	}
 	if h.config.OnTakeover != nil {
-		h.config.OnTakeover(record.Tenant, record.DeviceID, candidate.DeviceID)
+		h.config.OnTakeover(info)
 	}
 	return replaced, true
 }
@@ -960,4 +988,15 @@ func itoa(v int) string {
 		v /= 10
 	}
 	return string(b[i:])
+}
+
+// describeAddr is "203.0.113.5 (VN)", or "unknown".
+func describeAddr(addr netip.Addr, country string) string {
+	if !addr.IsValid() {
+		return "unknown"
+	}
+	if country == "" {
+		return addr.String()
+	}
+	return addr.String() + " (" + country + ")"
 }
