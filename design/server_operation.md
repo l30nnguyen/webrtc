@@ -749,7 +749,7 @@ has its own folder, and a binary goes only to the models it was built for:
 
 | Model | Build | Folder |
 |---|---|---|
-| HCX130 | C++ (`libdatachannel_c14/compile.sh`, toolchain anykav330); publish with `publish_firmware.sh HCX130` | `/downloads/HCX130/` |
+| HCX130 | C (`matrix_c`) since 2026-11-13: `./build.sh anycloud` (toolchain `/usr/local/arm/arm-anycloud-linux-uclibcgnueabi`, GCC 5.5.0), then `scripts/package_anykav200.sh anycloud`; publish by hand like the other C models (do **not** use `publish_firmware.sh`, which publishes the C++ build). The C++ build (`libdatachannel_c14/compile.sh`) is kept for rollback | `/downloads/HCX130/` |
 | GIRAFFE_HD (old cameras that can't run C++); HCX330L | C (`matrix_c`): `./build.sh anykav200` for GIRAFFE_HD, `./build.sh anykav500` for HCX330L, then `scripts/package_anykav200.sh <platform>` | `/downloads/GIRAFFE_HD/`, `/downloads/HCX330L/` (different builds) |
 
 Before a publish, copy the folder's current files to
