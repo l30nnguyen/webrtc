@@ -1,6 +1,6 @@
 # Roll-out of matrix
 
-Updated 2026-11-11. This covers:
+Updated 2026-11-13. This covers:
 - what is released and where it runs
 - the code review findings
 - what matrix still needs to be run the way vrelay is run (`~/code/vrelay`,

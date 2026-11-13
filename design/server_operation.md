@@ -1,6 +1,6 @@
 # Server operation
 
-Updated 2026-11-11. This is the hand-over guide for the person who runs the
+Updated 2026-11-13. This is the hand-over guide for the person who runs the
 matrix servers and deploys them. It covers:
 - how the servers fit together
 - how to add or remove one
