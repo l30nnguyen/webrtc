@@ -75,10 +75,13 @@ it is back. Section 1.4 has the plan to fix this (R21).
 - **Control nodes**: each one opens a link to the Center and keeps it open.
   The Center pushes each new configuration to every node. A node keeps
   serving its cameras if the Center goes down.
-- **Relays** need no entry in `config.json`. A relay is used once its
-  region's control server has its shared secret in
-  `/opt/matrix/cfg/relay-secrets.json`. A relay is known only to the control
-  server it reports to, so there is no backup from another region yet (R12).
+- **Relays** report to their own region's control server (us00 to the
+  Center, sg00 to sg00). Since 2026-11-13 (R12, config.json version 3) both
+  relays are also listed in `config.json`, and every control server holds
+  every relay's shared secret in `/opt/matrix/cfg/relay-secrets.json`. Each
+  viewing session gets its region's relay plus the other region's as a
+  backup; a relay that is down is skipped. A new relay must be added to
+  `config.json` and its secret to every control server.
 - **Viewing path**: the viewer asks the Center, the Center sends it to the
   node the camera is on, and that node offers the camera's relay. Each
   viewing session holds 2 relay allocations (one for the camera, one for the
@@ -798,5 +801,5 @@ Certificates on 2026-11-10: `matrix.5gen.care` to 2027-01-25 and
 | R4 | No graceful shutdown | every restart drops sessions for a few seconds |
 | R5 | No alerting | the daily check above is the only monitoring |
 | R6 | No `deploy.sh all`, relay installer or new-node script | follow section 3 by hand |
-| R12 | No cross-region backup relay | if a region's only relay dies, relayed views in that region fail until it is back |
+| R12 | One relay per region (other region is the backup since 2026-11-13) | if a region's relay dies, its relayed views go to the other region's relay, with more delay. A second relay per region removes that |
 | R21 | One Center | while the Center is down or restarting, no new connection or view can start anywhere. Plan: section 1.4 |
