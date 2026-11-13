@@ -39,6 +39,11 @@ type Claims struct {
 	// CameraID scopes a viewer ticket to one activated camera. Empty for
 	// camera tickets and older unscoped player tickets.
 	CameraID string `json:"cid,omitempty"`
+	// Country is the ISO 3166 code of the address the ticket was issued
+	// to (the Center's IP-to-country lookup), for per-country statistics
+	// (ST-1). Empty when unknown. Servers before 2.7.0 refuse tickets that
+	// carry it: upgrade every control server before the Center.
+	Country  string `json:"cc,omitempty"`
 	IssuedAt int64  `json:"iat"`
 	Expires  int64  `json:"exp"`
 	TokenID  string `json:"jti"`
@@ -55,8 +60,11 @@ type TicketSigner struct {
 	KeyID      string
 	Audience   string
 	Lifetime   time.Duration // zero means DefaultTicketLifetime
-	Now        func() time.Time
-	Random     io.Reader
+	// Country goes into the ticket as its cc claim when it is a valid
+	// two-letter code (ValidCountry); anything else is left out.
+	Country string
+	Now     func() time.Time
+	Random  io.Reader
 }
 
 // EffectiveLifetime is the ticket lifetime the signer will use.
@@ -102,6 +110,9 @@ func (s TicketSigner) sign(deviceID, digest, tenant, role, cameraID string) (str
 	}
 	h := header{Algorithm: "EdDSA", KeyID: s.KeyID, Type: "JWT"}
 	c := Claims{Issuer: "center", Subject: deviceID, Role: role, Tenant: tenant, Audience: s.Audience, Digest: digest, CameraID: cameraID, IssuedAt: nowSeconds, Expires: nowSeconds + int64(lifetime.Seconds()), TokenID: base64.RawURLEncoding.EncodeToString(jtiBytes[:])}
+	if ValidCountry(s.Country) {
+		c.Country = s.Country
+	}
 	hb, err := json.Marshal(h)
 	if err != nil {
 		return "", err
@@ -178,7 +189,7 @@ func (v TicketVerifier) verify(token, deviceID string) (Claims, error) {
 	if nowSec > int64(^uint64(0)>>1)-int64(MaxTicketLifetime.Seconds()) {
 		maxExpiry = int64(^uint64(0) >> 1)
 	}
-	if c.Issuer != "center" || !ValidDeviceID(c.Subject) || (deviceID != "" && c.Subject != deviceID) || !validRole(c.Role) || !validTenant(c.Tenant) || c.Audience != v.Audience || !validDigest(c.Digest) || (c.CameraID != "" && (c.Role != RolePlayer || !ValidDeviceID(c.CameraID))) || c.IssuedAt < 0 || c.IssuedAt > nowSec+int64(ClockLeeway.Seconds()) || c.Expires <= nowSec || c.Expires > maxExpiry || c.Expires <= c.IssuedAt || c.Expires-c.IssuedAt > int64(MaxTicketLifetime.Seconds()) || !validTokenID(c.TokenID) {
+	if c.Issuer != "center" || !ValidDeviceID(c.Subject) || (deviceID != "" && c.Subject != deviceID) || !validRole(c.Role) || !validTenant(c.Tenant) || c.Audience != v.Audience || !validDigest(c.Digest) || (c.CameraID != "" && (c.Role != RolePlayer || !ValidDeviceID(c.CameraID))) || (c.Country != "" && !ValidCountry(c.Country)) || c.IssuedAt < 0 || c.IssuedAt > nowSec+int64(ClockLeeway.Seconds()) || c.Expires <= nowSec || c.Expires > maxExpiry || c.Expires <= c.IssuedAt || c.Expires-c.IssuedAt > int64(MaxTicketLifetime.Seconds()) || !validTokenID(c.TokenID) {
 		return Claims{}, errors.New("invalid ticket")
 	}
 	return c, nil
@@ -273,6 +284,11 @@ func validDigest(value string) bool {
 	}
 	_, err := hex.DecodeString(value)
 	return err == nil
+}
+
+// ValidCountry reports whether cc is a two-letter upper-case country code.
+func ValidCountry(cc string) bool {
+	return len(cc) == 2 && cc[0] >= 'A' && cc[0] <= 'Z' && cc[1] >= 'A' && cc[1] <= 'Z'
 }
 
 func validRole(role string) bool { return role == RoleCamera || role == RolePlayer }

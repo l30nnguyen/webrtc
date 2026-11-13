@@ -39,7 +39,7 @@ func (s *Server) recordReport(c *Client, msg map[string]interface{}) {
 	if s.stats == nil && s.history == nil && s.events == nil {
 		return
 	}
-	report := stats.Report{Role: stats.RolePlayer}
+	report := stats.Report{Role: stats.RolePlayer, Country: c.Country}
 	if c.Role == admission.RoleCamera {
 		report.Role = stats.RoleCamera
 	}
@@ -78,7 +78,7 @@ func (s *Server) recordReport(c *Client, msg map[string]interface{}) {
 	// In the connection log, with the camera it was about: the reporting
 	// camera itself, or the camera the viewer's ticket was for.
 	e := events.Event{Type: events.Report, Role: "viewer", Result: report.Result, Error: report.Error, Path: report.Path,
-		SetupMillis: report.SetupMillis, RelayOffered: &report.RelayOffered, RelayReady: &report.RelayReady}
+		SetupMillis: report.SetupMillis, RelayOffered: &report.RelayOffered, RelayReady: &report.RelayReady, Country: c.Country}
 	if report.Role == stats.RoleCamera {
 		e.Role, e.Camera = "camera", c.ID
 	} else {

@@ -135,3 +135,35 @@ func TestCameraViewerTicketCarriesTargetCameraScope(t *testing.T) {
 		t.Fatalf("unexpected scoped viewer claims: %+v", claims)
 	}
 }
+
+func TestTicketCarriesValidCountryOnly(t *testing.T) {
+	public, private, err := ed25519.GenerateKey(rand.Reader)
+	if err != nil {
+		t.Fatal(err)
+	}
+	now := time.Date(2026, 11, 13, 12, 0, 0, 0, time.UTC)
+	verifier := TicketVerifier{PublicKey: public, KeyID: "center-v1", Audience: "wss://main.example.test/", Now: func() time.Time { return now }}
+	digest := hex.EncodeToString(make([]byte, 32))
+	for _, tc := range []struct{ in, want string }{{"VN", "VN"}, {"", ""}, {"vn", ""}, {"VNM", ""}, {"1A", ""}} {
+		signer := TicketSigner{PrivateKey: private, KeyID: "center-v1", Audience: verifier.Audience, Country: tc.in, Now: func() time.Time { return now }}
+		token, err := signer.Sign("cameraDevice01", digest, "acme01", RoleCamera)
+		if err != nil {
+			t.Fatal(err)
+		}
+		claims, err := verifier.Verify(token, "cameraDevice01")
+		if err != nil {
+			t.Fatalf("country %q: %v", tc.in, err)
+		}
+		if claims.Country != tc.want {
+			t.Fatalf("country %q: claim %q, want %q", tc.in, claims.Country, tc.want)
+		}
+	}
+}
+
+func TestValidCountry(t *testing.T) {
+	for cc, want := range map[string]bool{"VN": true, "US": true, "": false, "vn": false, "V": false, "VNM": false, "V1": false, "--": false} {
+		if ValidCountry(cc) != want {
+			t.Fatalf("ValidCountry(%q) = %v", cc, !want)
+		}
+	}
+}

@@ -58,6 +58,9 @@ type Event struct {
 	From          string   `json:"from,omitempty"`   // source address of a refusal
 	Detail        string   `json:"detail,omitempty"`
 	Version       string   `json:"version,omitempty"` // the reporter's software version
+	// Country is the viewer's country for a request or a viewer report, the
+	// camera's for a camera report (from the Center's ticket, ST-1).
+	Country string `json:"country,omitempty"`
 }
 
 // Log appends events to day files and removes files older than Days.

@@ -55,6 +55,51 @@ type Report struct {
 	RelayOffered bool
 	RelayReady   bool
 	SetupMillis  int // request to connected, connected only
+	// Country is the reporter's country from its ticket ("" when unknown):
+	// the viewer's for a viewer report, the camera's for a camera report.
+	Country string
+}
+
+// UnknownCountry is the Countries key for clients whose country is not known
+// (no country in their ticket, or a ticket from a Center before 2.7.0).
+const UnknownCountry = "--"
+
+// CountryKey is the Countries key for cc: cc itself when it is a two-letter
+// upper-case code, UnknownCountry otherwise. It keeps the map small.
+func CountryKey(cc string) string {
+	if len(cc) == 2 && cc[0] >= 'A' && cc[0] <= 'Z' && cc[1] >= 'A' && cc[1] <= 'Z' {
+		return cc
+	}
+	return UnknownCountry
+}
+
+// CountryCounts are one country's counters for a day (ST-1). Requests and
+// viewer reports count by the viewer's country, camera reports by the
+// camera's.
+type CountryCounts struct {
+	Requests        int `json:"requests,omitempty"`
+	ViewerConnected int `json:"viewer_connected,omitempty"`
+	ViewerFailed    int `json:"viewer_failed,omitempty"`
+	CameraConnected int `json:"camera_connected,omitempty"`
+	CameraFailed    int `json:"camera_failed,omitempty"`
+}
+
+func (c *CountryCounts) add(o CountryCounts) {
+	c.Requests += o.Requests
+	c.ViewerConnected += o.ViewerConnected
+	c.ViewerFailed += o.ViewerFailed
+	c.CameraConnected += o.CameraConnected
+	c.CameraFailed += o.CameraFailed
+}
+
+func (d *Day) country(cc string, change func(*CountryCounts)) {
+	if d.Countries == nil {
+		d.Countries = map[string]CountryCounts{}
+	}
+	key := CountryKey(cc)
+	counts := d.Countries[key]
+	change(&counts)
+	d.Countries[key] = counts
 }
 
 // Normalize validates a report, mapping unknown values to safe ones. It returns
@@ -137,6 +182,8 @@ type Day struct {
 	RateLimited int      `json:"rate_limited,omitempty"`
 	Camera      Outcomes `json:"camera"`
 	Player      Outcomes `json:"player"`
+	// Countries splits requests and outcomes by country (ST-1).
+	Countries map[string]CountryCounts `json:"countries,omitempty"`
 }
 
 // Add adds other's counters into d.
@@ -147,6 +194,9 @@ func (d *Day) Add(other Day) {
 	d.RateLimited += other.RateLimited
 	d.Camera.add(other.Camera)
 	d.Player.add(other.Player)
+	for cc, counts := range other.Countries {
+		d.country(cc, func(c *CountryCounts) { c.add(counts) })
+	}
 }
 
 // Days maps a UTC date (2006-01-02) to its counters.
@@ -187,7 +237,16 @@ func (c *Counters) update(change func(*Day)) {
 }
 
 // Request counts a viewer request forwarded to a camera.
-func (c *Counters) Request() { c.update(func(d *Day) { d.Requests++ }) }
+func (c *Counters) Request() { c.RequestFrom("") }
+
+// RequestFrom counts a viewer request from a viewer in country cc ("" when
+// unknown).
+func (c *Counters) RequestFrom(cc string) {
+	c.update(func(d *Day) {
+		d.Requests++
+		d.country(cc, func(cc *CountryCounts) { cc.Requests++ })
+	})
+}
 
 // CameraOffline counts a viewer request for a camera that is not connected.
 func (c *Counters) CameraOffline() { c.update(func(d *Day) { d.CameraOffline++ }) }
@@ -211,6 +270,18 @@ func (c *Counters) Record(r Report) {
 		if r.RelayReady {
 			o.RelayReady++
 		}
+		d.country(r.Country, func(cc *CountryCounts) {
+			switch {
+			case r.Role == RolePlayer && r.Result == ResultConnected:
+				cc.ViewerConnected++
+			case r.Role == RolePlayer:
+				cc.ViewerFailed++
+			case r.Result == ResultConnected:
+				cc.CameraConnected++
+			default:
+				cc.CameraFailed++
+			}
+		})
 		if r.Result == ResultConnected {
 			o.Connected++
 			o.Paths = addMap(o.Paths, map[string]int{r.Path: 1})

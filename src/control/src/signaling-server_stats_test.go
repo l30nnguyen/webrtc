@@ -1,12 +1,16 @@
 package main
 
 import (
+	"net/http"
+	"net/url"
 	"strings"
 	"testing"
 	"time"
 
 	"signaling-server/internal/admission"
 	"signaling-server/internal/stats"
+
+	"github.com/gorilla/websocket"
 )
 
 func waitFor(t *testing.T, what string, ok func() bool) {
@@ -68,5 +72,34 @@ func TestLocalReportListsCamerasOnly(t *testing.T) {
 	report := n.srv.LocalReport("wss://node.example.test/")
 	if report.Address != "wss://node.example.test/" || len(report.Cameras) != 1 || report.Cameras[0] != cameraID || report.Clients != 2 {
 		t.Fatalf("report = %+v", report)
+	}
+}
+
+func TestRequestsAndReportsAreCountedByTicketCountry(t *testing.T) {
+	n := newNode(t, func(s *Server) { s.SetStats(stats.New(nil)) })
+	today := func() stats.Day { return n.srv.stats.Snapshot()[time.Now().UTC().Format(time.DateOnly)] }
+	dialWith := func(id string, mutate func(*admission.Claims), role string) *websocket.Conn {
+		conn, response := n.dial("/" + id + "?ticket=" + url.QueryEscape(n.ticket(id, "acme01", role, mutate)))
+		if response.StatusCode != http.StatusSwitchingProtocols {
+			t.Fatalf("connect %s status = %d", id, response.StatusCode)
+		}
+		t.Cleanup(func() { conn.Close() })
+		n.waitRegistered("acme01", id)
+		return conn
+	}
+	camera := dialWith("camera0", func(c *admission.Claims) { c.Country = "SG" }, admission.RoleCamera)
+	viewerID := strings.Repeat("v", 43)
+	viewer := dialWith(viewerID, func(c *admission.Claims) { c.CameraID, c.Country = "camera0", "VN" }, admission.RolePlayer)
+
+	send(t, viewer, map[string]any{"type": "request", "id": "camera0", "password": "pw"})
+	if request := receive(camera, time.Second); request == nil || request["type"] != "request" {
+		t.Fatalf("request not forwarded: %v", request)
+	}
+	send(t, camera, map[string]any{"type": "report", "id": viewerID, "result": "connected", "path": "relay"})
+	send(t, viewer, map[string]any{"type": "report", "id": "camera0", "result": "connected", "path": "relay"})
+	waitFor(t, "both reports", func() bool { d := today(); return d.Camera.Connected == 1 && d.Player.Connected == 1 })
+	day := today()
+	if day.Countries["VN"] != (stats.CountryCounts{Requests: 1, ViewerConnected: 1}) || day.Countries["SG"] != (stats.CountryCounts{CameraConnected: 1}) {
+		t.Fatalf("countries = %+v", day.Countries)
 	}
 }

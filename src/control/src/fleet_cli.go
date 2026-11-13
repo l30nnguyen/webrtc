@@ -558,6 +558,8 @@ func (c fleetCLI) stats(days int) error {
 	}
 	table.Flush()
 
+	printCountries(c.out, t.Countries)
+
 	fmt.Fprintln(c.out)
 	table = tabwriter.NewWriter(c.out, 0, 0, 2, ' ', 0)
 	fmt.Fprintln(table, "NODE\tADDRESS\tREQUESTS\tCAMERA OK/FAILED\tVIEWER OK/FAILED")
@@ -637,4 +639,62 @@ func (c fleetCLI) pubkey(path string) error {
 	}
 	fmt.Fprintf(c.out, "\"public_key\": \"%s\"\n", base64.RawURLEncoding.EncodeToString(key.Public().(ed25519.PublicKey)))
 	return nil
+}
+
+// topCountries is how many countries the stats table lists before "other".
+const topCountries = 20
+
+// printCountries prints the per-country counters (ST-1), busiest first: the
+// top 20 by requests and reports, the rest added up as "other". "--" is
+// clients whose country is not known (tickets from before 2.7.0).
+func printCountries(out io.Writer, countries map[string]stats.CountryCounts) {
+	if len(countries) == 0 {
+		return
+	}
+	busy := func(c stats.CountryCounts) int {
+		return c.Requests + c.ViewerConnected + c.ViewerFailed + c.CameraConnected + c.CameraFailed
+	}
+	keys := make([]string, 0, len(countries))
+	for cc := range countries {
+		keys = append(keys, cc)
+	}
+	sort.Slice(keys, func(i, j int) bool {
+		if bi, bj := busy(countries[keys[i]]), busy(countries[keys[j]]); bi != bj {
+			return bi > bj
+		}
+		return keys[i] < keys[j]
+	})
+	type row struct {
+		name string
+		c    stats.CountryCounts
+	}
+	rows := []row{}
+	var other stats.CountryCounts
+	for i, cc := range keys {
+		if i < topCountries {
+			rows = append(rows, row{cc, countries[cc]})
+			continue
+		}
+		c := countries[cc]
+		other.Requests += c.Requests
+		other.ViewerConnected += c.ViewerConnected
+		other.ViewerFailed += c.ViewerFailed
+		other.CameraConnected += c.CameraConnected
+		other.CameraFailed += c.CameraFailed
+	}
+	if len(keys) > topCountries {
+		rows = append(rows, row{fmt.Sprintf("other (%d)", len(keys)-topCountries), other})
+	}
+	fmt.Fprintln(out)
+	table := tabwriter.NewWriter(out, 0, 0, 2, ' ', 0)
+	fmt.Fprintln(table, "COUNTRY\tREQUESTS\tVIEWER OK/FAILED\tVIEWER OK %\tCAMERA OK/FAILED")
+	for _, r := range rows {
+		pct := "-"
+		if n := r.c.ViewerConnected + r.c.ViewerFailed; n > 0 {
+			pct = fmt.Sprintf("%.1f%%", 100*float64(r.c.ViewerConnected)/float64(n))
+		}
+		fmt.Fprintf(table, "%s\t%d\t%d/%d\t%s\t%d/%d\n", r.name, r.c.Requests, r.c.ViewerConnected, r.c.ViewerFailed, pct, r.c.CameraConnected, r.c.CameraFailed)
+	}
+	table.Flush()
+	fmt.Fprintln(out, "Viewers count by the viewer's country, cameras by the camera's; -- is unknown.")
 }

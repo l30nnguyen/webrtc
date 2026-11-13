@@ -544,6 +544,7 @@ func (h *Handler) handleVerify(w http.ResponseWriter, r *http.Request) {
 	signer := h.config.Signer
 	signer.Audience = node
 	signer.Now = h.now
+	signer.Country = strings.ToUpper(h.country(r)) // per-country statistics (ST-1)
 	ticket, err := signer.Sign(deviceID, digest, verified.Tenant, role)
 	if err != nil {
 		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "verification unavailable"})
@@ -776,6 +777,7 @@ func (h *Handler) handleView(w http.ResponseWriter, r *http.Request) {
 	signer.Audience = node
 	signer.Lifetime = time.Minute
 	signer.Now = h.now
+	signer.Country = strings.ToUpper(h.country(r)) // the viewer's country (ST-1)
 	ticket, err := signer.SignCameraViewer(viewerID, digest, verified.Tenant, activation.DeviceID)
 	if err != nil {
 		h.unavailable(w)

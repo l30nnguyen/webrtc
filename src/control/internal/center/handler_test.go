@@ -11,6 +11,7 @@ import (
 	"fmt"
 	"net/http"
 	"net/http/httptest"
+	"net/netip"
 	"os"
 	"path/filepath"
 	"strings"
@@ -911,5 +912,32 @@ func TestReleaseFailsClosedWhenTheBlocklistCannotBeWritten(t *testing.T) {
 		if got := e.adminStatus(sidText)["state"]; got != "bound" {
 			t.Fatalf("a failed release left the SID %v, want bound", got)
 		}
+	}
+}
+
+func TestTicketsCarryTheCallersCountry(t *testing.T) {
+	e := newEnv(t, func(c *Config) {
+		c.Country = func(netip.Addr) string { return "vn" }
+	})
+	camera := newDevice()
+	sidText := e.issue("acme01", sid.FlagPublisher, e.now.Add(-time.Hour))
+	if claims := e.claims(e.mustVerify(camera, sidText).Ticket); claims.Country != "VN" {
+		t.Fatalf("camera ticket country = %q", claims.Country)
+	}
+	response := e.do(http.MethodPost, "/v1/view", map[string]string{"sid": sidText}, nil)
+	var result viewResult
+	if err := json.Unmarshal(response.Body.Bytes(), &result); err != nil || response.Code != http.StatusOK {
+		t.Fatalf("view status=%d body=%s", response.Code, response.Body.String())
+	}
+	if claims := e.claims(result.Ticket); claims.Country != "VN" {
+		t.Fatalf("viewer ticket country = %q", claims.Country)
+	}
+}
+
+func TestTicketsWithoutCountryLookupHaveNoCountry(t *testing.T) {
+	e := newEnv(t)
+	sidText := e.issue("acme01", sid.FlagPublisher, e.now.Add(-time.Hour))
+	if claims := e.claims(e.mustVerify(newDevice(), sidText).Ticket); claims.Country != "" {
+		t.Fatalf("country = %q", claims.Country)
 	}
 }

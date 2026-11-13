@@ -68,6 +68,7 @@ type Client struct {
 	Role          string // admission.RoleCamera or admission.RolePlayer
 	Digest        string // SID digest from the ticket; empty without admission
 	CameraIDScope string // nonempty for viewer tickets limited to one camera
+	Country       string // from the ticket (ST-1); empty when unknown
 	registeredSID string // in-memory camera SID; only emitted by configured discovery
 	Conn          *websocket.Conn
 	Info          *DeviceInfo
@@ -318,7 +319,7 @@ func (s *Server) handleWebSocket(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "Client ID required", http.StatusBadRequest)
 		return
 	}
-	tenant, role, digest, cameraIDScope := "", admission.RoleCamera, "", ""
+	tenant, role, digest, cameraIDScope, country := "", admission.RoleCamera, "", "", ""
 	var spend *admission.Claims
 	if strings.HasPrefix(clientID, "Player") {
 		role = admission.RolePlayer
@@ -352,6 +353,7 @@ func (s *Server) handleWebSocket(w http.ResponseWriter, r *http.Request) {
 				return
 			}
 			tenant, role, digest, cameraIDScope = claims.Tenant, claims.Role, claims.Digest, claims.CameraID
+			country = claims.Country
 			spend = &claims
 		}
 		// Remove the bearer ticket from the request object before upgrade and any
@@ -400,6 +402,7 @@ func (s *Server) handleWebSocket(w http.ResponseWriter, r *http.Request) {
 		Role:          role,
 		Digest:        digest,
 		CameraIDScope: cameraIDScope,
+		Country:       country,
 		Conn:          conn,
 		Info: &DeviceInfo{
 			ID:          clientID,
@@ -606,8 +609,8 @@ func (s *Server) readPump(c *Client) {
 				if len(servers) > 0 {
 					msg["turn"] = servers
 				}
-				s.countStat("requests", (*stats.Counters).Request)
-				s.addEvent(events.Event{Type: events.Request, Camera: dest.ID, Viewer: c.ID, Result: "forwarded", Relays: s.relayNames(servers)})
+				s.countStat("requests", func(counters *stats.Counters) { counters.RequestFrom(c.Country) })
+				s.addEvent(events.Event{Type: events.Request, Camera: dest.ID, Viewer: c.ID, Result: "forwarded", Relays: s.relayNames(servers), Country: c.Country})
 			}
 			if c.Role == admission.RoleCamera && dest.Role == admission.RolePlayer && msg["type"] == "offer" {
 				s.addRelayURLs(msg)

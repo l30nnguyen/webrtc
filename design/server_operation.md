@@ -780,7 +780,7 @@ still worth 5 minutes a day: it shows trends the alerts don't.
 | Tool | What it shows | How |
 |---|---|---|
 | `sudo matrix-fleet status` on the **Center** | every node and relay: up/down, cameras, clients, load, CPU, memory, disk, network, version, config version, last report | `./vps.sh prod_us`, then the command |
-| `sudo matrix-fleet stats 7` on the Center | per day and node: requests, connected/failed by path, errors | same |
+| `sudo matrix-fleet stats 7` on the Center | per day and node: requests, connected/failed by path, errors; since 2.7.0 also per country (top 20 and other): requests and viewer success by the viewer's country, camera reports by the camera's (`--` = unknown) | same |
 | `/admin/statistic` on each control server | charts per 30 min (cameras, viewers, success, relay protocol, machine %), and the connection log (each request, report, error cause, player version) | from the office IP: `https://matrix.5gen.care/admin/statistic`, `https://matrix-sg00.5gen.care/admin/statistic` |
 | Health URLs | `{"status":"ok","clients":N,"version":...}` | `curl -s https://<server>/api/health` (public) |
 | Relay metrics | `matrix_relay_allocations`, `matrix_relay_quota_rejects_total`, `matrix_relay_auth_failures_total`, `turn_total_traffic_sentb` ... | on the relay: `curl -s 127.0.0.1:9641/metrics` |
