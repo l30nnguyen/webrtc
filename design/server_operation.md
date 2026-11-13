@@ -342,9 +342,10 @@ There is one Center today. The planned Centers (`center-us`, `center-sg`,
 later `center-eu`) are in section 1.4.
 
 **Not part of the fleet. Do not change:**
-- The AWS dev VPS `webrtc.5gen.care` (3.95.228.203) will become the license
-  server. It runs the testers' old `webrtc_prod` and its violet relay.
-  **Never restart or touch `webrtc_prod`.**
+- The AWS server `webrtc.5gen.care` (3.95.228.203) is the admin server
+  (section 3.6): backups now, deploys and the license service later. Until
+  its dev services are turned off it still runs the testers' old
+  `webrtc_prod` and its violet relay. **Never restart or touch `webrtc_prod`.**
 - The old AWS Center (34.228.78.198) is retired and is waiting to be deleted
   (R2).
 
@@ -364,7 +365,7 @@ through a password manager, never by chat, e-mail, git or Drive.
 | DNS (zone `5gen.care`) | — | AWS Route53 | managed by the project owner: ask for each new A record |
 | `/admin/statistic` (charts, connection log) | none | allowed by IP: `STATISTIC_ALLOW` / `PLAYER_ALLOW` in `/etc/matrix/matrix.conf`, now only the office IP 115.78.12.186 | to open it from elsewhere, add the IP there and run `setup.sh upgrade` (section 4.4) |
 | `matrix-fleet status/stats` | `root` on a control server | local admin socket `/run/matrix/admin.sock`, no network port | — |
-| Server secrets on disk | — | stay on the servers; never copy them out | Center keys `/opt/matrix/cfg/sid/` (`center-ticket.key.pem`, `admin.token`, `tenants.json`, activations); relay secrets `/opt/matrix/cfg/relay-secrets.json` (control) and `/etc/matrix-relay/secrets.json` (relay); node link key `/opt/matrix/cfg/sid/node.key` |
+| Server secrets on disk | — | stay on the servers; only `matrix-backup` copies them out, encrypted (section 3.6) | Center keys `/opt/matrix/cfg/sid/` (`center-ticket.key.pem`, `admin.token`, `tenants.json`, activations); relay secrets `/opt/matrix/cfg/relay-secrets.json` (control) and `/etc/matrix-relay/secrets.json` (relay); node link key `/opt/matrix/cfg/sid/node.key` |
 
 Adding the new operator's key (they send their **public** key `id_ed25519.pub`):
 
