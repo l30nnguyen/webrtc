@@ -17,7 +17,7 @@
 set -euo pipefail
 
 HOME_DIR=/opt/matrix-admin
-SERVERS=$HOME_DIR/servers.conf          # name host role(center|node|relay)
+SERVERS=$HOME_DIR/servers.conf          # name host role(center|node|relay) [public hostname, for matrix-monitor]
 SSH_KEY=$HOME_DIR/keys/ssh.pem          # root login to every server
 PUBKEY=$HOME_DIR/keys/backup.pub.asc    # backup public key
 STORE=$HOME_DIR/backups
@@ -46,7 +46,7 @@ servers() {
 cmd_push_tool() {
     [[ -f "$TOOL_SRC" && -f "$PUBKEY" ]] || die "missing $TOOL_SRC or $PUBKEY"
     local name host role
-    while read -r name host role; do
+    while read -r name host role _; do
         scp "${SSH_OPTS[@]}" -q "$TOOL_SRC" "$PUBKEY" "root@$host:/tmp/" &&
         ssh "${SSH_OPTS[@]}" "root@$host" </dev/null 'install -m 755 /tmp/matrix-backup /usr/local/sbin/matrix-backup &&
             matrix-backup install-key /tmp/backup.pub.asc && rm -f /tmp/matrix-backup /tmp/backup.pub.asc' |
@@ -70,7 +70,7 @@ is_encrypted() {
 
 cmd_backup() {
     local name host role failed=0 file tmp size
-    while read -r name host role; do
+    while read -r name host role _; do
         install -d -m 700 "$STORE/$name"
         file="$STORE/$name/$(date -u +%Y%m%dT%H%M%SZ).tar.gz.gpg"
         tmp="$STORE/$name/.incoming"

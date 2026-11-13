@@ -1,0 +1,484 @@
+#!/usr/bin/env python3
+"""matrix-monitor: alerts for the Matrix fleet, run on the admin server (roll-out.md R5).
+
+Every 2 minutes (systemd timer) it checks, from outside DigitalOcean:
+  - each control server's https://<hostname>/api/health (status, version)
+  - each relay stream server answers on UDP 3478, TCP 80 and TLS 443
+  - certificate expiry of every hostname
+  - the Center's `matrix-fleet -json status`: every node and relay healthy,
+    reporting, relay TCP/TLS up, CPU/memory/disk below the limits
+  - each control server's event log: takeover ALERTs (R1), and the share of
+    failed viewing sessions in the last 15 minutes
+  - each relay's quota rejects (relay full) and login failures
+  - the nightly backups (matrix-admin) are fresh
+and sends a Telegram message when a check starts failing (after FAILS_TO_ALERT
+runs in a row) and when it recovers. A summary goes out once a day at
+SUMMARY_HOUR_UTC (01 UTC = 08:00 in Vietnam): no summary means the monitor
+itself is down.
+
+  matrix-monitor run          one round of checks (the timer runs this)
+  matrix-monitor status       the current state of every check
+  matrix-monitor summary      send the daily summary now
+  matrix-monitor test         send a test message to Telegram
+  sudo matrix-monitor install install the 2-minute systemd timer
+
+Files (owner admin, 0700 folder):
+  /opt/matrix-admin/servers.conf            name host role [hostname]
+  /opt/matrix-admin/monitor/telegram.env    TELEGRAM_TOKEN=... and TELEGRAM_CHAT=... (0600)
+  /opt/matrix-admin/monitor/monitor.env     optional limits, e.g. FAIL_RATE_PCT=20
+  /opt/matrix-admin/monitor/state.json      check state, pending messages
+The Telegram token is read from telegram.env only and never printed.
+"""
+import json
+import os
+import pathlib
+import socket
+import ssl
+import struct
+import subprocess
+import sys
+import time
+import urllib.error
+import urllib.parse
+import urllib.request
+from datetime import datetime, timezone
+
+HOME = pathlib.Path("/opt/matrix-admin")
+MON = HOME / "monitor"
+SERVERS = HOME / "servers.conf"
+STATE = MON / "state.json"
+BACKUPS = HOME / "backups"
+SSH = ["ssh", "-i", str(HOME / "keys/ssh.pem"), "-o", "BatchMode=yes", "-o", "ConnectTimeout=15",
+       "-o", "StrictHostKeyChecking=accept-new", "-o", f"UserKnownHostsFile={HOME / 'keys/known_hosts'}"]
+EVENTS_DIR = "/opt/matrix/cfg/sid/events"
+
+
+def load_env(path):
+    out = {}
+    try:
+        for line in path.read_text().splitlines():
+            line = line.strip()
+            if line and not line.startswith("#") and "=" in line:
+                k, v = line.split("=", 1)
+                out[k.strip()] = v.strip().strip('"').strip("'")
+    except FileNotFoundError:
+        pass
+    return out
+
+
+LIMITS = {
+    "FAILS_TO_ALERT": 2,       # failing runs in a row before an alert (2 runs = about 4 minutes)
+    "CERT_DAYS": 14,           # alert when a certificate expires sooner
+    "CPU_PCT": 85, "MEM_PCT": 90, "DISK_PCT": 85,
+    "REPORT_AGE_S": 300,       # a node's or relay's last report older than this: silent
+    "FAIL_WINDOW_S": 900,      # viewing success window
+    "FAIL_RATE_PCT": 20,       # alert when more failed in the window ...
+    "FAIL_MIN": 3,             # ... and at least this many failed
+    "AUTH_FAIL_PER_RUN": 50,   # relay login failures between two runs
+    "BACKUP_AGE_H": 36,
+    "SUMMARY_HOUR_UTC": 1,
+}
+LIMITS.update({k: int(v) for k, v in load_env(MON / "monitor.env").items() if k in LIMITS})
+
+
+def now():
+    return time.time()
+
+
+def iso(ts):
+    return datetime.fromtimestamp(ts, timezone.utc).strftime("%Y-%m-%d %H:%M UTC")
+
+
+def servers():
+    out = []
+    for line in SERVERS.read_text().splitlines():
+        f = line.split()
+        if not f or f[0].startswith("#"):
+            continue
+        out.append({"name": f[0], "host": f[1], "role": f[2], "hostname": f[3] if len(f) > 3 else ""})
+    return out
+
+
+def ssh(host, command, stdin=None, timeout=60):
+    r = subprocess.run(SSH + [f"root@{host}", command], input=stdin, capture_output=True, text=True, timeout=timeout)
+    if r.returncode != 0:
+        raise RuntimeError((r.stderr.strip().splitlines() or [f"ssh exit {r.returncode}"])[-1][:200])
+    return r.stdout
+
+
+# ---- probes ---------------------------------------------------------------
+
+def tls_days(hostname, port=443, ip=None):
+    ctx = ssl.create_default_context()
+    with socket.create_connection((ip or hostname, port), timeout=10) as raw:
+        with ctx.wrap_socket(raw, server_hostname=hostname) as s:
+            cert = s.getpeercert()
+    return (ssl.cert_time_to_seconds(cert["notAfter"]) - now()) / 86400
+
+
+def health(hostname):
+    with urllib.request.urlopen(f"https://{hostname}/api/health", timeout=15) as r:
+        return json.loads(r.read())
+
+
+def stun_request():
+    tid = os.urandom(12)
+    return struct.pack("!HHI", 1, 0, 0x2112A442) + tid, tid
+
+
+def stun_ok(data, tid):
+    return len(data) >= 20 and struct.unpack("!H", data[:2])[0] == 0x0101 and data[8:20] == tid
+
+
+def stun_udp(ip, port=3478):
+    msg, tid = stun_request()
+    with socket.socket(socket.AF_INET, socket.SOCK_DGRAM) as s:
+        s.settimeout(2)
+        for _ in range(3):
+            s.sendto(msg, (ip, port))
+            try:
+                if stun_ok(s.recv(2048), tid):
+                    return True
+            except socket.timeout:
+                pass
+    return False
+
+
+def stun_stream(ip, port, tls_host=None):
+    msg, tid = stun_request()
+    with socket.create_connection((ip, port), timeout=8) as raw:
+        s = ssl.create_default_context().wrap_socket(raw, server_hostname=tls_host) if tls_host else raw
+        s.settimeout(8)
+        s.sendall(msg)
+        return stun_ok(s.recv(2048), tid)
+
+
+# Runs on a control server: counts from its event log.
+EVENTS_SCRIPT = r'''
+import json, os, sys, time
+from datetime import datetime, timezone, timedelta
+since_alerts, window = float(sys.argv[1]), float(sys.argv[2])
+d, now = sys.argv[3], time.time()
+start = min(since_alerts, now - window)
+out = {"connected": 0, "failed": 0, "errors": {}, "requests": 0, "alerts": [], "takeovers": 0, "last_t": since_alerts}
+day = datetime.fromtimestamp(start, timezone.utc).date()
+while day <= datetime.now(timezone.utc).date():
+    try:
+        f = open(os.path.join(d, day.isoformat() + ".jsonl"))
+    except OSError:
+        day += timedelta(days=1); continue
+    for line in f:
+        try:
+            e = json.loads(line)
+            t = datetime.strptime(e["t"][:19], "%Y-%m-%dT%H:%M:%S").replace(tzinfo=timezone.utc).timestamp()
+        except Exception:
+            continue
+        if t > since_alerts and e.get("type") == "camera" and e.get("result") == "takeover":
+            out["takeovers"] += 1
+            if e.get("detail", "").startswith("ALERT"):
+                out["alerts"].append(e["detail"][:400])
+        if t > since_alerts:
+            out["last_t"] = max(out["last_t"], t)
+        if t < now - window:
+            continue
+        if e.get("type") == "request":
+            out["requests"] += 1
+        elif e.get("type") == "report" and e.get("role") == "viewer":
+            if e.get("result") == "connected":
+                out["connected"] += 1
+            elif e.get("result") == "failed":
+                out["failed"] += 1
+                k = e.get("error") or "unknown"
+                out["errors"][k] = out["errors"].get(k, 0) + 1
+    f.close()
+    day += timedelta(days=1)
+print(json.dumps(out))
+'''
+
+
+def events(host, since_alerts, window):
+    return json.loads(ssh(host, f"python3 - {since_alerts:.3f} {window} {EVENTS_DIR}", stdin=EVENTS_SCRIPT))
+
+
+def relay_metrics(host):
+    out = {}
+    for line in ssh(host, "curl -s --max-time 5 http://127.0.0.1:9641/metrics").splitlines():
+        if line and not line.startswith("#"):
+            k, _, v = line.rpartition(" ")
+            try:
+                out[k] = float(v)
+            except ValueError:
+                pass
+    return out
+
+
+def backup_ages():
+    ages = {}
+    for d in sorted(BACKUPS.glob("*/")):
+        if d.name == "sids":
+            continue
+        files = sorted(d.glob("*.gpg"))
+        ages[d.name] = (now() - files[-1].stat().st_mtime) / 3600 if files else None
+    return ages
+
+
+# ---- state and Telegram ---------------------------------------------------
+
+def load_state():
+    try:
+        return json.loads(STATE.read_text())
+    except (FileNotFoundError, ValueError):
+        return {"checks": {}, "pending": [], "since": {}, "relay": {}}
+
+
+def save_state(st):
+    tmp = STATE.with_suffix(".tmp")
+    tmp.write_text(json.dumps(st, indent=1, sort_keys=True))
+    os.chmod(tmp, 0o600)
+    tmp.replace(STATE)
+
+
+def telegram(text):
+    env = load_env(MON / "telegram.env")
+    token, chat = env.get("TELEGRAM_TOKEN"), env.get("TELEGRAM_CHAT")
+    if not token or not chat:
+        raise RuntimeError(f"TELEGRAM_TOKEN or TELEGRAM_CHAT missing in {MON / 'telegram.env'}")
+    data = urllib.parse.urlencode({"chat_id": chat, "text": text[:4000], "disable_web_page_preview": "true"}).encode()
+    try:
+        with urllib.request.urlopen(f"https://api.telegram.org/bot{token}/sendMessage", data=data, timeout=20) as r:
+            if json.loads(r.read()).get("ok") is not True:
+                raise RuntimeError("Telegram refused the message")
+    except urllib.error.HTTPError as e:  # keep the token out of the error text
+        raise RuntimeError(f"Telegram HTTP {e.code}") from None
+    except urllib.error.URLError as e:
+        raise RuntimeError(f"Telegram unreachable: {e.reason}") from None
+
+
+def flush(st):
+    while st["pending"]:
+        try:
+            telegram(st["pending"][0])
+        except Exception as e:
+            print(f"matrix-monitor: send failed, kept for the next run: {e}", file=sys.stderr)
+            return
+        st["pending"].pop(0)
+
+
+class Round:
+    def __init__(self, st):
+        self.st, self.seen, self.notes = st, set(), []
+
+    def check(self, key, ok, problem=""):
+        """A state check: alert after FAILS_TO_ALERT failing runs, again on recovery."""
+        self.seen.add(key)
+        c = self.st["checks"].setdefault(key, {"fails": 0, "alerted": False})
+        if ok:
+            if c["alerted"]:
+                mins = int((now() - c.get("since", now())) / 60)
+                self.st["pending"].append(f"✅ RECOVERED {key} (after {mins} min)")
+            self.st["checks"][key] = {"fails": 0, "alerted": False}
+            return
+        if c["fails"] == 0:
+            c["since"] = now()
+        c["fails"] += 1
+        c["problem"] = problem
+        if not c["alerted"] and c["fails"] >= LIMITS["FAILS_TO_ALERT"]:
+            c["alerted"] = True
+            self.st["pending"].append(f"🔴 PROBLEM {key}: {problem} (since {iso(c['since'])})")
+
+    def note(self, text):
+        """A one-off message (takeover ALERT)."""
+        self.st["pending"].append(text)
+
+
+def run_checks(st):
+    r = Round(st)
+    srv = servers()
+    center = next((s for s in srv if s["role"] == "center"), None)
+    versions = {}
+    for s in srv:
+        name, host, hn = s["name"], s["host"], s["hostname"]
+        if s["role"] in ("center", "node"):
+            if hn:
+                try:
+                    h = health(hn)
+                    versions[name] = h.get("version", "?")
+                    r.check(f"{name} health", h.get("status") == "ok", f"status {h.get('status')}")
+                except Exception as e:
+                    r.check(f"{name} health", False, f"https://{hn}/api/health: {e}")
+            # event log: takeover ALERTs since the last run, viewing success in the window
+            key = f"{name} events"
+            since = st["since"].get(name, now() - LIMITS["FAIL_WINDOW_S"])
+            try:
+                ev = events(host, since, LIMITS["FAIL_WINDOW_S"])
+                r.check(key, True)
+                st["since"][name] = ev["last_t"]
+                for a in ev["alerts"]:
+                    r.note(f"🚨 {name}: {a}")
+                total = ev["connected"] + ev["failed"]
+                bad = ev["failed"] >= LIMITS["FAIL_MIN"] and ev["failed"] * 100 >= LIMITS["FAIL_RATE_PCT"] * total
+                errs = ", ".join(f"{k} {v}" for k, v in sorted(ev["errors"].items(), key=lambda x: -x[1]))
+                r.check(f"{name} viewing", not bad,
+                        f"{ev['failed']} of {total} viewing sessions failed in {LIMITS['FAIL_WINDOW_S'] // 60} min ({errs})")
+            except Exception as e:
+                r.check(key, False, f"cannot read the event log: {e}")
+        elif s["role"] == "relay":
+            probes = [("udp", lambda: stun_udp(host)), ("tcp", lambda: stun_stream(host, 80))]
+            if hn:
+                probes.append(("tls", lambda: stun_stream(host, 443, hn)))
+            for proto, fn in probes:
+                try:
+                    ok = fn()
+                except Exception:
+                    ok = False
+                r.check(f"{name} {proto}", ok, f"no answer on {proto.upper()} from outside")
+            try:
+                m = relay_metrics(host)
+                prev = st["relay"].get(name, {})
+                q = m.get("matrix_relay_quota_rejects_total", 0) - prev.get("q", m.get("matrix_relay_quota_rejects_total", 0))
+                a = m.get("matrix_relay_auth_failures_total", 0) - prev.get("a", m.get("matrix_relay_auth_failures_total", 0))
+                st["relay"][name] = {"q": m.get("matrix_relay_quota_rejects_total", 0), "a": m.get("matrix_relay_auth_failures_total", 0)}
+                r.check(f"{name} full", q <= 0, f"{int(q)} allocations refused (relay full, -max)")
+                r.check(f"{name} logins", a < LIMITS["AUTH_FAIL_PER_RUN"], f"{int(a)} login failures in 2 min")
+                r.check(f"{name} metrics", True)
+            except Exception as e:
+                r.check(f"{name} metrics", False, f"cannot read metrics: {e}")
+        if hn:
+            try:
+                days = tls_days(hn, ip=host)
+                r.check(f"{name} certificate", days >= LIMITS["CERT_DAYS"], f"{hn} expires in {days:.0f} days (renewal failing?)")
+            except Exception as e:
+                r.check(f"{name} certificate", False, f"{hn}: {e}")
+        r.check(f"{name} ssh", True)
+
+    # fleet view from the Center
+    if center:
+        try:
+            fl = json.loads(ssh(center["host"], "matrix-fleet -json status"))
+            r.check("fleet status", True)
+            t = now()
+            for n in fl.get("nodes", []):
+                k = f"{n['name']} node"
+                age = t - datetime.fromisoformat(n["last_seen"].replace("Z", "+00:00")).timestamp()
+                r.check(k, n.get("healthy") and age < LIMITS["REPORT_AGE_S"],
+                        f"healthy={n.get('healthy')}, last report {int(age)} s ago")
+                load(r, n["name"], n.get("machine") or {})
+                versions.setdefault(n["name"], n.get("version", "?"))
+            for x in fl.get("relays", []):
+                age = t - datetime.fromisoformat(x["at"].replace("Z", "+00:00")).timestamp()
+                r.check(f"{x['name']} relay", x.get("healthy") and age < LIMITS["REPORT_AGE_S"],
+                        f"healthy={x.get('healthy')}, last report {int(age)} s ago")
+                for proto in ("tcp", "tls"):
+                    if x.get(proto) not in (None, "", "up"):
+                        r.check(f"{x['name']} {proto} (fleet)", False, f"{proto} {x.get(proto)}")
+                    else:
+                        r.check(f"{x['name']} {proto} (fleet)", True)
+                load(r, x["name"], x.get("machine") or {})
+            ctl = {k: v for k, v in versions.items() if any(s["name"] == k and s["role"] in ("center", "node") for s in srv)}
+            r.check("versions", len(set(ctl.values())) <= 1, "control servers differ: " + ", ".join(f"{k} {v}" for k, v in sorted(ctl.items())))
+        except Exception as e:
+            r.check("fleet status", False, f"matrix-fleet on the Center: {e}")
+
+    # backups, once an hour is enough but cheap anyway
+    for name, age in backup_ages().items():
+        r.check(f"{name} backup", age is not None and age < LIMITS["BACKUP_AGE_H"],
+                "no backup copy" if age is None else f"newest backup is {age:.0f} h old")
+    st["checks"] = {k: v for k, v in st["checks"].items() if k in r.seen}  # forget removed checks
+    st["versions"] = versions
+    return r
+
+
+def load(r, name, m):
+    for key, limit in (("cpu_pct", "CPU_PCT"), ("mem_pct", "MEM_PCT"), ("disk_pct", "DISK_PCT")):
+        v = m.get(key)
+        if v is not None:
+            r.check(f"{name} {key[:-4]}", v < LIMITS[limit], f"{key[:-4]} {v:.0f}% (limit {LIMITS[limit]}%)")
+
+
+def summary_text(st):
+    lines = [f"📋 Matrix daily summary {iso(now())}"]
+    for s in servers():
+        if s["role"] in ("center", "node"):
+            try:
+                ev = events(s["host"], now(), 86400)
+                total = ev["connected"] + ev["failed"]
+                pct = f"{100 * ev['connected'] / total:.1f}%" if total else "-"
+                errs = ", ".join(f"{k} {v}" for k, v in ev["errors"].items())
+                lines.append(f"{s['name']}: {ev['requests']} view requests, {ev['connected']} connected, "
+                             f"{ev['failed']} failed ({pct} ok){' — ' + errs if errs else ''}")
+            except Exception as e:
+                lines.append(f"{s['name']}: cannot read events ({e})")
+    if st.get("versions"):
+        lines.append("versions: " + ", ".join(f"{k} {v}" for k, v in sorted(st["versions"].items())))
+    bad = [f"{k}: {v.get('problem', '')}" for k, v in sorted(st["checks"].items()) if v.get("alerted")]
+    lines.append("open problems: " + ("; ".join(bad) if bad else "none"))
+    return "\n".join(lines)
+
+
+def main():
+    cmd = sys.argv[1] if len(sys.argv) > 1 else ""
+    if cmd == "install":
+        return install()
+    if cmd not in ("run", "status", "summary", "test"):
+        print(__doc__.split("Files")[0].strip())
+        return 2
+    MON.mkdir(mode=0o700, exist_ok=True)
+    st = load_state()
+    if cmd == "test":
+        telegram(f"✅ matrix-monitor test from {socket.gethostname()} at {iso(now())}")
+        print("sent")
+        return 0
+    if cmd == "status":
+        for k, v in sorted(st["checks"].items()):
+            state = "ALERT" if v.get("alerted") else ("failing" if v.get("fails") else "ok")
+            print(f"{k:32} {state:8} {v.get('problem', '') if v.get('fails') else ''}")
+        print(f"pending messages: {len(st['pending'])}")
+        return 0
+    if cmd == "summary":
+        st["pending"].append(summary_text(st))
+    else:
+        run_checks(st)
+        day = datetime.now(timezone.utc).strftime("%Y-%m-%d")
+        if datetime.now(timezone.utc).hour == LIMITS["SUMMARY_HOUR_UTC"] and st.get("summary_day") != day:
+            st["summary_day"] = day
+            st["pending"].append(summary_text(st))
+    flush(st)
+    save_state(st)
+    return 0
+
+
+def install():
+    if os.geteuid() != 0:
+        print("run with sudo", file=sys.stderr)
+        return 1
+    user = HOME.owner()
+    pathlib.Path("/etc/systemd/system/matrix-monitor.service").write_text(f"""[Unit]
+Description=Check the Matrix fleet and alert on Telegram
+Wants=network-online.target
+After=network-online.target
+
+[Service]
+Type=oneshot
+User={user}
+ExecStart=/usr/local/bin/matrix-monitor run
+TimeoutStartSec=170
+""")
+    pathlib.Path("/etc/systemd/system/matrix-monitor.timer").write_text("""[Unit]
+Description=Check the Matrix fleet every 2 minutes
+
+[Timer]
+OnBootSec=2min
+OnUnitActiveSec=2min
+AccuracySec=10s
+
+[Install]
+WantedBy=timers.target
+""")
+    subprocess.run(["systemctl", "daemon-reload"], check=True)
+    subprocess.run(["systemctl", "enable", "--now", "matrix-monitor.timer"], check=True)
+    subprocess.run(["systemctl", "list-timers", "matrix-monitor.timer", "--no-pager"])
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main())

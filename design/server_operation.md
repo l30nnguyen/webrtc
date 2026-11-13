@@ -771,8 +771,9 @@ them back. A publish reaches every camera of that model at its next boot
 
 ## 5. Monitoring
 
-There is no automatic alerting yet (R5, planned for phase 2). Until there
-is, the operator runs the daily check by hand.
+Since 2026-11-13 the admin server checks the fleet every 2 minutes and
+alerts the Matrix Telegram group (R5, section 5.5). The daily check below is
+still worth 5 minutes a day: it shows trends the alerts don't.
 
 ### 5.1 Where to look
 
@@ -829,7 +830,52 @@ Certificates on 2026-11-10: `matrix.5gen.care` to 2027-01-25 and
 |---|---|---|
 | R3 | Off-host backup done 2026-11-13 (section 3.6) | check `matrix-admin list` daily; the backup private key is offline with the owner |
 | R4 | No graceful shutdown | every restart drops sessions for a few seconds |
-| R5 | No alerting | the daily check above is the only monitoring |
+| R5 | Telegram alerts done 2026-11-13 (section 5.5); DigitalOcean Monitoring alerts not set up yet | if the admin server is down there are no alerts: the missing daily summary is the sign |
 | R6 | No `deploy.sh all`, relay installer or new-node script | follow section 3 by hand |
 | R12 | One relay per region (other region is the backup since 2026-11-13) | if a region's relay dies, its relayed views go to the other region's relay, with more delay. A second relay per region removes that |
 | R21 | One Center | while the Center is down or restarting, no new connection or view can start anywhere. Plan: section 1.4 |
+
+### 5.5 Alerts: matrix-monitor (R5)
+
+`matrix-monitor` runs on the admin server every 2 minutes (systemd timer
+`matrix-monitor.timer`) and posts to the Matrix Telegram group. It sends one
+message when a check starts failing (after 2 failing runs in a row, about
+4 minutes) and one when it recovers; nothing while all is well. A daily
+summary arrives at 08:00 Vietnam time (01:00 UTC): views connected and
+failed per control server, versions, open problems. **No summary means the
+monitor itself is down**: check the admin server.
+
+| Check | How | Alert when |
+|---|---|---|
+| `<server> health` | `https://<hostname>/api/health` from outside | not `ok` or no answer |
+| `<relay> udp / tcp / tls` | an anonymous STUN request to UDP 3478, TCP 80 and TLS 443 | no answer |
+| `<server> certificate` | the certificate on 443 | expires in under 14 days (renewal failing) |
+| `<name> node`, `<relay> relay`, `… tcp/tls (fleet)` | `matrix-fleet -json status` on the Center | not healthy, or last report older than 5 min |
+| `<name> cpu / mem / disk` | same | above 85 % / 90 % / 85 % |
+| `versions` | health of each control server | the control servers run different versions |
+| `<server> viewing` | the event log of the last 15 min | at least 3 viewing sessions failed and 20 % or more of them |
+| 🚨 takeover ALERT | the event log | a SID was taken over from another network (R1): block the SID and issue a new one if it leaked |
+| `<relay> full`, `<relay> logins` | relay metrics over SSH | allocations refused (`-max` reached); more than 50 login failures in 2 minutes |
+| `<server> backup` | `/opt/matrix-admin/backups` | newest copy older than 36 h |
+| `<server> events / metrics / ssh`, `fleet status` | SSH from the admin server | the admin server can't reach the server |
+
+On the admin server:
+
+```bash
+matrix-monitor status          # every check and its state
+matrix-monitor run             # one round now (the timer does this)
+matrix-monitor summary         # send the summary now
+matrix-monitor test            # test message to Telegram
+journalctl -u matrix-monitor   # the runs
+```
+
+- Files: `/opt/matrix-admin/servers.conf` (4th column: the public
+  hostname), `/opt/matrix-admin/monitor/telegram.env` (bot token and group
+  id, mode 0600; never copy it elsewhere), optional
+  `/opt/matrix-admin/monitor/monitor.env` to change a limit, e.g.
+  `FAIL_RATE_PCT=10` (names in the script's `LIMITS`), `state.json`.
+- A new server: add its line (with hostname) to `servers.conf`; the next
+  run checks it. A removed server: delete its line.
+- Install or update: copy `server/admin/matrix-monitor` to
+  `/usr/local/bin/`; `sudo matrix-monitor install` sets up the timer.
+- A message that fails to send is kept and sent on the next run.
