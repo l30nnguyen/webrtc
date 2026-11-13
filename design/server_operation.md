@@ -330,8 +330,8 @@ Ubuntu 24.04 LTS, $6 a month.
 
 | Role | DNS name | IP | DO region | Software | Shortcut |
 |---|---|---|---|---|---|
-| Control Center (+ node `center`, region US) | `matrix.5gen.care` | 138.197.12.238 | nyc3 (New York) | `matrix_cc` 2.6.6, systemd `matrix` | `./vps.sh prod_us` |
-| Control node `sg00` (region SG) | `matrix-sg00.5gen.care` | 152.42.232.159 | sgp1 (Singapore) | `matrix_cc` 2.6.6, systemd `matrix` | `./vps.sh prod_sg` |
+| Control Center (+ node `center`, region US) | `matrix.5gen.care` | 138.197.12.238 | nyc3 (New York) | `matrix_cc` 2.6.7, systemd `matrix` | `./vps.sh prod_us` |
+| Control node `sg00` (region SG) | `matrix-sg00.5gen.care` | 152.42.232.159 | sgp1 (Singapore) | `matrix_cc` 2.6.7, systemd `matrix` | `./vps.sh prod_sg` |
 | Relay `mx-relay-us00` (region US, reports to the Center) | `mx-relay-us00.5gen.care` | 45.55.167.162 | nyc3 | `matrix-relay` 1.2.0, systemd `matrix-relay` | `./vps.sh relay_us` |
 | Relay `mx-relay-sg00` (region SG, reports to sg00) | `mx-relay-sg00.5gen.care` | 188.166.244.220 | sgp1 | `matrix-relay` 1.2.0, systemd `matrix-relay` | `./vps.sh relay_sg` |
 
