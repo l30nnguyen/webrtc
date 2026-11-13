@@ -611,6 +611,66 @@ This applies only once section 1.4 is built.
 
 Keep at least 2 Centers at all times.
 
+### 3.6 Backup and restore (R3)
+
+Status 2026-11-13: tool written (`release/matrix-backup`), not yet installed
+on the servers.
+
+**What is copied.** Every night (03:17 UTC, up to 20 minutes later) each
+control server sends an encrypted copy of its state to the other region:
+the Center to sg00, sg00 to the Center. The copy holds `cfg/sid/`
+(activations, Center ticket key, tenants, admin token, blocklist, relay
+registry, statistics, connection log), `config.json` and `config.d/`,
+`relay-secrets.json`, `turn.conf`, `cfg/version`, `RELEASE` and
+`/etc/matrix/matrix.conf`, with a `MANIFEST.sha256`. It is under 1 MB today.
+
+**Who can read it.** Each copy is encrypted to the backup public key. The
+private key is **not on any server**: the project owner keeps it
+(`matrix_backup.key.asc`) in the password manager. Without it no copy can
+be restored, so keep two copies of it in separate places. The receiving
+login (`matrixbak`) can only store a file: it cannot list, read or delete
+copies. Each sender keeps its newest 60 copies.
+
+**Set up** (once per server; `setup.sh` installs the tool):
+
+```bash
+# on the sender (Center: --name center; sg00: --name sg00)
+sudo matrix-backup install-sender --to matrixbak@<other server IP> --pubkey matrix_backup.pub.asc --name center
+# it prints a command; run it on the other server
+sudo matrix-backup install-receiver --from center --key 'ssh-ed25519 AAAA... matrix-backup:center'
+# back on the sender: one copy now
+sudo matrix-backup run
+```
+
+**Check it** (daily check, section 5.2): `sudo matrix-backup list` on the
+receiver shows the newest copy of each sender from the last night;
+`sudo matrix-backup status` on the sender shows the timer and the last
+result. Until alerting exists (R5), a failed copy shows only there.
+
+**Restore** (on the operator's PC; fetch the copy from the receiver with
+root's login, `/var/backups/matrix/<sender>/`):
+
+```bash
+gpg --import matrix_backup.key.asc        # once
+mkdir restore && gpg --decrypt <time>.tar.gz.gpg | tar -xz -C restore
+(cd restore && sha256sum -c MANIFEST.sha256)
+```
+
+Then, on a new droplet: install from the release package (INSTALL.md
+section 2, using the restored `cfg/sid/` keys), copy the restored
+`opt/matrix/cfg/` and `etc/matrix/matrix.conf` over the new ones (owner
+`matrix`, `cfg/sid/` mode 0700, files 0600), `systemctl restart matrix`,
+and point DNS at it. The nodes keep their link because the Center ticket
+key and `config.json` are the same.
+
+**Drill.** Restore the newest copy once a quarter, and after any change to
+what is copied: decrypt, check the manifest, and compare its
+`activations.jsonl` line count with the live one.
+
+DigitalOcean droplet backups (weekly, 20% of the droplet price, about
+$1.20 a month each) are a second layer; turn them on in the DO console for
+the Center and sg00.
+
 ---
 
 ## 4. Deploying a new version

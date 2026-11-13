@@ -62,6 +62,10 @@
 # 404. LINK_LISTEN=host:port in /etc/matrix/matrix.conf also serves the links on
 # a separate (private) address.
 #
+# Backup: setup.sh installs /usr/local/sbin/matrix-backup, a nightly encrypted
+# copy of this server's state to another server (sudo matrix-backup for usage;
+# server_operation.md section 3.6).
+#
 # Upgrade an installed Center or node to this package (config, keys and data
 # are kept; edit /etc/matrix/matrix.conf first to change a setting):
 #   sudo ./setup.sh upgrade
@@ -104,6 +108,8 @@ install_release() {
     install -m 644 "$PKG_DIR/player/ws.html" "$APP_DIR/player/ws.html"
     install -m 644 "$PKG_DIR/cfg/version" "$APP_DIR/cfg/version"
     install -m 644 "$PKG_DIR/RELEASE" "$APP_DIR/RELEASE"
+    # Nightly encrypted state copy (R3); set up with matrix-backup install-sender.
+    [[ -f "$PKG_DIR/matrix-backup" ]] && install -m 755 "$PKG_DIR/matrix-backup" /usr/local/sbin/matrix-backup
     write_fleet_tool
 }
 

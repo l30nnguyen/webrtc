@@ -37,8 +37,8 @@ echo "Building $NAME..."
 (cd "$ROOT/src/control" && CGO_ENABLED=0 GOOS=linux GOARCH=amd64 go build -trimpath -o "$BINARY" ./src)
 cp "$ROOT/player/ws.html" "$PKG/player/ws.html"
 cp "$ROOT/cfg/version" "$PKG/cfg/version"
-cp "$ROOT/release/setup.sh" "$ROOT/release/README.md" "$PKG/"
-chmod 755 "$PKG/setup.sh" "$BINARY"
+cp "$ROOT/release/setup.sh" "$ROOT/release/matrix-backup" "$ROOT/release/README.md" "$PKG/"
+chmod 755 "$PKG/setup.sh" "$PKG/matrix-backup" "$BINARY"
 
 GO_VERSION="$(go version "$BINARY" | awk '{print $2}')"
 cat > "$PKG/RELEASE" <<EOF
