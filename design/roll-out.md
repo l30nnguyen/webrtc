@@ -51,9 +51,10 @@ keeping both sides.
 - Each control server has its relay's shared secret in
   `cfg/relay-secrets.json` (2026-11-04). Without it a relay logs
   `403 unknown relay` and is not handed out.
-- The AWS dev VPS (`webrtc.5gen.care`, 3.95.228.203) is not part of the
-  matrix fleet. It will become the license server (the machine that holds
-  the keys). Since 2026-11-05 it runs violet in Docker (`violet-turn`,
+- The AWS server (`webrtc.5gen.care`, 3.95.228.203) is not part of the
+  matrix fleet. Since 2026-11-13 it is the admin server: it pulls the
+  encrypted backups (R3), and deploys and the license service follow
+  (server_operation 3.6). Since 2026-11-05 it runs violet in Docker (`violet-turn`,
   restart `always`, relay ports 49152–65535) for the testers' `webrtc_prod`
   on the same box, whose `cfg/turn.conf` points at it; the dev matrix-relay
   there is removed.
@@ -163,8 +164,8 @@ ran no load, runtime or chaos tests. Its findings, with today's status:
    - seen working 2026-11-06 on sg00: viewers connected through the
      camera's own relay candidate on `mx-relay-sg00` (UDP) and over a TCP
      relay (VPN viewer)
-   - still to test on one camera: an RTSP or UDP `IPv4:PORT` source, and a
-     long stream over a VPN (R17)
+   - still to test on one camera: an RTSP or UDP `IPv4:PORT` source; the
+     long stream over a VPN (R17) is left to the testers to confirm
    - keep the previous binary for rollback
 2. A production `matrix-relay` per region: `mx-relay-us00` and
    `mx-relay-sg00` in service since 2026-11-04, violet retired. Add a backup
