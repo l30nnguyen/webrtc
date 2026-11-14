@@ -749,7 +749,7 @@ has its own folder, and a binary goes only to the models it was built for:
 
 | Model | Build | Folder |
 |---|---|---|
-| HCX130 | C++ (`libdatachannel_c14/compile.sh`); publish with `publish_firmware.sh HCX130`. A C trial (2026-11-13) was rolled back after talkback and video problems (C-7); the C build for this model, when it is ready, is: `./build.sh anycloud` (toolchain `/usr/local/arm/arm-anycloud-linux-uclibcgnueabi`, GCC 5.5.0), then `scripts/package_anykav200.sh anycloud`; publish by hand like the other C models | `/downloads/HCX130/` |
+| HCX130 | C (`matrix_c`) since 2.1.8 (2026-11-14): `./build.sh anycloud` (toolchain `/usr/local/arm/arm-anycloud-linux-uclibcgnueabi`, GCC 5.5.0), then `scripts/package_anykav200.sh anycloud`; publish by hand like the other C models. matrix_c must run at raised CPU priority on this model (matrix.ini `priority`, default -10): the camera application keeps the CPU at 100%. The old C++ build (`libdatachannel_c14/compile.sh`, `publish_firmware.sh HCX130`) is the fallback | `/downloads/HCX130/` |
 | GIRAFFE_HD (old cameras that can't run C++); HCX330L | C (`matrix_c`): `./build.sh anykav200` for GIRAFFE_HD, `./build.sh anykav500` for HCX330L, then `scripts/package_anykav200.sh <platform>` | `/downloads/GIRAFFE_HD/`, `/downloads/HCX330L/` (different builds) |
 
 Before a publish, copy the folder's current files to
