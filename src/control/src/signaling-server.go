@@ -309,6 +309,9 @@ func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 }
 
 func isCenterPath(path string) bool {
+	if center.FirmwarePath(path) {
+		return true
+	}
 	switch path {
 	case "/verify", "/v1/challenge", "/v1/resolve", "/v1/view", "/v1/demo/resolve", "/v1/admin/status", "/v1/admin/release":
 		return true
@@ -981,7 +984,7 @@ func configureServer(srv *Server, opts serverOptions) error {
 			MainAddress: opts.mainAddress, AssignAddress: opts.assignAddress, Blocklist: blocklist, Tenants: tenants, Activations: store,
 			ChallengeKey: deriveChallengeKey(centerPrivate), TrustProxyTLS: opts.trustProxyTLS,
 			DemoTenant: opts.demoTenant, ViewOrigin: opts.viewOrigin, AdminToken: adminToken,
-			Addresses: addresses,
+			Addresses: addresses, FirmwareDir: srv.rootDir + "firmware",
 			OnTakeover: func(info center.TakeoverInfo) {
 				counts := map[string]int64{"sid_takeover": 1}
 				detail := "SID of tenant " + info.Tenant + " taken over from offline camera " + info.FromDevice + ", same network"

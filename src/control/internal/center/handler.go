@@ -92,6 +92,9 @@ type Config struct {
 	// negative turns takeover off. It needs Fleet, which knows where cameras
 	// are online; without Fleet a second key is always refused.
 	TakeoverAfter time.Duration
+	// FirmwareDir holds <PLATFORM>/matrix.pkg for GET /v1/firmware/<PLATFORM>/matrix;
+	// empty turns the route off.
+	FirmwareDir string
 	// OnTakeover, when set, is told about every takeover.
 	OnTakeover func(TakeoverInfo)
 	// Addresses remembers where each camera last verified from, so a
@@ -218,6 +221,10 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if r.URL.Path == "/v1/view" && h.handleViewCORS(w, r) {
+		return
+	}
+	if FirmwarePath(r.URL.Path) {
+		h.handleFirmware(w, r)
 		return
 	}
 	switch r.URL.Path {
