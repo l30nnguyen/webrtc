@@ -215,7 +215,9 @@ The camera's only run-time option is `--config FOLDER` (also `-h`, `-V`,
   the keys `nickname` (default `CAMERA`), `host` and `port` (default
   `matrix.5gen.care`, 443), `audio`, `video`, `video2`, `chunksize`, `mp4`,
   `talkback-port`, `talkback-chunksize`, `timeout`, `entropy-bits`,
-  `verbose`, `ca-file`, `reqIP`, `reqPort`
+  `verbose`, `ca-file`, `reqIP`, `reqPort`, `priority`, `max-viewers`
+  (most viewers watching at once, 1..8, default 4; one more is refused with
+  "Viewer limit reached" and a `viewer_limit` report)
 - `sid` (mode 0600, written from `pair`)
 - `auth/`
 

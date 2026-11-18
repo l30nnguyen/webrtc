@@ -83,3 +83,10 @@ func TestSaveLoadAndPrune(t *testing.T) {
 		t.Fatalf("missing file: %v", err)
 	}
 }
+
+func TestViewerLimitIsKeptAsItsOwnError(t *testing.T) {
+	r := Report{Role: RoleCamera, Result: ResultFailed, Error: "viewer_limit"}
+	if !r.Normalize() || r.Error != "viewer_limit" {
+		t.Fatalf("viewer_limit normalized to %q", r.Error)
+	}
+}

@@ -543,7 +543,7 @@
             dcStatusLog = document.getElementById('dc-status');
 
         // This page's own version, sent in every report; equals cfg/version (checked by a test).
-        const PLAYER_VERSION = '2.7.1';
+        const PLAYER_VERSION = '2.7.2';
 
         let clientId = null;
         let websocket = null;
@@ -2190,12 +2190,18 @@
                 } else if (message.type == "error") {
                     log(`❌ Error from control server: ${message.msg}`, 'error');
                     const normalized = String(message.msg || '').toLowerCase();
+                    // Viewer limit: the camera is already serving its most viewers
+                    // (max-viewers). Not a fault; tell the user and do not retry.
+                    const viewerLimit = normalized.includes('viewer limit');
                     viewReport.failed(normalized.includes('unauthorized') ? 'unauthorized'
-                        : normalized.includes('offline') ? 'camera_offline' : 'other');
+                        : normalized.includes('offline') ? 'camera_offline'
+                        : viewerLimit ? 'viewer_limit' : 'other');
                     document.getElementById('findStatus').textContent = normalized.includes('unauthorized')
                         ? '❌ Camera password was rejected. Check it and try Play again.'
                         : normalized.includes('offline')
                             ? '❌ Camera is offline.'
+                        : viewerLimit
+                            ? '⚠️ The camera already has the most viewers it allows. Try again when someone stops watching.'
                         : normalized.includes('invalid request')
                             ? '❌ Camera rejected the request. Check the camera password and SID.'
                             : '❌ Camera connection was rejected. Check the camera password and try again.';

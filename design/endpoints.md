@@ -184,7 +184,7 @@ Send once per viewing attempt, on the control connection:
 
 ```json
 {"type":"report","result":"connected","path":"lan|direct|relay","relay_protocol":"udp|tcp|tls","relay_offered":true,"relay_ready":true,"setup_ms":840}
-{"type":"report","result":"failed","error":"unauthorized|camera_offline|no_offer|no_answer|no_path|timeout|closed|other","relay_offered":true,"relay_ready":false}
+{"type":"report","result":"failed","error":"unauthorized|camera_offline|no_offer|no_answer|no_path|timeout|closed|viewer_limit|other","relay_offered":true,"relay_ready":false}
 ```
 
 `relay_protocol` only when connected through a relay. Optional `"version":"2.6.6"`: the reporter's software version (up to 32 of `0-9A-Za-z._+-`, otherwise dropped), kept in the connection log (2.6.6; the web player sends it). The role (camera or viewer) comes from the ticket. Reports feed `matrix-fleet stats`, `/admin/statistic` and the connection log, and are never forwarded. **The web player sends them; the mobile app does not yet.**

@@ -29,6 +29,7 @@ Files (owner admin, 0700 folder):
   /opt/matrix-admin/monitor/state.json      check state, pending messages
 The Telegram token is read from telegram.env only and never printed.
 """
+import html
 import json
 import os
 import pathlib
@@ -161,7 +162,10 @@ since_alerts, window = float(sys.argv[1]), float(sys.argv[2])
 d, now = sys.argv[3], time.time()
 start = min(since_alerts, now - window)
 out = {"connected": 0, "failed": 0, "errors": {}, "requests": 0, "alerts": [], "takeovers": 0, "last_t": since_alerts,
-       "quality": 0, "poor": 0}
+       "quality": 0, "poor": 0, "forwarded": 0, "offline": 0, "refused": 0, "busy": 0}
+# Viewing results come from the camera's report (every camera client sends one);
+# viewer reports count only when no camera reported, so a session is never counted twice.
+viewer = {"connected": 0, "failed": 0, "errors": {}}
 day = datetime.fromtimestamp(start, timezone.utc).date()
 while day <= datetime.now(timezone.utc).date():
     try:
@@ -184,19 +188,31 @@ while day <= datetime.now(timezone.utc).date():
             continue
         if e.get("type") == "request":
             out["requests"] += 1
+            if e.get("result") == "forwarded":
+                out["forwarded"] += 1
+            elif e.get("result") == "camera_offline":
+                out["offline"] += 1
+        elif e.get("type") == "refused":
+            out["refused"] += 1
         elif e.get("type") == "report" and e.get("role") == "camera" and e.get("result", "").startswith("quality end"):
             out["quality"] += 1
             if e["result"].endswith("poor"):
                 out["poor"] += 1
-        elif e.get("type") == "report" and e.get("role") == "viewer":
+        elif e.get("type") == "report" and e.get("role") == "camera" and e.get("error") == "viewer_limit":
+            # The camera already had max-viewers sessions: refused, not a failure.
+            out["busy"] += 1
+        elif e.get("type") == "report" and e.get("role") in ("camera", "viewer"):
+            to = out if e["role"] == "camera" else viewer
             if e.get("result") == "connected":
-                out["connected"] += 1
+                to["connected"] += 1
             elif e.get("result") == "failed":
-                out["failed"] += 1
+                to["failed"] += 1
                 k = e.get("error") or "unknown"
-                out["errors"][k] = out["errors"].get(k, 0) + 1
+                to["errors"][k] = to["errors"].get(k, 0) + 1
     f.close()
     day += timedelta(days=1)
+if out["connected"] + out["failed"] == 0:
+    out.update(viewer)
 print(json.dumps(out))
 '''
 
@@ -244,11 +260,17 @@ def save_state(st):
 
 
 def telegram(text):
+    """Send a message: plain text, or {"text": ..., "html": True} for Telegram HTML."""
     env = load_env(MON / "telegram.env")
     token, chat = env.get("TELEGRAM_TOKEN"), env.get("TELEGRAM_CHAT")
     if not token or not chat:
         raise RuntimeError(f"TELEGRAM_TOKEN or TELEGRAM_CHAT missing in {MON / 'telegram.env'}")
-    data = urllib.parse.urlencode({"chat_id": chat, "text": text[:4000], "disable_web_page_preview": "true"}).encode()
+    fields = {"chat_id": chat, "disable_web_page_preview": "true"}
+    if isinstance(text, dict):
+        fields["parse_mode"] = "HTML" if text.get("html") else ""
+        text = text["text"]
+    fields["text"] = text[:4000]
+    data = urllib.parse.urlencode({k: v for k, v in fields.items() if v}).encode()
     try:
         with urllib.request.urlopen(f"https://api.telegram.org/bot{token}/sendMessage", data=data, timeout=20) as r:
             if json.loads(r.read()).get("ok") is not True:
@@ -400,25 +422,48 @@ def load(r, name, m):
             r.check(f"{name} {key[:-4]}", v < LIMITS[limit], f"{key[:-4]} {v:.0f}% (limit {LIMITS[limit]}%)")
 
 
+SUMMARY_ROWS = [  # label, how to show one server's counts
+    ("View requests", lambda e: e["requests"]),
+    (" camera offline", lambda e: e["offline"]),
+    (" sent to camera", lambda e: e["forwarded"]),
+    ("Connected", lambda e: e["connected"]),
+    ("Failed", lambda e: e["failed"]),
+    ("Camera full", lambda e: e.get("busy", 0)),  # max-viewers already watching
+    ("No result", lambda e: max(e["forwarded"] - e["connected"] - e["failed"] - e.get("busy", 0), 0)),
+    ("Success", lambda e: f"{100 * e['connected'] / (e['connected'] + e['failed']):.0f}%"
+                          if e["connected"] + e["failed"] else "-"),
+    ("Quality sessions", lambda e: e["quality"]),
+    (" poor", lambda e: e["poor"]),
+    ("Refused (no ticket)", lambda e: e["refused"]),
+]
+
+
 def summary_text(st):
-    lines = [f"📋 Matrix daily summary {iso(now())}"]
+    """The daily summary as Telegram HTML: one column per control server."""
+    cols, notes = [], []
     for s in servers():
         if s["role"] in ("center", "node"):
             try:
                 ev = events(s["host"], now(), 86400)
-                total = ev["connected"] + ev["failed"]
-                pct = f"{100 * ev['connected'] / total:.1f}%" if total else "-"
-                errs = ", ".join(f"{k} {v}" for k, v in ev["errors"].items())
-                lines.append(f"{s['name']}: {ev['requests']} view requests, {ev['connected']} connected, "
-                             f"{ev['failed']} failed ({pct} ok){' — ' + errs if errs else ''}"
-                             + (f"; stream quality {ev['quality']} sessions, {ev['poor']} poor" if ev.get("quality") else ""))
+                cols.append((s["name"], ev))
+                if ev["errors"]:
+                    errs = ", ".join(f"{k} {v}" for k, v in sorted(ev["errors"].items(), key=lambda x: -x[1]))
+                    notes.append(f"{s['name']} failed: {errs}")
             except Exception as e:
-                lines.append(f"{s['name']}: cannot read events ({e})")
-    if st.get("versions"):
-        lines.append("versions: " + ", ".join(f"{k} {v}" for k, v in sorted(st["versions"].items())))
+                notes.append(f"{s['name']}: cannot read events ({e})")
+    versions = st.get("versions", {})
+    rows = [[label] + [str(fn(ev)) for _, ev in cols] for label, fn in SUMMARY_ROWS]
+    rows.append(["Version"] + [versions.get(name, "?") for name, _ in cols])
+    head = [""] + [name for name, _ in cols]
+    width = [max(len(r[i]) for r in rows + [head]) for i in range(len(head))]
+    fmt = lambda r: "  ".join(r[0].ljust(width[0]) if i == 0 else c.rjust(width[i]) for i, c in enumerate(r))
+    table = "\n".join([fmt(head), "-" * len(fmt(head))] + [fmt(r) for r in rows])
     bad = [f"{k}: {v.get('problem', '')}" for k, v in sorted(st["checks"].items()) if v.get("alerted")]
-    lines.append("open problems: " + ("; ".join(bad) if bad else "none"))
-    return "\n".join(lines)
+    lines = [f"📋 <b>Matrix daily summary</b> {html.escape(iso(now()))} (last 24 h)",
+             f"<pre>{html.escape(table)}</pre>"]
+    lines += [html.escape(n) for n in notes]
+    lines.append("Open problems: " + html.escape("; ".join(bad) if bad else "none"))
+    return {"text": "\n".join(lines), "html": True}
 
 
 def main():

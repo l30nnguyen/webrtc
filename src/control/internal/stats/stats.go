@@ -41,6 +41,7 @@ var validErrors = map[string]bool{
 	"no_path":        true, // no network path, relay included
 	"timeout":        true, // not connected in time
 	"closed":         true, // closed by either side before connecting
+	"viewer_limit":   true, // camera already serving its most viewers (max-viewers)
 	"other":          true,
 }
 
