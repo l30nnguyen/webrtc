@@ -83,7 +83,7 @@ func (s *Server) recordReport(c *Client, msg map[string]interface{}) {
 	e := events.Event{Type: events.Report, Role: "viewer", Result: report.Result, Error: report.Error, Path: report.Path,
 		SetupMillis: report.SetupMillis, RelayOffered: &report.RelayOffered, RelayReady: &report.RelayReady, Country: c.Country}
 	if report.Role == stats.RoleCamera {
-		e.Role, e.Camera = "camera", c.ID
+		e.Role, e.Camera, e.CameraVersion = "camera", c.ID, s.cameraVersion(c)
 	} else {
 		e.Viewer, e.Camera = c.ID, c.CameraIDScope
 	}
@@ -169,7 +169,14 @@ func (s *Server) recordQuality(c *Client, msg map[string]interface{}) {
 		result += " poor"
 	}
 	s.addEvent(events.Event{Type: events.Report, Role: "camera", Camera: c.ID, Viewer: viewerID,
-		Result: result, Detail: qualityText(q), Country: q.Country})
+		Result: result, Detail: qualityText(q), Country: q.Country, CameraVersion: s.cameraVersion(c)})
+}
+
+// cameraVersion is the version a camera gave in its register message.
+func (s *Server) cameraVersion(c *Client) string {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	return c.Info.Version
 }
 
 // qualityText is a quality report for the connection log.

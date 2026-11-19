@@ -58,6 +58,10 @@ type Event struct {
 	From          string   `json:"from,omitempty"`   // source address of a refusal
 	Detail        string   `json:"detail,omitempty"`
 	Version       string   `json:"version,omitempty"` // the reporter's software version
+	// CameraVersion is the camera's software version (from its register
+	// message, camera 2.2.1+) on requests and camera reports, so results can
+	// be compared per camera release. Empty for older cameras.
+	CameraVersion string `json:"camera_version,omitempty"`
 	// Country is the viewer's country for a request or a viewer report, the
 	// camera's for a camera report (from the Center's ticket, ST-1).
 	Country string `json:"country,omitempty"`

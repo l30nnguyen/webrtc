@@ -39,6 +39,44 @@ func TestReportVersionIsLogged(t *testing.T) {
 	}
 }
 
+func TestCameraVersionTagsRequestsAndCameraReports(t *testing.T) {
+	log, err := events.Open(filepath.Join(t.TempDir(), "events"), 30)
+	if err != nil {
+		t.Fatal(err)
+	}
+	n := newNode(t, func(s *Server) { s.events = log })
+	camera := n.connect("camera0", "acme01", admission.RoleCamera)
+	send(t, camera, map[string]any{"type": "register", "nickname": "CAMERA", "version": "2.2.1"})
+	waitFor(t, "camera version", func() bool { return n.version("camera0") == "2.2.1" })
+	viewerID := strings.Repeat("v", 43)
+	viewer := n.connectScopedViewer(viewerID, "acme01", "camera0")
+
+	send(t, viewer, map[string]any{"type": "request", "id": "camera0", "password": "x"})
+	send(t, camera, map[string]any{"type": "report", "id": viewerID, "result": "connected", "path": "direct"})
+	send(t, viewer, map[string]any{"type": "report", "id": "camera0", "result": "connected", "path": "direct"})
+	var found []events.Event
+	waitFor(t, "request and reports", func() bool {
+		found, _ = log.Find(events.Query{From: time.Now().Add(-time.Hour), To: time.Now().Add(time.Hour)})
+		return len(found) >= 3
+	})
+	for _, e := range found {
+		want := "2.2.1"
+		if e.Type == events.Report && e.Role == "viewer" {
+			want = "" // a viewer report carries only the viewer's own version
+		}
+		if e.Type != events.Request && e.Type != events.Report {
+			continue
+		}
+		if e.CameraVersion != want {
+			t.Fatalf("%s/%s camera_version %q, want %q", e.Type, e.Role, e.CameraVersion, want)
+		}
+	}
+
+	// A bad version is ignored, not stored.
+	send(t, camera, map[string]any{"type": "register", "nickname": "CAMERA", "version": "<b>x</b>"})
+	waitFor(t, "bad version dropped", func() bool { return n.version("camera0") == "" })
+}
+
 func TestPlayerIsRevalidatedOnEveryLoad(t *testing.T) {
 	s := playerTestServer(t)
 	s.SetDiscoveryTenant("test01")
@@ -64,4 +102,14 @@ func TestPlayerVersionMatchesRelease(t *testing.T) {
 	if m == nil || string(m[1]) != strings.TrimSpace(string(version)) {
 		t.Fatalf("ws.html PLAYER_VERSION %q, cfg/version %q: bump both", m, strings.TrimSpace(string(version)))
 	}
+}
+
+// version is the software version a connected camera registered with.
+func (n *node) version(id string) string {
+	n.srv.mu.RLock()
+	defer n.srv.mu.RUnlock()
+	if c := n.srv.clients[clientKey("acme01", id)]; c != nil {
+		return c.Info.Version
+	}
+	return ""
 }

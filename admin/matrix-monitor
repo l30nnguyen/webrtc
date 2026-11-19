@@ -155,18 +155,37 @@ def stun_stream(ip, port, tls_host=None):
 
 
 # Runs on a control server: counts from its event log.
+# Each request sent to a camera gets exactly one outcome:
+#   connected / failed      the camera's report, matched to its request by time
+#                           (report time - setup_ms = request time)
+#   wrong_password          failed with unauthorized: the user's mistake
+#   camera_full             the camera refused: max-viewers watching
+#                           (viewer_limit report, camera 2.2.0+), or - for
+#                           cameras that don't give their version (before
+#                           2.2.1, one viewer at a time) - another viewer's
+#                           session was open
+#   camera_dropped          no result and the camera went offline within 60 s
+#   no_result               none of the above
+# Success counts only what the service is responsible for:
+#   connected / (connected + failed + no_result)
+# Camera offline, wrong password, camera full and camera dropped are shown but
+# are not failures of the service. Every outcome is also counted per camera
+# version (camera_version on the request, from camera 2.2.1).
 EVENTS_SCRIPT = r'''
 import json, os, sys, time
 from datetime import datetime, timezone, timedelta
 since_alerts, window = float(sys.argv[1]), float(sys.argv[2])
 d, now = sys.argv[3], time.time()
-start = min(since_alerts, now - window)
-out = {"connected": 0, "failed": 0, "errors": {}, "requests": 0, "alerts": [], "takeovers": 0, "last_t": since_alerts,
-       "quality": 0, "poor": 0, "forwarded": 0, "offline": 0, "refused": 0, "busy": 0}
-# Viewing results come from the camera's report (every camera client sends one);
-# viewer reports count only when no camera reported, so a session is never counted twice.
-viewer = {"connected": 0, "failed": 0, "errors": {}}
-day = datetime.fromtimestamp(start, timezone.utc).date()
+start = now - window
+CONTEXT = 12 * 3600      # earlier events read to find sessions already open
+MATCH = 120              # a report belongs to a request at most this much earlier
+OUTCOMES = ("connected", "failed", "wrong_password", "camera_full", "camera_dropped", "no_result")
+out = {"requests": 0, "offline": 0, "forwarded": 0, "refused": 0, "quality": 0, "poor": 0,
+       "errors": {}, "alerts": [], "takeovers": 0, "last_t": since_alerts, "versions": {}}
+for k in OUTCOMES:
+    out[k] = 0
+evs = []
+day = datetime.fromtimestamp(min(since_alerts, start - CONTEXT), timezone.utc).date()
 while day <= datetime.now(timezone.utc).date():
     try:
         f = open(os.path.join(d, day.isoformat() + ".jsonl"))
@@ -175,44 +194,79 @@ while day <= datetime.now(timezone.utc).date():
     for line in f:
         try:
             e = json.loads(line)
-            t = datetime.strptime(e["t"][:19], "%Y-%m-%dT%H:%M:%S").replace(tzinfo=timezone.utc).timestamp()
+            e["ts"] = datetime.strptime(e["t"][:19], "%Y-%m-%dT%H:%M:%S").replace(tzinfo=timezone.utc).timestamp() + float("0" + e["t"][19:23].rstrip("Z"))
         except Exception:
             continue
-        if t > since_alerts and e.get("type") == "camera" and e.get("result") == "takeover":
+        evs.append(e)
+    f.close()
+    day += timedelta(days=1)
+evs.sort(key=lambda e: e["ts"])
+
+reqs, by_cam = [], {}
+for e in evs:
+    t, kind = e["ts"], e.get("type")
+    if t > since_alerts:
+        out["last_t"] = max(out["last_t"], t)
+        if kind == "camera" and e.get("result") == "takeover":
             out["takeovers"] += 1
             if e.get("detail", "").startswith("ALERT"):
                 out["alerts"].append(e["detail"][:400])
-        if t > since_alerts:
-            out["last_t"] = max(out["last_t"], t)
-        if t < now - window:
+    cam = by_cam.setdefault(e.get("camera", ""), {"open": [], "offline": []})
+    if kind == "request" and e.get("result") == "forwarded":
+        e["outcome"] = None
+        e["busy"] = any(s["ts"] < t for s in cam["open"])  # another session open?
+        reqs.append(e)
+    elif kind == "camera" and e.get("result") == "offline":
+        cam["offline"].append(t)
+        cam["open"] = []
+    elif kind == "report" and e.get("role") == "camera":
+        res = e.get("result", "")
+        if res.startswith("quality end"):
+            cam["open"] = [s for s in cam["open"] if s.get("viewer") != e.get("viewer")]
+            if t >= start:
+                out["quality"] += 1
+                out["poor"] += res.endswith("poor")
             continue
-        if e.get("type") == "request":
-            out["requests"] += 1
-            if e.get("result") == "forwarded":
-                out["forwarded"] += 1
-            elif e.get("result") == "camera_offline":
-                out["offline"] += 1
-        elif e.get("type") == "refused":
-            out["refused"] += 1
-        elif e.get("type") == "report" and e.get("role") == "camera" and e.get("result", "").startswith("quality end"):
-            out["quality"] += 1
-            if e["result"].endswith("poor"):
-                out["poor"] += 1
-        elif e.get("type") == "report" and e.get("role") == "camera" and e.get("error") == "viewer_limit":
-            # The camera already had max-viewers sessions: refused, not a failure.
-            out["busy"] += 1
-        elif e.get("type") == "report" and e.get("role") in ("camera", "viewer"):
-            to = out if e["role"] == "camera" else viewer
-            if e.get("result") == "connected":
-                to["connected"] += 1
-            elif e.get("result") == "failed":
-                to["failed"] += 1
-                k = e.get("error") or "unknown"
-                to["errors"][k] = to["errors"].get(k, 0) + 1
-    f.close()
-    day += timedelta(days=1)
-if out["connected"] + out["failed"] == 0:
-    out.update(viewer)
+        if res not in ("connected", "failed"):
+            continue
+        began = t - (e.get("setup_ms") or 0) / 1000.0
+        cands = [r for r in reqs if r["outcome"] is None and r.get("camera") == e.get("camera") and t - MATCH <= r["ts"] <= t + 1]
+        if not cands:
+            continue
+        if e.get("error") == "viewer_limit":
+            r = max(cands, key=lambda r: r["ts"])  # refused at once: the newest request
+        else:
+            r = min(cands, key=lambda r: abs(r["ts"] - began))
+        err = e.get("error") or "other"
+        r["outcome"] = ("connected" if res == "connected" else
+                        "camera_full" if err == "viewer_limit" else
+                        "wrong_password" if err == "unauthorized" else "failed")
+        r["error"] = err
+        if res == "connected":
+            cam["open"].append(r)
+    elif kind == "request" and e.get("result") == "camera_offline" and t >= start:
+        out["offline"] += 1
+    elif kind == "refused" and t >= start:
+        out["refused"] += 1
+out["requests"] = out["offline"]
+for r in reqs:
+    if r["ts"] < start:
+        continue
+    if r["outcome"] is None:
+        offline = by_cam.get(r.get("camera", ""), {}).get("offline", [])
+        if any(0 <= t - r["ts"] <= 60 for t in offline):
+            r["outcome"] = "camera_dropped"
+        elif r["busy"] and not r.get("camera_version"):
+            r["outcome"] = "camera_full"   # one viewer at a time before 2.2.0
+        else:
+            r["outcome"] = "no_result"
+    out["requests"] += 1
+    out["forwarded"] += 1
+    out[r["outcome"]] += 1
+    if r["outcome"] == "failed":
+        out["errors"][r["error"]] = out["errors"].get(r["error"], 0) + 1
+    v = out["versions"].setdefault(r.get("camera_version") or "before 2.2.1", {k: 0 for k in OUTCOMES})
+    v[r["outcome"]] += 1
 print(json.dumps(out))
 '''
 
@@ -342,7 +396,7 @@ def run_checks(st):
                 st["since"][name] = ev["last_t"]
                 for a in ev["alerts"]:
                     r.note(f"🚨 {name}: {a}")
-                total = ev["connected"] + ev["failed"]
+                total = ev["connected"] + ev["failed"] + ev["no_result"]
                 bad = ev["failed"] >= LIMITS["FAIL_MIN"] and ev["failed"] * 100 >= LIMITS["FAIL_RATE_PCT"] * total
                 errs = ", ".join(f"{k} {v}" for k, v in sorted(ev["errors"].items(), key=lambda x: -x[1]))
                 r.check(f"{name} viewing", not bad,
@@ -422,20 +476,51 @@ def load(r, name, m):
             r.check(f"{name} {key[:-4]}", v < LIMITS[limit], f"{key[:-4]} {v:.0f}% (limit {LIMITS[limit]}%)")
 
 
+def success(e):
+    """Viewing success of the service: camera offline, wrong password, camera
+    full and camera dropped are not the service's failures."""
+    base = e["connected"] + e["failed"] + e["no_result"]
+    return f"{100 * e['connected'] / base:.0f}%" if base else "-"
+
+
 SUMMARY_ROWS = [  # label, how to show one server's counts
     ("View requests", lambda e: e["requests"]),
     (" camera offline", lambda e: e["offline"]),
     (" sent to camera", lambda e: e["forwarded"]),
     ("Connected", lambda e: e["connected"]),
     ("Failed", lambda e: e["failed"]),
-    ("Camera full", lambda e: e.get("busy", 0)),  # max-viewers already watching
-    ("No result", lambda e: max(e["forwarded"] - e["connected"] - e["failed"] - e.get("busy", 0), 0)),
-    ("Success", lambda e: f"{100 * e['connected'] / (e['connected'] + e['failed']):.0f}%"
-                          if e["connected"] + e["failed"] else "-"),
+    ("No result", lambda e: e["no_result"]),
+    ("Success", success),
+    ("Not counted", lambda e: e["wrong_password"] + e["camera_full"] + e["camera_dropped"]),
+    (" wrong password", lambda e: e["wrong_password"]),
+    (" camera full", lambda e: e["camera_full"]),  # max-viewers already watching
+    (" camera dropped", lambda e: e["camera_dropped"]),  # camera went offline during setup
     ("Quality sessions", lambda e: e["quality"]),
     (" poor", lambda e: e["poor"]),
     ("Refused (no ticket)", lambda e: e["refused"]),
 ]
+
+
+def version_table(cols):
+    """Requests sent to cameras per camera version, all control servers."""
+    total = {}
+    for _, ev in cols:
+        for ver, c in ev.get("versions", {}).items():
+            t = total.setdefault(ver, {})
+            for k, n in c.items():
+                t[k] = t.get(k, 0) + n
+    if not total:
+        return ""
+    head = ["Camera", "Sent", "OK", "Fail", "None", "Success", "Not cnt"]
+    rows = []
+    for ver in sorted(total, key=lambda v: [int(x) if x.isdigit() else -1 for x in v.split(".")], reverse=True):
+        c = total[ver]
+        sent = sum(c.values())
+        rows.append([ver, str(sent), str(c["connected"]), str(c["failed"]), str(c["no_result"]), success(c),
+                     str(c["wrong_password"] + c["camera_full"] + c["camera_dropped"])])
+    width = [max(len(r[i]) for r in rows + [head]) for i in range(len(head))]
+    fmt = lambda r: "  ".join(r[0].ljust(width[0]) if i == 0 else x.rjust(width[i]) for i, x in enumerate(r))
+    return "\n".join([fmt(head), "-" * len(fmt(head))] + [fmt(r) for r in rows])
 
 
 def summary_text(st):
@@ -461,6 +546,9 @@ def summary_text(st):
     bad = [f"{k}: {v.get('problem', '')}" for k, v in sorted(st["checks"].items()) if v.get("alerted")]
     lines = [f"📋 <b>Matrix daily summary</b> {html.escape(iso(now()))} (last 24 h)",
              f"<pre>{html.escape(table)}</pre>"]
+    per_version = version_table(cols)
+    if per_version:
+        lines += ["Per camera version (Success = OK / (OK + Fail + None)):", f"<pre>{html.escape(per_version)}</pre>"]
     lines += [html.escape(n) for n in notes]
     lines.append("Open problems: " + html.escape("; ".join(bad) if bad else "none"))
     return {"text": "\n".join(lines), "html": True}

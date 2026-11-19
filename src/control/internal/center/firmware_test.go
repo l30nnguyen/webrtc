@@ -58,7 +58,7 @@ func TestFirmwareRefusals(t *testing.T) {
 	}{
 		{"no sid", http.MethodGet, "/v1/firmware/anycloud/matrix", http.StatusUnauthorized},
 		{"bad sid", http.MethodGet, firmwareURL("anycloud", "not-a-sid"), http.StatusUnauthorized},
-		{"tampered sid", http.MethodGet, firmwareURL("anycloud", camera[:len(camera)-2]+"AA"), http.StatusUnauthorized},
+		{"tampered sid", http.MethodGet, firmwareURL("anycloud", tamper(camera)), http.StatusUnauthorized},
 		{"viewer sid", http.MethodGet, firmwareURL("anycloud", viewer), http.StatusUnauthorized},
 		{"unknown tenant", http.MethodGet, firmwareURL("anycloud", unknown), http.StatusUnauthorized},
 		{"blocked sid", http.MethodGet, firmwareURL("anycloud", blocked), http.StatusUnauthorized},
@@ -86,4 +86,14 @@ func TestFirmwareOffWithoutDir(t *testing.T) {
 	if response := e.do(http.MethodGet, firmwareURL("anycloud", camera), nil, nil); response.Code != http.StatusNotFound {
 		t.Fatalf("status = %d", response.Code)
 	}
+}
+
+// tamper changes one character in the middle of a SID (always a different one).
+func tamper(s string) string {
+	i := len(s) / 2
+	c := byte('A')
+	if s[i] == 'A' {
+		c = 'B'
+	}
+	return s[:i] + string(c) + s[i+1:]
 }

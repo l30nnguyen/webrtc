@@ -88,7 +88,7 @@ The server pings every 30 s. Messages the camera sends:
 
 | Message | What the server does |
 | --- | --- |
-| `{"type":"register","nickname":"Front door","sid":"<own SID, optional>"}` | Stores the name (1–128 chars). `sid` must match the ticket and is shown only on a discovery tenant. |
+| `{"type":"register","nickname":"Front door","sid":"<own SID, optional>","version":"2.2.1"}` | Stores the name (1–128 chars). `sid` must match the ticket and is shown only on a discovery tenant. `version` (camera 2.2.1+, up to 32 of `0-9A-Za-z._+-`; server 2.7.3+) is the camera's software version: the connection log tags each request and camera report with it (`camera_version`), so results can be compared per camera release. |
 | `{"id":"<viewer id>","type":"offer","sdp":"...","candidates":[{"url":"host:port?transport=udp","username":"...","password":"..."}]}` | Forwarded to that viewer, if the viewer's ticket is for this camera |
 | `{"id":"<viewer id>","type":"error","msg":"Unauthorized"}` | Forwarded (wrong viewing password) |
 | `{"type":"report","result":"connected","path":"relay","relay_offered":true,"relay_ready":true,"setup_ms":840}` | Counted for statistics, never forwarded (see 2.4) |

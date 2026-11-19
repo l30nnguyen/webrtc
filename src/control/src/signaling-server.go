@@ -51,6 +51,7 @@ const (
 type DeviceInfo struct {
 	ID          string  `json:"id"`
 	Nickname    string  `json:"nickname,omitempty"`
+	Version     string  `json:"version,omitempty"` // the camera's software version (register, 2.2.1+)
 	Tenant      string  `json:"tenant,omitempty"`
 	ConnectedAt string  `json:"connected_at"`
 	Path        string  `json:"path"`
@@ -541,8 +542,13 @@ func (s *Server) readPump(c *Client) {
 				}
 				registeredSID = sidText
 			}
+			version, _ := msg["version"].(string)
+			if !reportVersion.MatchString(version) {
+				version = ""
+			}
 			s.mu.Lock()
 			c.Info.Nickname = nickname
+			c.Info.Version = version
 			if hasSID {
 				c.registeredSID = registeredSID
 			}
@@ -590,6 +596,10 @@ func (s *Server) readPump(c *Client) {
 		// another tenant is indistinguishable from an offline one.
 		s.mu.RLock()
 		dest, exists := s.clients[clientKey(c.Tenant, destID)]
+		destVersion := ""
+		if exists {
+			destVersion = dest.Info.Version
+		}
 		s.mu.RUnlock()
 		if exists && s.admission != nil {
 			switch c.Role {
@@ -622,7 +632,7 @@ func (s *Server) readPump(c *Client) {
 				}
 				s.countStat("requests", func(counters *stats.Counters) { counters.RequestFrom(c.Country) })
 				s.viewerCountries.remember(clientKey(c.Tenant, c.ID), c.Country)
-				s.addEvent(events.Event{Type: events.Request, Camera: dest.ID, Viewer: c.ID, Result: "forwarded", Relays: s.relayNames(servers), Country: c.Country})
+				s.addEvent(events.Event{Type: events.Request, Camera: dest.ID, Viewer: c.ID, Result: "forwarded", Relays: s.relayNames(servers), Country: c.Country, CameraVersion: destVersion})
 			}
 			if c.Role == admission.RoleCamera && dest.Role == admission.RolePlayer && msg["type"] == "offer" {
 				s.addRelayURLs(msg)
