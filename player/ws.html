@@ -543,7 +543,7 @@
             dcStatusLog = document.getElementById('dc-status');
 
         // This page's own version, sent in every report; equals cfg/version (checked by a test).
-        const PLAYER_VERSION = '2.7.4';
+        const PLAYER_VERSION = '2.7.5';
 
         let clientId = null;
         let websocket = null;
@@ -2193,15 +2193,23 @@
                     // Viewer limit: the camera is already serving its most viewers
                     // (max-viewers). Not a fault; tell the user and do not retry.
                     const viewerLimit = normalized.includes('viewer limit');
+                    // Camera-side media problems (camera 2.2.2 reopens a lost
+                    // source by itself): not the password, not the network.
+                    const cameraMedia = normalized.includes('video source') ? 'no_video'
+                        : normalized.includes('audio source') ? 'no_audio'
+                        : normalized.includes('relay configuration') ? 'bad_relay'
+                        : normalized.includes('media setup') || normalized.includes('media offer') ? 'media_setup' : '';
                     viewReport.failed(normalized.includes('unauthorized') ? 'unauthorized'
                         : normalized.includes('offline') ? 'camera_offline'
-                        : viewerLimit ? 'viewer_limit' : 'other');
+                        : viewerLimit ? 'viewer_limit' : cameraMedia || 'other');
                     document.getElementById('findStatus').textContent = normalized.includes('unauthorized')
                         ? '❌ Camera password was rejected. Check it and try Play again.'
                         : normalized.includes('offline')
                             ? '❌ Camera is offline.'
                         : viewerLimit
                             ? '⚠️ The camera already has the most viewers it allows. Try again when someone stops watching.'
+                        : cameraMedia
+                            ? '⚠️ The camera\'s video is not ready. Try again in a few seconds.'
                         : normalized.includes('invalid request')
                             ? '❌ Camera rejected the request. Check the camera password and SID.'
                             : '❌ Camera connection was rejected. Check the camera password and try again.';
