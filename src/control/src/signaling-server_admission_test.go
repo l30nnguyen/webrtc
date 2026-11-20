@@ -803,6 +803,23 @@ func TestDownloadsFollowFirmwareChannels(t *testing.T) {
 	if got := get("HCX330L/matrix"); got != "unlisted" {
 		t.Fatalf("a model the file does not list: %q", got)
 	}
+	// "downloads": false turns the whole plain route off.
+	body := `{"firmware": {"HCX130": {"stable": "2.2.2"}}, "downloads": false}`
+	if err := os.WriteFile(channels, []byte(body), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	when := time.Now().Add(3 * time.Second)
+	_ = os.Chtimes(channels, when, when)
+	for _, path := range []string{"HCX130/matrix", "HCX330L/matrix", "HCX130/version"} {
+		response, err := n.http.Client().Get(n.http.URL + "/downloads/" + path)
+		if err != nil {
+			t.Fatal(err)
+		}
+		response.Body.Close()
+		if response.StatusCode != http.StatusGone {
+			t.Fatalf("%s with downloads off: status %d", path, response.StatusCode)
+		}
+	}
 }
 
 // A connection that is already open is ended by the sweep once its device is

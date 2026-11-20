@@ -68,6 +68,10 @@ type Group struct {
 type File struct {
 	Firmware map[string]Entry `json:"firmware"`
 	Canary   Group            `json:"canary"`
+	// Downloads false turns the plain /downloads route off (410 Gone for
+	// every file); only the signed /v1/firmware route serves firmware then.
+	// Missing means on.
+	Downloads *bool `json:"downloads,omitempty"`
 }
 
 // Who describes the camera asking for a download.
@@ -170,6 +174,17 @@ func (c *Channels) load() {
 		return
 	}
 	c.file, c.prefixes = f, prefixes
+}
+
+// DownloadsOff reports whether the channels file turned /downloads off.
+func (c *Channels) DownloadsOff() bool {
+	if c == nil {
+		return false
+	}
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	c.load()
+	return c.file != nil && c.file.Downloads != nil && !*c.file.Downloads
 }
 
 // Pick returns the version and channel for name (a model or platform), or

@@ -9,6 +9,7 @@
   matrix-firmware rollback                  stable -> previous, for every model
   matrix-firmware canary [--ips A,B] [--tenants T,..] [--sids D,..]   show or set the canary group
   matrix-firmware init                      once: versioned copies of what the Center serves now, stable = that
+  matrix-firmware downloads on|off          the plain /downloads route (off: only the signed /v1/firmware serves firmware)
 
 Design: server/design/firmware-channels.md. The Center (control server 2.7.6+)
 reads /opt/matrix/cfg/firmware-channels.json on every download: cameras in the
@@ -189,6 +190,25 @@ def cmd_status(_):
              f"{e.get('previous', '-') or '-':<9} {' '.join(present.get(name, [])) or '-'}")
     g = data.get("canary", {})
     note(f"canary group: ips {g.get('ips') or '-'}, tenants {g.get('tenants') or '-'}, sids {g.get('sids') or '-'}")
+    note(f"/downloads route: {'OFF (410 Gone; only /v1/firmware serves firmware)' if data.get('downloads') is False else 'on'}")
+    return 0
+
+
+def cmd_downloads(args):
+    _l = lock()
+    data = read_channels() or die("no channels file: run 'matrix-firmware init' first")
+    if args.state == "off":
+        data["downloads"] = False
+    else:
+        data.pop("downloads", None)
+    write_channels(data)
+    history(f"downloads {args.state}")
+    if args.state == "off":
+        note("/downloads is OFF: every request gets 410 Gone and each refused binary download is logged on the Center")
+        note("(journalctl -u matrix | grep 'download refused'). Cameras that download the plain binary at boot")
+        note("(HCX330L, GIRAFFE_HD, HCX130 on old firmware) no longer get matrix. Undo: matrix-firmware downloads on")
+    else:
+        note("/downloads is on again (files follow the channels).")
     return 0
 
 
@@ -477,6 +497,8 @@ def main():
         p.add_argument("version")
     for name in ("promote", "cancel", "rollback", "init"):
         sub.add_parser(name)
+    p = sub.add_parser("downloads")
+    p.add_argument("state", choices=["on", "off"])
     p = sub.add_parser("canary")
     p.add_argument("--ips")
     p.add_argument("--tenants")
@@ -488,7 +510,8 @@ def main():
     if os.geteuid() == 0:
         die("run as the admin user, not root")
     return {"status": cmd_status, "upload": cmd_upload, "publish": cmd_publish, "promote": cmd_promote,
-            "cancel": cmd_cancel, "rollback": cmd_rollback, "canary": cmd_canary, "init": cmd_init}[args.cmd](args)
+            "cancel": cmd_cancel, "rollback": cmd_rollback, "canary": cmd_canary, "init": cmd_init,
+            "downloads": cmd_downloads}[args.cmd](args)
 
 
 if __name__ == "__main__":

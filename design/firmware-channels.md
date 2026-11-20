@@ -1,6 +1,8 @@
 # Staged camera firmware releases (R7)
 
-Since control server 2.7.6. Before it, every publish replaced
+Since control server 2.7.6. **Since 2026-11-20 12:00 (+07) the plain
+`/downloads` route is off** (owner's decision): firmware is served only as the
+signed package on `/v1/firmware` (section "The plain route"). Before it, every publish replaced
 `/downloads/<MODEL>/matrix` and the signed package at once, so a bad build
 reached every camera at its next boot.
 
@@ -45,6 +47,29 @@ of the binary is logged with model, version and channel
 (`firmware download HCX130 2.2.3 (canary) from …`,
 `center: firmware anycloud 2.2.3 (canary, … bytes) to SID …`).
 
+## The plain route (`/downloads`)
+
+`"downloads": false` in the channels file turns `/downloads` off: every
+request gets **410 Gone**, and each refused binary request is logged on the
+Center with the model and the camera's address:
+
+```bash
+journalctl -u matrix | grep 'download refused'      # on the Center: cameras still asking for the plain binary
+```
+
+Switch it with `matrix-firmware downloads off|on` on the admin server; the
+change takes effect on the next request, no restart.
+
+**What off means for cameras.** A camera downloads `matrix` to RAM at every
+boot. Cameras whose firmware uses the plain route (HCX330L and GIRAFFE_HD
+today, and HCX130 on firmware older than the signed download) get no binary
+at their next boot and stay offline until they get firmware with the signed
+download (fepe_sdk `fepe_matrix_binary_download`, `firmware-package.md`).
+The log line above lists them. To bring them back, turn the route on again.
+
+`matrix-firmware publish` still copies every model's plain binary to the
+Center, so turning the route on again serves the right versions at once.
+
 ## Releasing a version (admin server)
 
 `matrix-firmware` (repo `server/admin/matrix-firmware`, installed in
@@ -77,16 +102,21 @@ action is appended to `/opt/matrix-admin/firmware/history.log`.
    stable again for every model (cameras take it at their next boot).
 
 `matrix-firmware status` shows stable / canary / previous per model, the
-versions present on the Center and the canary group;
+versions present on the Center, the canary group and whether `/downloads` is
+on;
 `matrix-firmware canary --ips 115.78.12.186 --tenants test01` changes the
 group. Publishing keeps stable, canary, previous and the two newest other
 versions per model on the Center and deletes older ones.
 
 ## Limits
 
-- On `/downloads` the canary group can only be chosen by address: in
-  practice the office's cameras. A tenant or single cameras can be canaries
-  only on firmware that uses the signed `/v1/firmware` route (anycloud).
+- With `/downloads` off, only platforms with a signed package (anycloud
+  today) can be updated at all. HCX330L (anykav500) and GIRAFFE_HD
+  (anykav200) need fepe_sdk's signed download and their own encryption key
+  before they can run matrix again.
+- On `/downloads` (when on) the canary group can only be chosen by address:
+  in practice the office's cameras. A tenant or single cameras can be
+  canaries only on the signed `/v1/firmware` route.
 - A camera takes a new version only when it boots; promotion and rollback are
   not instant.
 - The Center alone serves firmware: if it is down, cameras that boot keep the

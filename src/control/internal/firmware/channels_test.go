@@ -50,7 +50,7 @@ func TestPickByGroup(t *testing.T) {
 		{"anycloud", Who{Addr: netip.MustParseAddr("8.8.8.8"), Tenant: "other", SIDDigest: "3fa1c2d4e5f6aa"}, "2.2.3"},
 		{"anycloud", Who{Addr: netip.MustParseAddr("8.8.8.8"), Tenant: "other", SIDDigest: "4fa1c2d4e5f6aa"}, "2.2.2"},
 		{"GIRAFFE_HD", Who{Addr: netip.MustParseAddr("115.78.12.186")}, "2.2.2"}, // no canary set
-		{"HCX330L", Who{Addr: netip.MustParseAddr("115.78.12.186")}, ""},       // not listed
+		{"HCX330L", Who{Addr: netip.MustParseAddr("115.78.12.186")}, ""},         // not listed
 	}
 	for _, tc := range cases {
 		if got, _ := c.Pick(tc.name, tc.who); got != tc.want {

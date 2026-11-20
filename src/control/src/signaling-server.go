@@ -864,6 +864,17 @@ func (s *Server) handleDownloads(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "Invalid filename", http.StatusBadRequest)
 		return
 	}
+	// The plain route can be turned off ("downloads": false in
+	// cfg/firmware-channels.json): firmware then comes only signed from
+	// /v1/firmware. Each refused binary request is logged, so cameras that
+	// still use the plain route can be found.
+	if s.firmware.DownloadsOff() {
+		if strings.HasSuffix(filename, "/matrix") && r.Method == http.MethodGet {
+			log.Printf("firmware download refused (/downloads is off): %s from %s", filename, remoteAddrOf(r))
+		}
+		http.Error(w, "Gone", http.StatusGone)
+		return
+	}
 	filepath := s.rootDir + "downloads/" + filename
 	// <MODEL>/{matrix,matrix.sha256,version}: the camera firmware, chosen by
 	// cfg/firmware-channels.json (R7). Only the address is known here, so the

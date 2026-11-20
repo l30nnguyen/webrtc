@@ -166,7 +166,9 @@ Reviewed by the fepe_sdk session on 2026-11-17. The firmware cannot do steps 2 a
 3. Ship the new firmware. Cameras with old firmware keep using `/downloads/`.
 4. When no camera uses `/downloads/<MODEL>/matrix` any more (its downloads in the
    server log stop), delete the plain files. Until then the plain binary stays
-   downloadable.
+   downloadable. **Changed 2026-11-20:** the owner turned `/downloads` off for
+   every model from 12:00 (+07) (`matrix-firmware downloads off`, 410 Gone;
+   `firmware-channels.md`), before every model has the signed download.
 
 ## What this does not cover
 
