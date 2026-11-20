@@ -17,7 +17,7 @@ Other docs, all in `server/design/` and the Drive folder `Matrix/v2/design`:
 | [capacity.md](capacity.md) | how many servers for how many cameras, and the measured numbers |
 | [endpoints.md](endpoints.md) | every URL the servers answer |
 
-The release folder (`~/code/webrtc/release/<version>_<date>/server/INSTALL.md`)
+The release folder (`release/<version>_<date>/server/INSTALL.md`)
 has the full install commands. `server/release/README.md` is the control
 server reference, and `server/src/relay/README.md` is the relay reference.
 
@@ -647,12 +647,12 @@ issues new ones.
 
 **Who can read it.** Copies are encrypted on the server to the backup public
 key. The private key is on **no server**: the project owner keeps
-`matrix_backup.key.asc` on the operator's PC (`~/code/webrtc/`) and on a USB
+`matrix_backup.key.asc` on the operator's PC (project folder) and on a USB
 key. Without it nothing can be restored.
 
 **Copy on the PC.** `server/admin/matrix-local-backup` (systemd user timer,
 daily 04:00 UTC) pulls the newest copy of each server, the SID backup and the
-admin server's own files to `~/matrix-backups/<time>/`, decrypts them there
+admin server's own files to `matrix-backups/<time>/` (home folder), decrypts them there
 (owner's choice, 2026-11-20) and keeps 7 days. How to read a copy and restore
 each kind of server: **`backup-restore.md`**. The admin server refuses any file that is not
 encrypted.
@@ -704,7 +704,7 @@ turn them on in each console.
 
 ### 4.1 Control servers
 
-From `~/code/webrtc/server` on a PC with the key, and only from a committed
+From `server/` on a PC with the key, and only from a committed
 and tagged release:
 
 1. **Verify the build before deployment.**
