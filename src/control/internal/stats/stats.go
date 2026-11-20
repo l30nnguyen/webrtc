@@ -39,6 +39,10 @@ var validErrors = map[string]bool{
 	"no_offer":       true, // camera never answered the request
 	"no_answer":      true, // viewer never answered the camera
 	"no_path":        true, // no network path, relay included
+	"no_video":       true, // camera's video source is down
+	"no_audio":       true, // camera's audio source is down
+	"bad_relay":      true, // camera could not use the relay settings it got
+	"media_setup":    true, // camera could not set up the media session
 	"timeout":        true, // not connected in time
 	"closed":         true, // closed by either side before connecting
 	"viewer_limit":   true, // camera already serving its most viewers (max-viewers)

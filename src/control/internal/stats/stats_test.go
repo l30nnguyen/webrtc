@@ -90,3 +90,12 @@ func TestViewerLimitIsKeptAsItsOwnError(t *testing.T) {
 		t.Fatalf("viewer_limit normalized to %q", r.Error)
 	}
 }
+
+func TestCameraSideErrorsAreKept(t *testing.T) {
+	for _, code := range []string{"no_video", "no_audio", "bad_relay", "media_setup"} {
+		r := Report{Role: RoleCamera, Result: ResultFailed, Error: code}
+		if !r.Normalize() || r.Error != code {
+			t.Fatalf("%s normalized to %q", code, r.Error)
+		}
+	}
+}

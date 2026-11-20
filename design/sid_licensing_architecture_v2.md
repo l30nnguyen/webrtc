@@ -303,7 +303,7 @@ and never forwards it:
 | `result` | `connected` or `failed` |
 | `path` (connected) | `lan`, `direct`, `relay` |
 | `relay_protocol` (connected through a relay) | `udp`, `tcp`, `tls` |
-| `error` (failed) | `unauthorized`, `camera_offline`, `no_offer`, `no_answer` (camera side: the viewer never answered), `no_path`, `timeout`, `closed`, `other` |
+| `error` (failed) | `unauthorized`, `camera_offline`, `no_offer`, `no_answer` (camera side: the viewer never answered), `no_path` (no network path worked, relay included), `no_video` / `no_audio` (camera's media source is down), `bad_relay` (camera could not use the relay settings), `media_setup` (camera could not set up the session), `timeout`, `closed`, `viewer_limit`, `other` |
 | `relay_offered` / `relay_ready` | a relay was offered / it gave an address |
 | `setup_ms` | request to connected |
 | `version` (optional, 2.6.6) | the reporter's software version, e.g. the web player's `2.6.6`; shown in the connection log |
