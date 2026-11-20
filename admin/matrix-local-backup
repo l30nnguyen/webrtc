@@ -1,0 +1,163 @@
+#!/bin/bash
+# matrix-local-backup: a daily copy of every Matrix backup on the operator's PC,
+# decrypted (the project owner's choice, 2026-11-20). Runs on the PC, not on a
+# server. Guide: server/design/backup-restore.md.
+#
+#   matrix-local-backup run              pull from the admin server, decrypt, check, prune
+#   matrix-local-backup list             local copies, newest first
+#   matrix-local-backup install-timer    systemd --user timer: daily, and at login if a day was missed
+#
+# Each run writes ~/matrix-backups/<UTC time>/ (mode 0700):
+#   encrypted/<server>.tar.gz.gpg        the newest copy of each server, as the admin server holds it
+#   encrypted/sids.tar.gz.gpg            the newest SID batch backup (sid_gen)
+#   plain/<server>/                      the same copies decrypted; MANIFEST.sha256 checked
+#   plain/sids/sid_gen/                  SID signing key, issued list, batches
+#   plain/admin-server/                  the admin server's own files: servers.conf, keys/ssh.pem,
+#                                        firmware/keys (sign + enc keys), monitor/telegram.env, ...
+#   STATUS                               what was copied and whether each manifest matched
+# Copies older than KEEP_DAYS (7) are deleted; the newest is always kept.
+#
+# The plain files are secrets (Center keys, SID signing key, firmware keys,
+# SSH key, Telegram bot token). Keep ~/matrix-backups on this PC only; never
+# sync it to a cloud drive or commit it.
+set -euo pipefail
+
+ROOT=${MATRIX_ROOT:-$HOME/code/webrtc}
+ADMIN=${MATRIX_ADMIN:-admin@ec2-3-95-228-203.compute-1.amazonaws.com}
+SSH_KEY=${MATRIX_ADMIN_KEY:-$ROOT/webrtc_instance.pem}
+BACKUP_KEY=${MATRIX_BACKUP_KEY:-$ROOT/matrix_backup.key.asc}
+DEST=${MATRIX_LOCAL_BACKUPS:-$HOME/matrix-backups}
+KEEP_DAYS=${KEEP_DAYS:-7}
+SSH_OPTS=(-i "$SSH_KEY" -o BatchMode=yes -o ConnectTimeout=20 -o ServerAliveInterval=15)
+
+# Admin server files copied as they are (relative to /opt/matrix-admin).
+ADMIN_FILES=(servers.conf keys firmware/keys monitor/telegram.env monitor/state.json tools/matrix-backup)
+
+die() { echo "matrix-local-backup: $*" >&2; exit 1; }
+
+gpg_home() {
+    local g="$DEST/.gnupg"
+    if [[ ! -d "$g" ]]; then
+        install -d -m 700 "$g"
+        [[ -f "$BACKUP_KEY" ]] || die "missing backup private key $BACKUP_KEY"
+        gpg --homedir "$g" --batch --quiet --import "$BACKUP_KEY"
+    fi
+    echo "$g"
+}
+
+cmd_run() {
+    umask 077
+    install -d -m 700 "$DEST"
+    local g; g="$(gpg_home)"
+    local stamp; stamp="$(date -u +%Y%m%dT%H%M%SZ)"
+    local out="$DEST/.incoming-$stamp" failed=0
+    rm -rf "$DEST"/.incoming-*
+    INCOMING="$out"; trap 'rm -rf "$INCOMING"' EXIT
+    mkdir -m 700 "$out" "$out/encrypted" "$out/plain" "$out/plain/admin-server"
+
+    # Newest encrypted copy of every backup folder, plus the admin server's own files.
+    # shellcheck disable=SC2029  # the list is expanded here on purpose
+    ssh "${SSH_OPTS[@]}" "$ADMIN" "cd /opt/matrix-admin && for d in backups/*/; do
+            f=\$(ls -1 \"\$d\"*.gpg 2>/dev/null | sort | tail -n 1); [ -n \"\$f\" ] && echo \"\$f\"; done > /tmp/.mlb.list &&
+        tar -cf - -T /tmp/.mlb.list ${ADMIN_FILES[*]} 2>/dev/null; rc=\$?; rm -f /tmp/.mlb.list; exit \$rc" |
+        tar -xf - -C "$out/plain/admin-server" || die "could not copy from $ADMIN"
+
+    {
+        echo "taken=$stamp"
+        echo "from=$ADMIN"
+    } > "$out/STATUS"
+    local f name dir
+    for f in "$out/plain/admin-server"/backups/*/*.gpg; do
+        [[ -f "$f" ]] || continue
+        name="$(basename "$(dirname "$f")")"
+        mv "$f" "$out/encrypted/$name.tar.gz.gpg"
+        echo "$name.copy=$(basename "$f")" >> "$out/STATUS"
+        dir="$out/plain/$name"; mkdir -m 700 "$dir"
+        if gpg --homedir "$g" --batch --quiet --decrypt "$out/encrypted/$name.tar.gz.gpg" 2>/dev/null |
+            tar -xzf - --no-same-owner -C "$dir"; then
+            if [[ -f "$dir/MANIFEST.sha256" ]]; then
+                if (cd "$dir" && sha256sum --quiet -c MANIFEST.sha256 >/dev/null 2>&1); then
+                    echo "$name=ok" >> "$out/STATUS"
+                else
+                    echo "$name=MANIFEST MISMATCH" >> "$out/STATUS"; failed=1
+                fi
+            else
+                echo "$name=ok (no manifest)" >> "$out/STATUS"
+            fi
+        else
+            echo "$name=DECRYPT FAILED" >> "$out/STATUS"; failed=1
+        fi
+    done
+    rm -rf "$out/plain/admin-server/backups"
+    [[ -f "$out/encrypted/center.tar.gz.gpg" ]] || { echo "center=MISSING" >> "$out/STATUS"; failed=1; }
+    [[ -f "$out/plain/admin-server/servers.conf" ]] || { echo "admin-server=MISSING" >> "$out/STATUS"; failed=1; }
+    find "$out" -type d -exec chmod 700 {} + ; find "$out" -type f -exec chmod 600 {} +
+
+    mv "$out" "$DEST/$stamp"
+    prune
+    sed 's/^/  /' "$DEST/$stamp/STATUS"
+    if [[ $failed -ne 0 ]]; then
+        command -v notify-send >/dev/null && notify-send -u critical "Matrix local backup" "Problems in $DEST/$stamp/STATUS" 2>/dev/null || true
+        die "finished with problems: $DEST/$stamp/STATUS"
+    fi
+    echo "ok: $DEST/$stamp"
+}
+
+# prune: delete copies older than KEEP_DAYS, never the newest.
+prune() {
+    local cutoff newest d
+    cutoff="$(date -u -d "-$KEEP_DAYS days" +%Y%m%dT%H%M%SZ)"
+    newest="$(ls -1d "$DEST"/20??????T??????Z 2>/dev/null | sort | tail -n 1 || true)"
+    for d in "$DEST"/20??????T??????Z; do
+        [[ -d "$d" && "$d" != "$newest" ]] || continue
+        [[ "$(basename "$d")" < "$cutoff" ]] && rm -rf "$d"
+    done
+    return 0
+}
+
+cmd_list() {
+    local d
+    for d in $(ls -1d "$DEST"/20??????T??????Z 2>/dev/null | sort -r); do
+        printf '%s  %s  %s\n' "$(basename "$d")" "$(du -sh "$d" | cut -f1)" \
+            "$(grep -cE '=(MANIFEST|DECRYPT|MISSING)' "$d/STATUS" | sed 's/^0$/ok/; s/^[1-9].*/PROBLEMS/')"
+    done
+}
+
+cmd_install_timer() {
+    local self; self="$(readlink -f "$0")"
+    local dir="$HOME/.config/systemd/user"
+    mkdir -p "$dir"
+    cat > "$dir/matrix-local-backup.service" <<EOF
+[Unit]
+Description=Copy and decrypt the Matrix backups from the admin server
+Wants=network-online.target
+After=network-online.target
+
+[Service]
+Type=oneshot
+ExecStart=$self run
+EOF
+    cat > "$dir/matrix-local-backup.timer" <<'EOF'
+[Unit]
+Description=Daily local copy of the Matrix backups
+
+[Timer]
+# After the admin server's nightly pull (03:17 UTC + up to 10 min).
+OnCalendar=*-*-* 04:00:00 UTC
+Persistent=true
+RandomizedDelaySec=5m
+
+[Install]
+WantedBy=timers.target
+EOF
+    systemctl --user daemon-reload
+    systemctl --user enable --now matrix-local-backup.timer
+    systemctl --user list-timers matrix-local-backup.timer --no-pager | head -n 2
+}
+
+case "${1:-}" in
+    run) cmd_run ;;
+    list) cmd_list ;;
+    install-timer) cmd_install_timer ;;
+    *) sed -n '2,24p' "$0" | sed 's/^# \{0,1\}//'; exit 2 ;;
+esac

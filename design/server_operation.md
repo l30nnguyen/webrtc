@@ -647,8 +647,14 @@ issues new ones.
 
 **Who can read it.** Copies are encrypted on the server to the backup public
 key. The private key is on **no server**: the project owner keeps
-`matrix_backup.key.asc` in the password manager, in two places. Without it
-nothing can be restored. The admin server refuses any file that is not
+`matrix_backup.key.asc` on the operator's PC (`~/code/webrtc/`) and on a USB
+key. Without it nothing can be restored.
+
+**Copy on the PC.** `server/admin/matrix-local-backup` (systemd user timer,
+daily 04:00 UTC) pulls the newest copy of each server, the SID backup and the
+admin server's own files to `~/matrix-backups/<time>/`, decrypts them there
+(owner's choice, 2026-11-20) and keeps 7 days. How to read a copy and restore
+each kind of server: **`backup-restore.md`**. The admin server refuses any file that is not
 encrypted.
 
 **Commands** (on the admin server):
