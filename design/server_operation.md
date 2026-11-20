@@ -360,7 +360,7 @@ through a password manager, never by chat, e-mail, git or Drive.
 
 | What | User | How you get in | Where the secret is |
 |---|---|---|---|
-| SSH to all four droplets | `root` | SSH key only. There is no password login and no root password is set. | Private key `prod_do.pem`, now on the owner's PC in `~/code/webrtc/`. For the hand-over, add the new operator's own public key to `/root/.ssh/authorized_keys` on each droplet rather than copying `prod_do.pem` (see below). |
+| SSH to all four droplets | `root` | SSH key only. There is no password login and no root password is set. | Private key `prod_do.pem`, now on the owner's PC in the project folder. For the hand-over, add the new operator's own public key to `/root/.ssh/authorized_keys` on each droplet rather than copying `prod_do.pem` (see below). |
 | DigitalOcean (droplets, cloud firewall, monitoring graphs, billing) | the operator's own DO account, invited to the team | DO web console, `doctl` | the DO team admin invites them |
 | DNS (zone `5gen.care`) | — | AWS Route53 | managed by the project owner: ask for each new A record |
 | `/admin/statistic` (charts, connection log) | none | allowed by IP: `STATISTIC_ALLOW` / `PLAYER_ALLOW` in `/etc/matrix/matrix.conf`, now only the office IP 115.78.12.186 | to open it from elsewhere, add the IP there and run `setup.sh upgrade` (section 4.4) |
