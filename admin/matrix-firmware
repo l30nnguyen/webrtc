@@ -205,8 +205,8 @@ def cmd_downloads(args):
     history(f"downloads {args.state}")
     if args.state == "off":
         note("/downloads is OFF: every request gets 410 Gone and each refused binary download is logged on the Center")
-        note("(journalctl -u matrix | grep 'download refused'). Cameras that download the plain binary at boot")
-        note("(HCX330L, GIRAFFE_HD, HCX130 on old firmware) no longer get matrix. Undo: matrix-firmware downloads on")
+        note("(journalctl -u matrix | grep 'download refused'). HCX130 and HCX330L use the signed package and")
+        note("GIRAFFE_HD has matrix in its firmware; only cameras on old firmware are affected. Undo: matrix-firmware downloads on")
     else:
         note("/downloads is on again (files follow the channels).")
     return 0

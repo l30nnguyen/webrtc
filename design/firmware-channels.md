@@ -60,12 +60,12 @@ journalctl -u matrix | grep 'download refused'      # on the Center: cameras sti
 Switch it with `matrix-firmware downloads off|on` on the admin server; the
 change takes effect on the next request, no restart.
 
-**What off means for cameras.** A camera downloads `matrix` to RAM at every
-boot. Cameras whose firmware uses the plain route (HCX330L and GIRAFFE_HD
-today, and HCX130 on firmware older than the signed download) get no binary
-at their next boot and stay offline until they get firmware with the signed
-download (fepe_sdk `fepe_matrix_binary_download`, `firmware-package.md`).
-The log line above lists them. To bring them back, turn the route on again.
+**What off means for cameras.** No camera model needs the plain route:
+HCX130 and HCX330L (same anycloud compiler) download the signed `anycloud`
+package at boot, and GIRAFFE_HD has `matrix` bundled into its firmware image.
+Only a camera still on firmware older than the signed download would get no
+binary at its next boot; the log line above lists any such camera, and
+`matrix-firmware downloads on` serves it again.
 
 `matrix-firmware publish` still copies every model's plain binary to the
 Center, so turning the route on again serves the right versions at once.
@@ -110,10 +110,8 @@ versions per model on the Center and deletes older ones.
 
 ## Limits
 
-- With `/downloads` off, only platforms with a signed package (anycloud
-  today) can be updated at all. HCX330L (anykav500) and GIRAFFE_HD
-  (anykav200) need fepe_sdk's signed download and their own encryption key
-  before they can run matrix again.
+- GIRAFFE_HD gets a new `matrix` only with a new firmware image (bundled);
+  channels apply to the cameras that download (HCX130, HCX330L).
 - On `/downloads` (when on) the canary group can only be chosen by address:
   in practice the office's cameras. A tenant or single cameras can be
   canaries only on the signed `/v1/firmware` route.

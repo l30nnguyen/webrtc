@@ -28,9 +28,9 @@ enough:
 
 | Platform | matrix build | fepe_sdk builds | Cameras today |
 |---|---|---|---|
-| `anycloud` | `./build.sh anycloud` (GCC 5.5.0) | anykav130 and anykav330 (both anycloud compilers) | HCX130; HCX330L if its firmware uses the anykav330 fepe_sdk |
-| `anykav200` | `./build.sh anykav200` (GCC 4.8.5) | anykav200 | GIRAFFE_HD |
-| `anykav500` | `./build.sh anykav500` (GCC 4.9.4) | anykav500 | HCX330L today (`/downloads/HCX330L/`) |
+| `anycloud` | `./build.sh anycloud` (GCC 5.5.0) | anykav130 and anykav330 (both anycloud compilers) | HCX130 and HCX330L: both download this signed package (HCX330L shares the compiler; tested by the owner) |
+| `anykav200` | `./build.sh anykav200` (GCC 4.8.5) | anykav200 | GIRAFFE_HD: `matrix` is bundled into the firmware image, no download |
+| `anykav500` | `./build.sh anykav500` (GCC 4.9.4) | anykav500 | no camera downloads it today (HCX330L runs the `anycloud` build) |
 
 For now (2026-11-17) fepe_sdk turns the download on only for its anycloud builds
 (anykav130, anykav330); on other platforms the call returns an error. So only
@@ -166,9 +166,10 @@ Reviewed by the fepe_sdk session on 2026-11-17. The firmware cannot do steps 2 a
 3. Ship the new firmware. Cameras with old firmware keep using `/downloads/`.
 4. When no camera uses `/downloads/<MODEL>/matrix` any more (its downloads in the
    server log stop), delete the plain files. Until then the plain binary stays
-   downloadable. **Changed 2026-11-20:** the owner turned `/downloads` off for
-   every model from 12:00 (+07) (`matrix-firmware downloads off`, 410 Gone;
-   `firmware-channels.md`), before every model has the signed download.
+   downloadable. **Done 2026-11-20:** the owner turned `/downloads` off for
+   every model at 12:02 (+07) (`matrix-firmware downloads off`, 410 Gone;
+   `firmware-channels.md`). No camera needs it: HCX130 and HCX330L take the
+   signed `anycloud` package, GIRAFFE_HD has `matrix` in its firmware image.
 
 ## What this does not cover
 
