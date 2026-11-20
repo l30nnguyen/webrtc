@@ -1,0 +1,551 @@
+#!/usr/bin/env python3
+"""matrix-provision: prepare a new droplet from the admin server (roll-out.md R6/R6b).
+
+  matrix-provision node  <droplet_ip> --name sg01 --region SG --domain matrix-sg01.5gen.care
+  matrix-provision relay <droplet_ip> --name mx-relay-sg01 --region SG --domain mx-relay-sg01.5gen.care \\
+                         --control matrix-sg00.5gen.care
+  matrix-provision check <name>              run the tests again for a server in servers.conf
+  matrix-provision releases                  the release files stored here
+  matrix-provision store server < matrix-server-<version>-<commit>.tar.gz
+  matrix-provision store relay <version> < tar (matrix-relay, matrix-relay.service, certbot-deploy-hook.sh, relaycheck)
+
+What ops do (server/design/provisioning.md):
+  1. create the droplet with the matrix SSH key, in the right region; point DNS (Route53) at it;
+  2. run matrix-provision node|relay ... here, as admin;
+  3. read the report: every check PASS, or fix and run "matrix-provision check NAME";
+  4. do the MANUAL steps it prints (put in service): they change production, so a person runs them.
+
+The script installs, adds the server to servers.conf, backups and monitoring,
+tests it, and never touches the Center's config.json or another server's
+secrets.
+"""
+import argparse
+import io
+import datetime
+import json
+import os
+import re
+import shlex
+import socket
+import ssl
+import subprocess
+import sys
+import tarfile
+import tempfile
+import urllib.request
+
+HOME = "/opt/matrix-admin"
+SERVERS = f"{HOME}/servers.conf"
+SSH_KEY = f"{HOME}/keys/ssh.pem"
+KNOWN_HOSTS = f"{HOME}/keys/known_hosts"
+REL = f"{HOME}/releases"
+LOG_DIR = f"{HOME}/provision"
+OFFICE_IP = "115.78.12.186"
+NAME_RE = re.compile(r"^[a-z0-9][a-z0-9-]{0,31}$")
+REGION_RE = re.compile(r"^[A-Z]{2,3}$")
+DOMAIN_RE = re.compile(r"^[a-z0-9]([a-z0-9-]*[a-z0-9])?(\.[a-z0-9]([a-z0-9-]*[a-z0-9])?)+$")
+SSH = ["-i", SSH_KEY, "-o", "BatchMode=yes", "-o", "ConnectTimeout=20", "-o", "ServerAliveInterval=15",
+       "-o", "StrictHostKeyChecking=accept-new", "-o", f"UserKnownHostsFile={KNOWN_HOSTS}"]
+
+
+def die(msg):
+    print(f"matrix-provision: {msg}", file=sys.stderr)
+    sys.exit(1)
+
+
+class Report:
+    def __init__(self, title):
+        self.title, self.rows, self.manual, self.log = title, [], [], []
+
+    def add(self, status, step, detail=""):
+        self.rows.append((status, step, detail))
+        print(f"  {status:<6} {step}{(': ' + detail) if detail else ''}", flush=True)
+
+    def ok(self, step, detail=""):
+        self.add("PASS", step, detail)
+
+    def fail(self, step, detail=""):
+        self.add("FAIL", step, detail)
+
+    def failed(self):
+        return any(r[0] == "FAIL" for r in self.rows)
+
+    def print(self):
+        print(f"\n=== {self.title} ===")
+        width = max(len(r[1]) for r in self.rows) if self.rows else 10
+        for status, step, detail in self.rows:
+            print(f"{status:<6} {step:<{width}}  {detail}")
+        verdict = "NOT READY: fix the FAIL lines, then run matrix-provision check" if self.failed() else \
+            "READY for the manual steps"
+        print(f"\nResult: {verdict}")
+        if self.manual:
+            print("\nMANUAL (put in service; these change production, so a person runs them):")
+            for i, m in enumerate(self.manual, 1):
+                print(f"  {i}. {m}")
+        os.makedirs(LOG_DIR, mode=0o700, exist_ok=True)
+        stamp = datetime.datetime.now(datetime.timezone.utc).strftime("%Y%m%dT%H%M%SZ")
+        path = f"{LOG_DIR}/{stamp}-{self.title.split()[1] if len(self.title.split()) > 1 else 'report'}.txt"
+        with open(path, "w") as f:
+            for status, step, detail in self.rows:
+                f.write(f"{status:<6} {step}  {detail}\n")
+            f.write(f"\nResult: {verdict}\n")
+            for i, m in enumerate(self.manual, 1):
+                f.write(f"MANUAL {i}. {m}\n")
+            f.write("\n--- log ---\n" + "\n".join(self.log) + "\n")
+        print(f"\n(report and full log: {path})")
+
+
+def run(host, script, report=None, timeout=900):
+    """Run a bash script as root on host; returns (rc, output)."""
+    r = subprocess.run(["ssh", *SSH, f"root@{host}", "bash -s"], input=("set -euo pipefail\n" + script).encode(),
+                       capture_output=True, timeout=timeout)
+    out = (r.stdout + r.stderr).decode(errors="replace")
+    if report is not None:
+        report.log.append(f"$ [{host}] {script.strip().splitlines()[0][:100]} ...\n{out.strip()}")
+    return r.returncode, out
+
+
+def scp(local, host, remote):
+    r = subprocess.run(["scp", "-q", *SSH, local, f"root@{host}:{remote}"], capture_output=True)
+    if r.returncode != 0:
+        die(f"copy to {host} failed: {r.stderr.decode().strip()}")
+
+
+def servers():
+    rows = []
+    with open(SERVERS) as f:
+        for line in f:
+            p = line.split()
+            if p and not p[0].startswith("#"):
+                rows.append(p + [""] * (4 - len(p)))
+    return rows
+
+
+def server_by_role(role):
+    for name, ip, r, hostname, *_ in servers():
+        if r == role:
+            return name, ip, hostname
+    die(f"no {role} in {SERVERS}")
+
+
+def server_by_hostname(hostname):
+    for name, ip, role, h, *_ in servers():
+        if h == hostname or name == hostname:
+            return name, ip, role, h
+    die(f"{hostname} is not in {SERVERS}")
+
+
+def latest_server_package():
+    d = f"{REL}/server"
+    pkgs = sorted((f for f in os.listdir(d) if f.endswith(".tar.gz")), key=lambda f: os.path.getmtime(f"{d}/{f}")) \
+        if os.path.isdir(d) else []
+    if not pkgs:
+        die("no server package here: on the PC run server/admin/push-release")
+    return f"{d}/{pkgs[-1]}"
+
+
+def latest_relay():
+    d = f"{REL}/relay"
+    versions = sorted(os.listdir(d)) if os.path.isdir(d) else []
+    if not versions:
+        die("no relay release here: on the PC run server/admin/push-release")
+    return f"{d}/{versions[-1]}"
+
+
+# ------------------------------------------------------------- shared checks
+
+def preflight(r, ip, domain, name, ports):
+    if any(n == name for n, *_ in servers()):
+        die(f"{name} is already in {SERVERS}; for a rebuild see backup-restore.md")
+    if any(i == ip for _, i, *_ in servers()):
+        die(f"{ip} is already in {SERVERS}")
+    rc, out = run(ip, """. /etc/os-release; echo "os=$ID $VERSION_ID"
+echo "mem_mb=$(awk '/MemTotal/ {print int($2/1024)}' /proc/meminfo)"
+echo "disk_gb=$(df -BG --output=avail / | tail -1 | tr -dc 0-9)"
+echo "matrix=$([ -e /opt/matrix ] || [ -e /etc/matrix-relay ] && echo present || echo none)"
+for p in """ + " ".join(ports) + """; do ss -ltnH "sport = :$p" | grep -q . && echo "busy=$p"; done; true""", r, timeout=60)
+    if rc != 0:
+        r.fail("SSH as root with the matrix key", out.strip()[:200] or "no connection")
+        return False
+    r.ok("SSH as root with the matrix key")
+    facts = dict(line.split("=", 1) for line in out.splitlines() if "=" in line and not line.startswith("busy"))
+    os_id, _, ver = facts.get("os", "").partition(" ")
+    (r.ok if os_id == "ubuntu" and ver >= "22.04" else r.fail)("Ubuntu 22.04 or newer", facts.get("os", "?"))
+    mem = int(facts.get("mem_mb", "0") or 0)
+    (r.ok if mem >= 900 else r.fail)("memory at least 1 GB", f"{mem} MB")
+    disk = int(facts.get("disk_gb", "0") or 0)
+    (r.ok if disk >= 10 else r.fail)("10 GB free disk", f"{disk} GB")
+    (r.ok if facts.get("matrix") == "none" else r.fail)("fresh droplet (no earlier matrix install)",
+                                                      facts.get("matrix", "?"))
+    busy = [line.split("=")[1] for line in out.splitlines() if line.startswith("busy=")]
+    (r.fail if busy else r.ok)("ports free", ("in use: " + ", ".join(busy)) if busy else " ".join(ports))
+    try:
+        resolved = sorted({a[4][0] for a in socket.getaddrinfo(domain, None, socket.AF_INET)})
+    except socket.gaierror:
+        resolved = []
+    (r.ok if ip in resolved else r.fail)(f"DNS {domain} -> {ip}", ", ".join(resolved) or "does not resolve")
+    return not r.failed()
+
+
+def check_tls(r, domain, ip, port=443):
+    try:
+        ctx = ssl.create_default_context()
+        with socket.create_connection((ip, port), timeout=10) as s, ctx.wrap_socket(s, server_hostname=domain) as t:
+            cert = t.getpeercert()
+        end = datetime.datetime.strptime(cert["notAfter"], "%b %d %H:%M:%S %Y %Z")
+        days = (end - datetime.datetime.utcnow()).days
+        (r.ok if days > 14 else r.fail)(f"TLS certificate for {domain}", f"valid, {days} days left")
+    except Exception as e:  # noqa: BLE001
+        r.fail(f"TLS certificate for {domain}", str(e)[:150])
+
+
+def register(r, name, ip, role, domain):
+    with open(SERVERS) as f:
+        text = f.read()
+    if not re.search(rf"^{re.escape(name)}\s", text, re.M):
+        with open(SERVERS, "a") as f:
+            f.write(("" if text.endswith("\n") else "\n") + f"{name} {ip} {role} {domain}\n")
+    r.ok("added to servers.conf (backups, monitoring)", f"{name} {ip} {role} {domain}")
+    p = subprocess.run(["matrix-admin", "push-tool", name], capture_output=True, text=True)
+    (r.ok if p.returncode == 0 and "FAILED" not in p.stdout else r.fail)("backup tool installed", p.stdout.strip()[-120:])
+    p = subprocess.run(["matrix-admin", "backup", name], capture_output=True, text=True)
+    (r.ok if p.returncode == 0 else r.fail)("first encrypted backup", (p.stdout + p.stderr).strip()[-120:])
+
+
+def ufw(r, ip, rules):
+    script = "export DEBIAN_FRONTEND=noninteractive\ncommand -v ufw >/dev/null || apt-get install -y -q ufw\n"
+    script += "".join(f"ufw allow {x}\n" for x in rules) + "ufw --force enable\nufw status | head -3\n"
+    rc, out = run(ip, script, r)
+    (r.ok if rc == 0 else r.fail)("firewall (ufw)", " ".join(rules) if rc == 0 else out[-150:])
+
+
+# ------------------------------------------------------------- node
+
+def provision_node(a):
+    r = Report(f"node {a.name} ({a.ip})")
+    print(f"Preparing control node {a.name} at {a.ip} ({a.domain}, region {a.region})")
+    if not preflight(r, a.ip, a.domain, a.name, ["80", "443"]):
+        r.print()
+        return 1
+    pkg = latest_server_package()
+    _, center_ip, center_host = server_by_role("center")
+    rc, out = run(center_ip, "grep -E '^KID=' /etc/matrix/matrix.conf; base64 -w0 /opt/matrix/cfg/sid/center-ticket.pub.pem; "
+                  "echo; base64 -w0 /opt/matrix/cfg/sid/blocklist.txt 2>/dev/null; echo", r, timeout=60)
+    lines = out.splitlines()
+    if rc != 0 or len(lines) < 2 or not lines[0].startswith("KID="):
+        r.fail("read the Center's ticket key and KID", out[-150:])
+        r.print()
+        return 1
+    kid = lines[0].split("=", 1)[1].strip()
+    r.ok("read the Center's ticket key and KID", kid)
+    ufw(r, a.ip, ["22/tcp", "80/tcp", "443/tcp"])
+    folder = os.path.basename(pkg)[:-len(".tar.gz")]
+    scp(pkg, a.ip, f"/root/{os.path.basename(pkg)}")
+    player = f"--player-allow {OFFICE_IP}"
+    if len(lines) > 2 and lines[2]:
+        blocklist = "echo " + shlex.quote(lines[2]) + " | base64 -d > /root/blocklist.txt"
+    else:
+        blocklist = ": > /root/blocklist.txt"
+    rc, out = run(a.ip, f"""cd /root && tar xzf {shlex.quote(os.path.basename(pkg))}
+umask 077; echo {shlex.quote(lines[1])} | base64 -d > /root/center-ticket.pub.pem
+{blocklist}
+cd /root/{shlex.quote(folder)}
+./setup.sh install-node --domain {a.domain} --center-key /root/center-ticket.pub.pem --kid {shlex.quote(kid)} \\
+  --link-to wss://{center_host}/ --name {a.name} --region {a.region} --blocklist /root/blocklist.txt {player}
+shred -u /root/blocklist.txt 2>/dev/null || true
+cat /opt/matrix/cfg/node-entry.json""", r, timeout=1200)
+    if rc != 0:
+        r.fail("install the control server (setup.sh install-node)", out.strip().splitlines()[-1][:150] if out.strip() else "")
+        r.print()
+        return 1
+    entry = out.strip().splitlines()[-1]
+    r.ok("install the control server (setup.sh install-node)", folder)
+    register(r, a.name, a.ip, "node", a.domain)
+    test_node(r, a.name, a.ip, a.domain, fresh=True)
+    r.manual += [
+        f"DigitalOcean Cloud Firewall: add the droplet {a.name} to the matrix firewall (SSH only from the admin "
+        f"server and the office).",
+        f"On the Center ({center_host}): add this entry to \"nodes\" in config.json, then check and apply:\n"
+        f"       {entry}\n"
+        f"       sudo cp /opt/matrix/cfg/config.json ~/new.json && sudo nano ~/new.json   # add the entry"
+        f" (and a route for region {a.region} if new)\n"
+        f"       sudo matrix-fleet check ~/new.json && sudo matrix-fleet apply ~/new.json",
+        f"On the Center: sudo matrix-fleet status  -> {a.name} linked and up.",
+        f"If the region gets its own relay, give this node its secret: matrix-provision relay ... --control {a.domain}.",
+        f"View a camera of region {a.region} from the office (https://{a.domain}/demo/test01): once direct, once "
+        f"forced through the relay.",
+    ]
+    r.print()
+    return 1 if r.failed() else 0
+
+
+def test_node(r, name, ip, domain, fresh=False):
+    try:
+        req = urllib.request.Request(f"https://{domain}/api/health", headers={"User-Agent": "matrix-provision"})
+        with urllib.request.urlopen(req, timeout=10) as resp:
+            health = json.load(resp)
+        good = health.get("status") == "ok"
+        (r.ok if good else r.fail)("health check", f"status {health.get('status')}, version {health.get('version')}, "
+                                                    f"center {health.get('center', '-')}")
+    except Exception as e:  # noqa: BLE001
+        r.fail("health check", str(e)[:150])
+    check_tls(r, domain, ip)
+    # A restart drops every camera on the server: only on a server not yet in service.
+    restart = "systemctl restart matrix; sleep 3; systemctl is-active matrix" if fresh else "echo skipped"
+    rc, out = run(ip, f"systemctl is-enabled matrix; systemctl is-active matrix; {restart}", r, timeout=120)
+    words = out.split()
+    (r.ok if words[:2] == ["enabled", "active"] else r.fail)("service enabled and running", " ".join(words[:2]))
+    if fresh:
+        (r.ok if len(words) > 2 and words[2] == "active" else r.fail)("service comes back after a restart")
+    rc, out = run(ip, "ufw status | head -1; test -x /usr/local/sbin/matrix-backup && echo backup-tool", r, timeout=60)
+    (r.ok if "Status: active" in out else r.fail)("firewall active")
+    fleet_state(r, name, "linked to the Center (matrix-fleet status)",
+                "not in the Center's config.json yet (manual step)")
+
+
+# ------------------------------------------------------------- relay
+
+def provision_relay(a):
+    r = Report(f"relay {a.name} ({a.ip})")
+    print(f"Preparing relay {a.name} at {a.ip} ({a.domain}, region {a.region}, reports to {a.control})")
+    if not preflight(r, a.ip, a.domain, a.name, ["80", "443", "3478"]):
+        r.print()
+        return 1
+    control_name, _, control_role, _ = server_by_hostname(a.control)
+    if control_role not in ("center", "node"):
+        die(f"{a.control} is not a control server")
+    rel = latest_relay()
+    for f in ("matrix-relay", "matrix-relay.service", "certbot-deploy-hook.sh"):
+        if not os.path.exists(f"{rel}/{f}"):
+            die(f"{rel}/{f} missing")
+    ufw(r, a.ip, ["22/tcp", "80/tcp", "443/tcp", "3478/udp", "49152:65535/udp"])
+    for f in ("matrix-relay", "matrix-relay.service", "certbot-deploy-hook.sh"):
+        scp(f"{rel}/{f}", a.ip, f"/root/{f}")
+    flags = (f"-public-ip {a.ip} -cert /etc/matrix-relay/tls/fullchain.pem -key /etc/matrix-relay/tls/privkey.pem "
+             f"-metrics 127.0.0.1:9641 -control https://{a.control} -name {a.name} -region {a.region} "
+             f"-tls-host {a.domain} -capacity-mbps 1000 -max 8000")
+    rc, out = run(a.ip, f"""export DEBIAN_FRONTEND=noninteractive
+id matrix-relay >/dev/null 2>&1 || useradd --system --no-create-home --shell /usr/sbin/nologin matrix-relay
+install -m 0755 /root/matrix-relay /usr/local/bin/matrix-relay
+install -d -m 0750 -o root -g matrix-relay /etc/matrix-relay
+umask 077
+[ -f /etc/matrix-relay/secrets.json ] || printf '{{"shared":"%s","users":{{}}}}\\n' "$(openssl rand -hex 32)" > /etc/matrix-relay/secrets.json
+chown matrix-relay:matrix-relay /etc/matrix-relay/secrets.json; chmod 0600 /etc/matrix-relay/secrets.json
+apt-get install -y -q certbot >/dev/null
+certbot certonly --standalone -d {a.domain} --non-interactive --agree-tos --register-unsafely-without-email \\
+  --pre-hook "systemctl stop matrix-relay" --post-hook "systemctl start matrix-relay"
+sed -i 's/^DOMAIN=.*/DOMAIN={a.domain}/' /root/certbot-deploy-hook.sh
+install -m 0755 /root/certbot-deploy-hook.sh /etc/letsencrypt/renewal-hooks/deploy/matrix-relay.sh
+/etc/letsencrypt/renewal-hooks/deploy/matrix-relay.sh
+echo 'RELAY_FLAGS={flags}' > /etc/matrix-relay/env; chmod 0644 /etc/matrix-relay/env
+install -m 0644 /root/matrix-relay.service /etc/systemd/system/matrix-relay.service
+systemctl daemon-reload && systemctl enable --now matrix-relay
+rm -f /root/matrix-relay /root/matrix-relay.service /root/certbot-deploy-hook.sh""", r, timeout=900)
+    if rc != 0:
+        r.fail("install the relay", out.strip().splitlines()[-1][:150] if out.strip() else "")
+        r.print()
+        return 1
+    r.ok("install the relay", f"{os.path.basename(rel)}, reports to {a.control}")
+    register(r, a.name, a.ip, "relay", a.domain)
+    test_relay(r, a.name, a.ip, a.domain)
+    r.manual += [
+        f"DigitalOcean Cloud Firewall: add the droplet {a.name} to the relay firewall (UDP 3478 and 49152-65535, "
+        f"TCP 80/443, SSH only from the admin server and the office).",
+        f"Give the control server {a.control} the relay's secret (until then the relay logs \"403 unknown relay\"):\n"
+        f"       matrix-provision relay-secret {a.name} {a.control}   # copies it by file, prints nothing secret",
+        f"On {a.control}: /admin/statistic (office IP) lists {a.name}; on the Center: sudo matrix-fleet status shows it healthy.",
+        f"View a camera of region {a.region} from the office with the relay forced (ws.html relay protocol UDP, TCP, TLS).",
+    ]
+    r.print()
+    return 1 if r.failed() else 0
+
+
+def relay_secret_file(ip):
+    rc, out = run(ip, "python3 -c 'import json; print(json.load(open(\"/etc/matrix-relay/secrets.json\"))[\"shared\"])'",
+                  timeout=60)
+    if rc != 0:
+        return None
+    fd, path = tempfile.mkstemp(prefix=".relay-secret-", dir=HOME)
+    with os.fdopen(fd, "w") as f:
+        f.write(out.strip() + "\n")
+    return path
+
+
+def fleet_state(r, name, step, pending):
+    """The server's row in the Center's matrix-fleet status: up, missing (pending) or other."""
+    _, center_ip, _ = server_by_role("center")
+    rc, out = run(center_ip, "matrix-fleet status", r, timeout=60)
+    row = next((line.split() for line in out.splitlines() if line.split()[:1] == [name]), None)
+    if row is None:
+        r.add("INFO", step, pending)
+    elif row[3 if len(row) > 3 else -1] == "up" or (len(row) > 2 and row[2] == "up"):
+        r.ok(step, " ".join(row[1:4]))
+    else:
+        r.fail(step, " ".join(row[1:6]))
+
+
+def test_relay(r, name, ip, domain):
+    rc, out = run(ip, "systemctl is-enabled matrix-relay; systemctl is-active matrix-relay; "
+                      "curl -s --max-time 5 127.0.0.1:9641/metrics | grep -c '^turn_' || true", r, timeout=60)
+    words = out.split()
+    (r.ok if words[:2] == ["enabled", "active"] else r.fail)("service enabled and running", " ".join(words[:2]))
+    (r.ok if len(words) > 2 and words[2] != "0" else r.fail)("metrics endpoint", f"{words[2] if len(words) > 2 else 0} turn_ lines")
+    check_tls(r, domain, ip)
+    tool = f"{HOME}/tools/relaycheck"
+    secret = relay_secret_file(ip)
+    if not os.path.exists(tool) or secret is None:
+        r.add("MANUAL", "relay allocation test", "relaycheck or the secret is missing; test with ws.html, relay forced")
+    else:
+        try:
+            p = subprocess.run([tool, "-host", domain, "-ip", ip, "-secret-file", secret, "-name", "provision"],
+                               capture_output=True, text=True, timeout=90)
+            for line in p.stdout.splitlines():
+                status, proto, *rest = line.split(None, 2)
+                r.add(status, f"relay over {proto.upper()} (allocate + data through it)", rest[0] if rest else "")
+            if not p.stdout.strip():
+                r.fail("relay allocation test", p.stderr.strip()[-150:])
+        finally:
+            os.unlink(secret)
+    fleet_state(r, name, "reports to its control server (matrix-fleet status)",
+                "no report accepted yet: its control server needs the secret (manual step)")
+
+
+def cmd_relay_secret(a):
+    """Manual put-in-service helper: add the relay's shared secret to its control server."""
+    _, relay_ip, role, _ = server_by_hostname(a.relay)
+    if role != "relay":
+        die(f"{a.relay} is not a relay")
+    _, control_ip, crole, _ = server_by_hostname(a.control)
+    if crole not in ("center", "node"):
+        die(f"{a.control} is not a control server")
+    secret = relay_secret_file(relay_ip)
+    if secret is None:
+        die("could not read the relay's secret")
+    try:
+        scp(secret, control_ip, "/root/.new-relay-secret")
+    finally:
+        os.unlink(secret)
+    rc, out = run(control_ip, f"""cd /opt/matrix
+cp -a cfg/relay-secrets.json cfg/relay-secrets.json.bak-$(date -u +%Y%m%dT%H%M%SZ) 2>/dev/null || echo '{{}}' > cfg/relay-secrets.json
+python3 - <<'EOF'
+import json
+p = "/opt/matrix/cfg/relay-secrets.json"
+try:
+    data = json.load(open(p))
+except FileNotFoundError:
+    data = {{}}
+data[{json.dumps(a.relay_name)}] = open("/root/.new-relay-secret").read().strip()
+tmp = p + ".new"
+with open(tmp, "w") as f:
+    json.dump(data, f)
+import os, shutil
+shutil.chown(tmp, "matrix", "matrix"); os.chmod(tmp, 0o600); os.replace(tmp, p)
+print("relays with a secret:", ", ".join(sorted(data)))
+EOF
+shred -u /root/.new-relay-secret""", timeout=60)
+    print(out.strip())
+    if rc != 0:
+        die("failed")
+    print(f"Done. Within 15 s the relay's reports are accepted; check /admin/statistic on {a.control}.")
+    return 0
+
+
+def cmd_check(a):
+    for name, ip, role, hostname, *_ in servers():
+        if name == a.name:
+            r = Report(f"check {name} ({ip})")
+            if role in ("node", "center"):
+                test_node(r, name, ip, hostname)
+            elif role == "relay":
+                test_relay(r, name, ip, hostname)
+            r.print()
+            return 1 if r.failed() else 0
+    die(f"{a.name} is not in {SERVERS}")
+
+
+def cmd_releases(_):
+    for kind in ("server", "relay"):
+        d = f"{REL}/{kind}"
+        items = sorted(os.listdir(d)) if os.path.isdir(d) else []
+        print(f"{kind}: {', '.join(items) or '-'}")
+    tool = f"{HOME}/tools/relaycheck"
+    print(f"relaycheck: {'present' if os.path.exists(tool) else 'missing'}")
+    return 0
+
+
+def cmd_store(a):
+    data = sys.stdin.buffer.read()
+    if not data:
+        die("give the file on stdin")
+    os.makedirs(REL, mode=0o700, exist_ok=True)
+    if a.kind == "server":
+        with tarfile.open(fileobj=io.BytesIO(data)) as t:
+            names = t.getnames()
+        top = names[0].split("/")[0] if names else ""
+        if not re.match(r"^matrix-server-[0-9.]+-[0-9a-f]{7,}$", top) or f"{top}/setup.sh" not in names:
+            die("not a release package (matrix-server-<version>-<commit>.tar.gz from release/make_release.sh)")
+        os.makedirs(f"{REL}/server", mode=0o700, exist_ok=True)
+        path = f"{REL}/server/{top}.tar.gz"
+        with open(path, "wb") as f:
+            f.write(data)
+        print(f"stored {path}")
+    else:
+        if not a.version or not re.match(r"^[0-9]+\.[0-9]+\.[0-9]+$", a.version):
+            die("store relay VERSION < tar")
+        dest = f"{REL}/relay/{a.version}"
+        os.makedirs(dest, mode=0o700, exist_ok=True)
+        with tarfile.open(fileobj=io.BytesIO(data)) as t:
+            for m in t.getmembers():
+                base = os.path.basename(m.name)
+                if m.isfile() and base in ("matrix-relay", "matrix-relay.service", "certbot-deploy-hook.sh", "relaycheck"):
+                    target = f"{HOME}/tools/relaycheck" if base == "relaycheck" else f"{dest}/{base}"
+                    with open(target, "wb") as f:
+                        f.write(t.extractfile(m).read())
+                    os.chmod(target, 0o755 if base in ("matrix-relay", "relaycheck", "certbot-deploy-hook.sh") else 0o644)
+                    print(f"stored {target}")
+    return 0
+
+
+def main():
+    ap = argparse.ArgumentParser(prog="matrix-provision", description=__doc__.split("\n\n")[0],
+                                 formatter_class=argparse.RawDescriptionHelpFormatter, epilog=__doc__)
+    sub = ap.add_subparsers(dest="cmd")
+    for role in ("node", "relay"):
+        p = sub.add_parser(role)
+        p.add_argument("ip")
+        p.add_argument("--name", required=True)
+        p.add_argument("--region", required=True)
+        p.add_argument("--domain", required=True)
+        if role == "relay":
+            p.add_argument("--control", required=True, help="the control server it reports to (its public name)")
+    p = sub.add_parser("check")
+    p.add_argument("name")
+    p = sub.add_parser("relay-secret", help="manual step: give a control server the relay's secret")
+    p.add_argument("relay_name")
+    p.add_argument("control")
+    sub.add_parser("releases")
+    p = sub.add_parser("store")
+    p.add_argument("kind", choices=["server", "relay"])
+    p.add_argument("version", nargs="?")
+    a = ap.parse_args()
+    if not a.cmd:
+        print(__doc__)
+        return 2
+    if os.geteuid() == 0:
+        die("run as the admin user, not root")
+    if a.cmd in ("node", "relay"):
+        try:
+            socket.inet_aton(a.ip)
+        except OSError:
+            die(f"bad IP {a.ip}")
+        if not NAME_RE.match(a.name) or not REGION_RE.match(a.region) or not DOMAIN_RE.match(a.domain):
+            die("bad --name (lowercase), --region (e.g. SG) or --domain")
+        return provision_node(a) if a.cmd == "node" else provision_relay(a)
+    if a.cmd == "relay-secret":
+        a.relay = a.relay_name
+        return cmd_relay_secret(a)
+    return {"check": cmd_check, "releases": cmd_releases, "store": cmd_store}[a.cmd](a)
+
+
+if __name__ == "__main__":
+    sys.exit(main())

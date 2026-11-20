@@ -1,0 +1,30 @@
+#!/bin/bash
+# push-release: build the server package, the relay and relaycheck on the PC
+# and store them on the admin server, where matrix-provision installs new
+# droplets from them (server/design/provisioning.md).
+#
+#   server/admin/push-release            build from the current commit and push
+#   ALLOW_DIRTY=1 server/admin/push-release   (testing only)
+#
+# Run from the project folder or anywhere inside the server repo.
+set -euo pipefail
+
+SERVER_DIR="$(cd "$(dirname "$0")/.." && pwd)"
+ROOT="$(cd "$SERVER_DIR/.." && pwd)"
+ADMIN=${MATRIX_ADMIN:-admin@ec2-3-95-228-203.compute-1.amazonaws.com}
+KEY=${MATRIX_ADMIN_KEY:-$ROOT/webrtc_instance.pem}
+SSH=(ssh -i "$KEY" -o BatchMode=yes -o ConnectTimeout=20 "$ADMIN")
+
+cd "$SERVER_DIR"
+release/make_release.sh >/dev/null
+pkg="dist/$(cat dist/LATEST).tar.gz"
+"${SSH[@]}" matrix-provision store server < "$pkg"
+
+relay_version="$(sed -n 's/.*relayVersion *= *"\([^"]*\)".*/\1/p' src/relay/report.go)"
+tmp="$(mktemp -d)"; trap 'rm -rf "$tmp"' EXIT
+(cd src/relay && CGO_ENABLED=0 GOOS=linux GOARCH=amd64 go build -trimpath -o "$tmp/matrix-relay" . &&
+    CGO_ENABLED=0 GOOS=linux GOARCH=amd64 go build -trimpath -o "$tmp/relaycheck" ./cmd/relaycheck)
+cp src/relay/deploy/matrix-relay.service src/relay/deploy/certbot-deploy-hook.sh "$tmp/"
+tar -C "$tmp" -cf - matrix-relay matrix-relay.service certbot-deploy-hook.sh relaycheck |
+    "${SSH[@]}" matrix-provision store relay "$relay_version"
+"${SSH[@]}" matrix-provision releases
