@@ -223,13 +223,13 @@ def cmd_upload(args):
             note(f"{v}: already uploaded, identical")
             return 0
         die(f"{dest} exists with other binaries; a version is never replaced, build a new version")
-    tmp = tempfile.mkdtemp(dir=RELEASES if os.path.isdir(RELEASES) else None, prefix=".upload-")
+    os.makedirs(RELEASES, mode=0o700, exist_ok=True)
+    tmp = tempfile.mkdtemp(dir=RELEASES, prefix=".upload-")
     for p, blob in found.items():
         os.makedirs(f"{tmp}/{p}", mode=0o700)
         with open(f"{tmp}/{p}/matrix", "wb") as f:
             f.write(blob)
         os.chmod(f"{tmp}/{p}/matrix", 0o600)
-    os.makedirs(RELEASES, mode=0o700, exist_ok=True)
     os.rename(tmp, dest)
     for p in PLATFORMS:
         note(f"{v} {p:<10} {sha256(f'{dest}/{p}/matrix')}")
