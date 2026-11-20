@@ -1,0 +1,495 @@
+#!/usr/bin/env python3
+"""matrix-firmware: staged camera firmware releases from the admin server (roll-out.md R7).
+
+  matrix-firmware status                    what the Center serves: stable / canary / previous per model
+  matrix-firmware upload VERSION < tar      store release binaries (tar of anycloud/, anykav200/, anykav500/ matrix_VERSION)
+  matrix-firmware publish VERSION           copy VERSION to the Center and make it the CANARY for every model
+  matrix-firmware promote                   canary -> stable (the old stable becomes "previous")
+  matrix-firmware cancel                    drop the canary; everyone stays on stable
+  matrix-firmware rollback                  stable -> previous, for every model
+  matrix-firmware canary [--ips A,B] [--tenants T,..] [--sids D,..]   show or set the canary group
+  matrix-firmware init                      once: versioned copies of what the Center serves now, stable = that
+
+Design: server/design/firmware-channels.md. The Center (control server 2.7.6+)
+reads /opt/matrix/cfg/firmware-channels.json on every download: cameras in the
+canary group get the canary version, every other camera the stable one. The
+unversioned files (downloads/<MODEL>/matrix, firmware/anycloud/matrix.pkg) are
+kept equal to stable, for servers without channels.
+
+From the PC, after building matrix_c (scripts/package_anykav200.sh per platform):
+  tar -C matrix_c/release/bin -cf - anycloud/matrix_V anykav200/matrix_V anykav500/matrix_V |
+    ssh admin@<admin server> matrix-firmware upload V
+"""
+import argparse
+import datetime
+import fcntl
+import hashlib
+import io
+import json
+import os
+import re
+import shlex
+import subprocess
+import sys
+import tarfile
+import tempfile
+
+HOME = "/opt/matrix-admin"
+SERVERS = f"{HOME}/servers.conf"
+SSH_KEY = f"{HOME}/keys/ssh.pem"
+KNOWN_HOSTS = f"{HOME}/keys/known_hosts"
+FW = f"{HOME}/firmware"
+RELEASES = f"{FW}/releases"
+PACKAGES = f"{FW}/packages"
+KEYS = f"{FW}/keys"
+MXPKG = f"{HOME}/tools/mxpkg"
+HISTORY = f"{FW}/history.log"
+
+# Model folder under /downloads -> build platform (matrix_c ./build.sh target).
+MODELS = {"HCX130": "anycloud", "HCX330L": "anykav500", "GIRAFFE_HD": "anykav200"}
+# Platforms that also get a signed, encrypted package under /v1/firmware.
+SIGNED = ["anycloud"]
+PLATFORMS = sorted(set(MODELS.values()))
+
+REMOTE = "/opt/matrix"
+CHANNELS = f"{REMOTE}/cfg/firmware-channels.json"
+OFFICE_IP = "115.78.12.186"
+KEEP_OTHER = 2  # unreferenced versions kept per model on the Center
+
+VERSION_RE = re.compile(r"^[0-9]{1,4}\.[0-9]{1,4}\.[0-9]{1,4}(-[a-z0-9]{1,16})?$")
+
+
+def die(msg):
+    print(f"matrix-firmware: {msg}", file=sys.stderr)
+    sys.exit(1)
+
+
+def note(msg):
+    print(msg, flush=True)
+
+
+def history(msg):
+    stamp = datetime.datetime.now(datetime.timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+    with open(HISTORY, "a") as f:
+        f.write(f"{stamp} {os.environ.get('SUDO_USER') or os.environ.get('USER', '?')} {msg}\n")
+
+
+def check_version(v):
+    if not VERSION_RE.match(v or ""):
+        die(f"bad version {v!r} (want e.g. 2.2.3)")
+    return v
+
+
+def center_host():
+    with open(SERVERS) as f:
+        for line in f:
+            parts = line.split()
+            if len(parts) >= 3 and not parts[0].startswith("#") and parts[2] == "center":
+                return parts[1]
+    die(f"no center in {SERVERS}")
+
+
+def center_name():
+    with open(SERVERS) as f:
+        for line in f:
+            parts = line.split()
+            if len(parts) >= 4 and not parts[0].startswith("#") and parts[2] == "center":
+                return parts[3]
+    return "matrix.5gen.care"
+
+
+SSH = ["-i", SSH_KEY, "-o", "BatchMode=yes", "-o", "ConnectTimeout=20",
+       "-o", "StrictHostKeyChecking=accept-new", "-o", f"UserKnownHostsFile={KNOWN_HOSTS}"]
+
+
+def ssh(script):
+    """Run a shell script on the Center as root; returns stdout, dies on failure."""
+    r = subprocess.run(["ssh", *SSH, f"root@{center_host()}", "bash -s"],
+                       input=("set -euo pipefail\n" + script).encode(), capture_output=True)
+    if r.returncode != 0:
+        die(f"on the Center: {r.stderr.decode().strip() or 'failed'}")
+    return r.stdout.decode()
+
+
+def scp(local, remote):
+    r = subprocess.run(["scp", "-q", *SSH, local, f"root@{center_host()}:{remote}"], capture_output=True)
+    if r.returncode != 0:
+        die(f"copy to the Center failed: {r.stderr.decode().strip()}")
+
+
+def sha256(path):
+    h = hashlib.sha256()
+    with open(path, "rb") as f:
+        for chunk in iter(lambda: f.read(1 << 20), b""):
+            h.update(chunk)
+    return h.hexdigest()
+
+
+def read_channels():
+    text = ssh(f"cat {CHANNELS} 2>/dev/null || true").strip()
+    if not text:
+        return None
+    return json.loads(text)
+
+
+def write_channels(data):
+    for name, e in data["firmware"].items():
+        for k in ("stable", "canary", "previous"):
+            if e.get(k):
+                check_version(e[k])
+            elif k in e:
+                del e[k]
+    body = json.dumps(data, indent=2, sort_keys=True) + "\n"
+    ssh(f"""tmp={CHANNELS}.new
+cat > "$tmp" <<'MATRIX_EOF'
+{body}MATRIX_EOF
+chmod 644 "$tmp"
+cp -a {CHANNELS} {CHANNELS}.bak 2>/dev/null || true
+mv "$tmp" {CHANNELS}""")
+
+
+def remote_versions():
+    """{name: [versions present on the Center]} for every model and signed platform."""
+    script = ""
+    for m in MODELS:
+        script += f'echo "{m} $(ls -1 {REMOTE}/downloads/{m} 2>/dev/null | grep -E "^[0-9]" | tr "\\n" " ")"\n'
+    for p in SIGNED:
+        script += f'echo "{p} $(ls -1 {REMOTE}/firmware/{p} 2>/dev/null | grep -E "^[0-9]" | tr "\\n" " ")"\n'
+    out = {}
+    for line in ssh(script).splitlines():
+        parts = line.split()
+        if parts:
+            out[parts[0]] = parts[1:]
+    return out
+
+
+def lock():
+    os.makedirs(FW, exist_ok=True)
+    f = open(f"{FW}/.lock", "w")
+    try:
+        fcntl.flock(f, fcntl.LOCK_EX | fcntl.LOCK_NB)
+    except BlockingIOError:
+        die("another matrix-firmware is running")
+    return f
+
+
+# ---------------------------------------------------------------- commands
+
+def cmd_status(_):
+    data = read_channels()
+    present = remote_versions()
+    if data is None:
+        note("No firmware-channels.json on the Center: every camera gets the unversioned files.")
+        note("Run 'matrix-firmware init' once.")
+        return 0
+    note(f"{'name':<11} {'stable':<9} {'canary':<9} {'previous':<9} on the Center")
+    for name in [*MODELS, *SIGNED]:
+        e = data["firmware"].get(name, {})
+        note(f"{name:<11} {e.get('stable', '-'):<9} {e.get('canary', '-') or '-':<9} "
+             f"{e.get('previous', '-') or '-':<9} {' '.join(present.get(name, [])) or '-'}")
+    g = data.get("canary", {})
+    note(f"canary group: ips {g.get('ips') or '-'}, tenants {g.get('tenants') or '-'}, sids {g.get('sids') or '-'}")
+    return 0
+
+
+def cmd_upload(args):
+    v = check_version(args.version)
+    _l = lock()
+    data = sys.stdin.buffer.read()
+    if not data:
+        die("give the tar on stdin")
+    found = {}
+    with tarfile.open(fileobj=io.BytesIO(data)) as tar:
+        for m in tar.getmembers():
+            if not m.isfile():
+                continue
+            parts = m.name.lstrip("./").split("/")
+            if len(parts) == 2 and parts[0] in PLATFORMS and parts[1] in (f"matrix_{v}", "matrix"):
+                found[parts[0]] = tar.extractfile(m).read()
+    missing = [p for p in PLATFORMS if p not in found]
+    if missing:
+        die(f"missing {', '.join(f'{p}/matrix_{v}' for p in missing)} in the tar")
+    for p, blob in found.items():
+        # ELF, 32-bit, little endian, ARM (e_machine 0x28), and the version string inside.
+        if blob[:4] != b"\x7fELF" or blob[4] != 1 or blob[18:20] != b"\x28\x00":
+            die(f"{p}: not a 32-bit ARM executable")
+        if v.encode() + b"\x00" not in blob:
+            die(f"{p}: the binary does not carry version {v}")
+    dest = f"{RELEASES}/{v}"
+    if os.path.isdir(dest):
+        same = all(os.path.exists(f"{dest}/{p}/matrix") and
+                   hashlib.sha256(found[p]).hexdigest() == sha256(f"{dest}/{p}/matrix") for p in PLATFORMS)
+        if same:
+            note(f"{v}: already uploaded, identical")
+            return 0
+        die(f"{dest} exists with other binaries; a version is never replaced, build a new version")
+    tmp = tempfile.mkdtemp(dir=RELEASES if os.path.isdir(RELEASES) else None, prefix=".upload-")
+    for p, blob in found.items():
+        os.makedirs(f"{tmp}/{p}", mode=0o700)
+        with open(f"{tmp}/{p}/matrix", "wb") as f:
+            f.write(blob)
+        os.chmod(f"{tmp}/{p}/matrix", 0o600)
+    os.makedirs(RELEASES, mode=0o700, exist_ok=True)
+    os.rename(tmp, dest)
+    for p in PLATFORMS:
+        note(f"{v} {p:<10} {sha256(f'{dest}/{p}/matrix')}")
+    history(f"upload {v}")
+    note(f"stored in {dest}; next: matrix-firmware publish {v}")
+    return 0
+
+
+def build_package(v, platform):
+    pkg = f"{PACKAGES}/{platform}-{v}.pkg"
+    binary = f"{RELEASES}/{v}/{platform}/matrix"
+    if os.path.exists(pkg):
+        return pkg
+    for k in (f"{KEYS}/sign.key", f"{KEYS}/enc-{platform}.key", f"{KEYS}/sign.pub", MXPKG):
+        if not os.path.exists(k):
+            die(f"missing {k}")
+    with open(f"{KEYS}/sign.pub") as f:
+        pub = f.read().strip()
+    tmp = pkg + ".new"
+    subprocess.run([MXPKG, "pack", "--model", platform, "--version", v, "--sign-key", f"{KEYS}/sign.key",
+                    "--sign-id", "1", "--enc-key", f"{KEYS}/enc-{platform}.key", "--enc-id", "1", binary, tmp],
+                   check=True, capture_output=True)
+    with tempfile.NamedTemporaryFile(dir=PACKAGES) as check:
+        subprocess.run([MXPKG, "open", "--model", platform, "--sign-pub", pub, "--sign-id", "1",
+                        "--enc-key", f"{KEYS}/enc-{platform}.key", "--enc-id", "1", tmp, check.name],
+                       check=True, capture_output=True)
+        if sha256(check.name) != sha256(binary):
+            os.unlink(tmp)
+            die(f"{platform} {v}: package does not open to the same binary")
+    os.rename(tmp, pkg)
+    return pkg
+
+
+def put_version(local_files, remote_dir):
+    """Copy {name: local path} into remote_dir (created atomically; same content is fine)."""
+    sums = {n: sha256(p) for n, p in local_files.items()}
+    tmp = f"{remote_dir}.upload"
+    ssh(f"rm -rf {shlex.quote(tmp)}; mkdir -p {shlex.quote(tmp)}")
+    for n, p in local_files.items():
+        scp(p, f"{tmp}/{n}")
+    check = " && ".join(f'[ "$(sha256sum < {tmp}/{n} | cut -d" " -f1)" = {s} ]' for n, s in sums.items())
+    same = " && ".join(f'[ "$(sha256sum < {remote_dir}/{n} | cut -d" " -f1)" = {s} ]' for n, s in sums.items())
+    out = ssh(f"""{check} || {{ echo BADCOPY; exit 0; }}
+chmod 755 {tmp}; chmod 644 {tmp}/*
+if [ -d {remote_dir} ]; then
+  if {same}; then rm -rf {tmp}; echo SAME; else rm -rf {tmp}; echo DIFFERENT; fi
+else mv {tmp} {remote_dir}; echo NEW; fi""").strip()
+    if out == "BADCOPY":
+        die(f"checksum mismatch after copying to {remote_dir}")
+    if out == "DIFFERENT":
+        die(f"{remote_dir} exists on the Center with other content; a version is never replaced")
+    return out
+
+
+def cmd_publish(args):
+    v = check_version(args.version)
+    _l = lock()
+    data = read_channels()
+    if data is None:
+        die("no channels file on the Center yet: run 'matrix-firmware init' first")
+    for p in PLATFORMS:
+        if not os.path.exists(f"{RELEASES}/{v}/{p}/matrix"):
+            die(f"{RELEASES}/{v}/{p}/matrix missing: upload {v} first")
+    with tempfile.TemporaryDirectory() as tmp:
+        for m, p in MODELS.items():
+            binary = f"{RELEASES}/{v}/{p}/matrix"
+            with open(f"{tmp}/{m}.sha256", "w") as f:
+                f.write(f"{sha256(binary)}  matrix\n")
+            with open(f"{tmp}/{m}.version", "w") as f:
+                f.write(f"{v}\n")
+            r = put_version({"matrix": binary, "matrix.sha256": f"{tmp}/{m}.sha256", "version": f"{tmp}/{m}.version"},
+                            f"{REMOTE}/downloads/{m}/{v}")
+            note(f"{m:<11} {v} {sha256(binary)[:16]}  {r.lower()}")
+        for p in SIGNED:
+            pkg = build_package(v, p)
+            r = put_version({"matrix.pkg": pkg}, f"{REMOTE}/firmware/{p}/{v}")
+            note(f"{p:<11} {v} package {sha256(pkg)[:16]}  {r.lower()}")
+    for name in [*MODELS, *SIGNED]:
+        e = data["firmware"].setdefault(name, {})
+        if not e.get("stable"):
+            die(f"{name} has no stable version; run init")
+        if e["stable"] == v:
+            note(f"{name}: {v} is already stable")
+            e.pop("canary", None)
+        else:
+            e["canary"] = v
+    write_channels(data)
+    prune(data)
+    history(f"publish {v} as canary")
+    g = data.get("canary", {})
+    note(f"\n{v} is the canary. Canary group: ips {g.get('ips') or '-'}, tenants {g.get('tenants') or '-'}, "
+         f"sids {g.get('sids') or '-'}.")
+    note("Cameras in the group take it at their next boot. Watch the daily summary's per-version table,")
+    note("then: matrix-firmware promote   (or: matrix-firmware cancel)")
+    return 0
+
+
+def refresh_flat(data):
+    """Make the unversioned files equal to stable (servers without channels, old firmware)."""
+    script = ""
+    for m in MODELS:
+        s = data["firmware"].get(m, {}).get("stable")
+        if s:
+            d = f"{REMOTE}/downloads/{m}"
+            script += (f"for f in matrix matrix.sha256 version; do cp -p {d}/{s}/$f {d}/.$f.tmp && "
+                       f"mv {d}/.$f.tmp {d}/$f; done\n")
+    for p in SIGNED:
+        s = data["firmware"].get(p, {}).get("stable")
+        if s:
+            d = f"{REMOTE}/firmware/{p}"
+            script += f"cp -p {d}/{s}/matrix.pkg {d}/.matrix.pkg.tmp && mv {d}/.matrix.pkg.tmp {d}/matrix.pkg\n"
+    if script:
+        ssh(script)
+
+
+def require_present(data):
+    present = remote_versions()
+    for name, e in data["firmware"].items():
+        for k in ("stable", "canary", "previous"):
+            if e.get(k) and e[k] not in present.get(name, []):
+                die(f"{name} {k} {e[k]} is not on the Center")
+
+
+def cmd_promote(_):
+    _l = lock()
+    data = read_channels() or die("no channels file")
+    changed = []
+    for name, e in data["firmware"].items():
+        if e.get("canary"):
+            e["previous"], e["stable"] = e["stable"], e.pop("canary")
+            changed.append(f"{name} {e['previous']} -> {e['stable']}")
+    if not changed:
+        die("nothing to promote: no canary set")
+    require_present(data)
+    write_channels(data)
+    refresh_flat(data)
+    history("promote: " + "; ".join(changed))
+    for c in changed:
+        note(f"stable: {c}")
+    note("Every camera takes the new stable at its next boot. Undo: matrix-firmware rollback")
+    return 0
+
+
+def cmd_cancel(_):
+    _l = lock()
+    data = read_channels() or die("no channels file")
+    dropped = [f"{n} {e.pop('canary')}" for n, e in data["firmware"].items() if e.get("canary")]
+    if not dropped:
+        die("no canary set")
+    write_channels(data)
+    history("cancel canary: " + "; ".join(dropped))
+    note("canary dropped: " + ", ".join(dropped) + ". Canary cameras return to stable at their next boot.")
+    return 0
+
+
+def cmd_rollback(_):
+    _l = lock()
+    data = read_channels() or die("no channels file")
+    changed = []
+    for name, e in data["firmware"].items():
+        if e.get("previous"):
+            e.pop("canary", None)
+            old = e["stable"]
+            e["stable"] = e.pop("previous")
+            changed.append(f"{name} {old} -> {e['stable']}")
+    if not changed:
+        die("nothing to roll back to: no previous version recorded")
+    require_present(data)
+    write_channels(data)
+    refresh_flat(data)
+    history("rollback: " + "; ".join(changed))
+    for c in changed:
+        note(f"stable: {c}")
+    note("Cameras take the old version at their next boot (reboot them to hurry).")
+    return 0
+
+
+def cmd_canary(args):
+    _l = lock()
+    data = read_channels() or die("no channels file")
+    g = data.setdefault("canary", {})
+    changed = False
+    for key, value in (("ips", args.ips), ("tenants", args.tenants), ("sids", args.sids)):
+        if value is not None:
+            g[key] = [x.strip() for x in value.split(",") if x.strip()]
+            changed = True
+    if changed:
+        write_channels(data)
+        history(f"canary group: {json.dumps(g, sort_keys=True)}")
+    note(f"canary group: ips {g.get('ips') or '-'}, tenants {g.get('tenants') or '-'}, sids {g.get('sids') or '-'}")
+    return 0
+
+
+def prune(data):
+    """Keep stable, canary, previous and the KEEP_OTHER newest other versions per model."""
+    present = remote_versions()
+    script = ""
+    for name, versions in present.items():
+        e = data["firmware"].get(name, {})
+        keep = {e.get("stable"), e.get("canary"), e.get("previous")}
+        others = sorted((v for v in versions if v not in keep),
+                        key=lambda v: [int(x) if x.isdigit() else 0 for x in re.split(r"[.-]", v)])
+        for v in others[:-KEEP_OTHER] if len(others) > KEEP_OTHER else []:
+            base = f"{REMOTE}/firmware/{name}" if name in SIGNED else f"{REMOTE}/downloads/{name}"
+            script += f"rm -rf {base}/{v}\n"
+    if script:
+        ssh(script)
+
+
+def cmd_init(_):
+    _l = lock()
+    if read_channels() is not None:
+        die("the Center already has firmware-channels.json; see 'matrix-firmware status'")
+    out = ssh(f"""for m in {' '.join(MODELS)}; do
+  d={REMOTE}/downloads/$m; v=$(tr -d ' \\n' < $d/version)
+  echo "$m $v"
+  if [ ! -d $d/$v ]; then mkdir $d/.$v.init && cp -p $d/matrix $d/matrix.sha256 $d/version $d/.$v.init/ && mv $d/.$v.init $d/$v; fi
+done""")
+    data = {"firmware": {}, "canary": {"ips": [OFFICE_IP]}}
+    for line in out.splitlines():
+        m, v = line.split()
+        data["firmware"][m] = {"stable": check_version(v)}
+    for p in SIGNED:
+        # The package carries no version file: match it against the admin server's packages.
+        remote_sum = ssh(f"sha256sum < {REMOTE}/firmware/{p}/matrix.pkg | cut -d' ' -f1").strip()
+        match = [f for f in os.listdir(PACKAGES) if f.startswith(p + "-") and f.endswith(".pkg")
+                 and sha256(f"{PACKAGES}/{f}") == remote_sum]
+        if not match:
+            die(f"the Center's {p} package matches none in {PACKAGES}")
+        v = match[0][len(p) + 1:-4]
+        ssh(f"d={REMOTE}/firmware/{p}; [ -d $d/{v} ] || {{ mkdir $d/.{v}.init && cp -p $d/matrix.pkg $d/.{v}.init/ && mv $d/.{v}.init $d/{v}; }}")
+        data["firmware"][p] = {"stable": check_version(v)}
+    write_channels(data)
+    history(f"init: {json.dumps(data['firmware'], sort_keys=True)}")
+    return cmd_status(None)
+
+
+def main():
+    ap = argparse.ArgumentParser(prog="matrix-firmware", description=__doc__.split("\n\n")[0],
+                                 formatter_class=argparse.RawDescriptionHelpFormatter)
+    sub = ap.add_subparsers(dest="cmd")
+    sub.add_parser("status")
+    for name in ("upload", "publish"):
+        p = sub.add_parser(name)
+        p.add_argument("version")
+    for name in ("promote", "cancel", "rollback", "init"):
+        sub.add_parser(name)
+    p = sub.add_parser("canary")
+    p.add_argument("--ips")
+    p.add_argument("--tenants")
+    p.add_argument("--sids")
+    args = ap.parse_args()
+    if not args.cmd:
+        print(__doc__)
+        return 2
+    if os.geteuid() == 0:
+        die("run as the admin user, not root")
+    return {"status": cmd_status, "upload": cmd_upload, "publish": cmd_publish, "promote": cmd_promote,
+            "cancel": cmd_cancel, "rollback": cmd_rollback, "canary": cmd_canary, "init": cmd_init}[args.cmd](args)
+
+
+if __name__ == "__main__":
+    sys.exit(main())

@@ -10,6 +10,7 @@ import (
 	"testing"
 	"time"
 
+	"signaling-server/internal/firmware"
 	"signaling-server/internal/sid"
 )
 
@@ -96,4 +97,38 @@ func tamper(s string) string {
 		c = 'B'
 	}
 	return s[:i] + string(c) + s[i+1:]
+}
+
+// The signed package follows cfg/firmware-channels.json too; here the
+// canary group is by tenant (the route knows the SID).
+func TestFirmwareFollowsChannels(t *testing.T) {
+	dir := t.TempDir()
+	for path, body := range map[string]string{
+		"anycloud/matrix.pkg":       "flat",
+		"anycloud/2.2.2/matrix.pkg": "stable-pkg",
+		"anycloud/2.2.3/matrix.pkg": "canary-pkg",
+	} {
+		if err := os.MkdirAll(filepath.Dir(filepath.Join(dir, path)), 0o755); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(filepath.Join(dir, path), []byte(body), 0o644); err != nil {
+			t.Fatal(err)
+		}
+	}
+	channels := filepath.Join(t.TempDir(), "firmware-channels.json")
+	if err := os.WriteFile(channels, []byte(`{"firmware": {"anycloud": {"stable": "2.2.2", "canary": "2.2.3"}}, "canary": {"tenants": ["acme01"]}}`), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	e := newEnv(t, func(c *Config) { c.FirmwareDir = dir; c.Channels = firmware.New(channels, nil) })
+	canary := e.issue("acme01", sid.FlagPublisher, e.now.Add(-time.Hour))
+	stable := e.issue("other01", sid.FlagPublisher, e.now.Add(-time.Hour))
+	if response := e.do(http.MethodGet, firmwareURL("anycloud", canary), nil, nil); response.Body.String() != "canary-pkg" {
+		t.Fatalf("canary tenant got %q", response.Body.String())
+	}
+	if response := e.do(http.MethodGet, firmwareURL("anycloud", stable), nil, nil); response.Body.String() != "stable-pkg" {
+		t.Fatalf("other tenant got %q (status %d)", response.Body.String(), response.Code)
+	}
+	if !strings.Contains(e.logs.joined(), "firmware anycloud 2.2.3 (canary") {
+		t.Fatalf("log must name version and channel: %s", e.logs.joined())
+	}
 }

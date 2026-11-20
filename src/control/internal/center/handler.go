@@ -23,6 +23,7 @@ import (
 
 	"signaling-server/internal/activation"
 	"signaling-server/internal/admission"
+	"signaling-server/internal/firmware"
 	"signaling-server/internal/fleet"
 	"signaling-server/internal/sid"
 	"signaling-server/internal/stats"
@@ -95,6 +96,9 @@ type Config struct {
 	// FirmwareDir holds <PLATFORM>/matrix.pkg for GET /v1/firmware/<PLATFORM>/matrix;
 	// empty turns the route off.
 	FirmwareDir string
+	// Channels picks the firmware version per camera (cfg/firmware-channels.json);
+	// nil serves the unversioned <PLATFORM>/matrix.pkg.
+	Channels *firmware.Channels
 	// OnTakeover, when set, is told about every takeover.
 	OnTakeover func(TakeoverInfo)
 	// Addresses remembers where each camera last verified from, so a

@@ -19,6 +19,7 @@ import (
 	"net/url"
 	"os"
 	"path/filepath"
+	"regexp"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -31,6 +32,7 @@ import (
 	"signaling-server/internal/admission"
 	"signaling-server/internal/center"
 	"signaling-server/internal/events"
+	"signaling-server/internal/firmware"
 	"signaling-server/internal/fleet"
 	"signaling-server/internal/history"
 	"signaling-server/internal/host"
@@ -127,6 +129,8 @@ type Server struct {
 	refusals      refusalLimiter
 	host          *host.Sampler // this machine's load, every controlSampleInterval
 	version       string        // cfg/version, read at start
+	// firmware picks the camera firmware version per download (R7).
+	firmware *firmware.Channels
 	// statisticAllow limits /admin/statistic; empty: not served.
 	statisticAllow []netip.Prefix
 }
@@ -143,6 +147,7 @@ func NewServer(playerPath string, rootDir string) *Server {
 		rootDir:    rootDir,
 		host:       host.NewSampler(rootDir),
 	}
+	s.firmware = firmware.New(rootDir+"cfg/firmware-channels.json", log.Printf)
 	s.version = s.loadVersion()
 	return s
 }
@@ -839,6 +844,20 @@ func (s *Server) handleHealth(w http.ResponseWriter, r *http.Request) {
 // write deadline would cut the camera binary off on a slow link.
 const downloadWriteTimeout = 10 * time.Minute
 
+var (
+	firmwareFiles     = map[string]bool{"matrix": true, "matrix.sha256": true, "version": true}
+	firmwareModelName = regexp.MustCompile(`^[A-Za-z0-9_]{1,16}$`)
+)
+
+// remoteAddrOf is the client's address; this server terminates TLS itself.
+func remoteAddrOf(r *http.Request) netip.Addr {
+	addrPort, err := netip.ParseAddrPort(r.RemoteAddr)
+	if err != nil {
+		return netip.Addr{}
+	}
+	return addrPort.Addr().Unmap()
+}
+
 func (s *Server) handleDownloads(w http.ResponseWriter, r *http.Request) {
 	filename := strings.TrimPrefix(r.URL.Path, "/downloads/")
 	if filename == "" || strings.Contains(filename, "..") {
@@ -846,6 +865,20 @@ func (s *Server) handleDownloads(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	filepath := s.rootDir + "downloads/" + filename
+	// <MODEL>/{matrix,matrix.sha256,version}: the camera firmware, chosen by
+	// cfg/firmware-channels.json (R7). Only the address is known here, so the
+	// canary group is by address.
+	if model, file, ok := strings.Cut(filename, "/"); ok && firmwareFiles[file] && firmwareModelName.MatchString(model) {
+		addr := remoteAddrOf(r)
+		path, version, channel := s.firmware.Resolve(s.rootDir+"downloads", model, file, firmware.Who{Addr: addr})
+		filepath = path
+		if file == "matrix" && r.Method == http.MethodGet {
+			if version == "" {
+				version, channel = "unversioned", "-"
+			}
+			log.Printf("firmware download %s %s (%s) from %s", model, version, channel, addr)
+		}
+	}
 	_ = http.NewResponseController(w).SetWriteDeadline(time.Now().Add(downloadWriteTimeout))
 	http.ServeFile(w, r, filepath)
 }
@@ -994,7 +1027,7 @@ func configureServer(srv *Server, opts serverOptions) error {
 			MainAddress: opts.mainAddress, AssignAddress: opts.assignAddress, Blocklist: blocklist, Tenants: tenants, Activations: store,
 			ChallengeKey: deriveChallengeKey(centerPrivate), TrustProxyTLS: opts.trustProxyTLS,
 			DemoTenant: opts.demoTenant, ViewOrigin: opts.viewOrigin, AdminToken: adminToken,
-			Addresses: addresses, FirmwareDir: srv.rootDir + "firmware",
+			Addresses: addresses, FirmwareDir: srv.rootDir + "firmware", Channels: srv.firmware,
 			OnTakeover: func(info center.TakeoverInfo) {
 				counts := map[string]int64{"sid_takeover": 1}
 				detail := "SID of tenant " + info.Tenant + " taken over from offline camera " + info.FromDevice + ", same network"

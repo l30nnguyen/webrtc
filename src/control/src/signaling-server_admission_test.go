@@ -9,6 +9,7 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"fmt"
+	"io"
 	"log"
 	"net/http"
 	"net/http/httptest"
@@ -737,6 +738,70 @@ func TestDownloadsExtendWriteDeadline(t *testing.T) {
 	defer response.Body.Close()
 	if response.StatusCode != http.StatusOK {
 		t.Fatalf("status = %d", response.StatusCode)
+	}
+}
+
+// /downloads/<MODEL>/... follows cfg/firmware-channels.json (R7): the canary
+// group (by address; the test client is 127.0.0.1) gets the canary version,
+// everyone else stable, and other files are served as before.
+func TestDownloadsFollowFirmwareChannels(t *testing.T) {
+	n := newNode(t, nil)
+	root := n.srv.rootDir
+	for path, body := range map[string]string{
+		"downloads/HCX130/matrix":              "flat",
+		"downloads/HCX130/2.2.2/matrix":        "stable",
+		"downloads/HCX130/2.2.2/version":       "2.2.2\n",
+		"downloads/HCX130/2.2.3/matrix":        "canary",
+		"downloads/HCX130/2.2.3/matrix.sha256": "abc  matrix\n",
+		"downloads/HCX130/2.2.3/version":       "2.2.3\n",
+		"downloads/HCX330L/matrix":             "unlisted",
+	} {
+		if err := os.MkdirAll(filepath.Dir(root+path), 0o755); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(root+path, []byte(body), 0o644); err != nil {
+			t.Fatal(err)
+		}
+	}
+	channels := root + "cfg/firmware-channels.json"
+	setChannels := func(ips string, n int) {
+		t.Helper()
+		body := `{"firmware": {"HCX130": {"stable": "2.2.2", "canary": "2.2.3"}}, "canary": {"ips": [` + ips + `]}}`
+		if err := os.MkdirAll(filepath.Dir(channels), 0o755); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(channels, []byte(body), 0o644); err != nil {
+			t.Fatal(err)
+		}
+		when := time.Now().Add(time.Duration(n) * time.Second)
+		_ = os.Chtimes(channels, when, when)
+	}
+	get := func(path string) string {
+		t.Helper()
+		response, err := n.http.Client().Get(n.http.URL + "/downloads/" + path)
+		if err != nil {
+			t.Fatal(err)
+		}
+		defer response.Body.Close()
+		body, _ := io.ReadAll(response.Body)
+		return string(body)
+	}
+	if got := get("HCX130/matrix"); got != "flat" {
+		t.Fatalf("without a channels file: %q", got)
+	}
+	setChannels(`"127.0.0.1"`, 1)
+	if got := get("HCX130/matrix"); got != "canary" {
+		t.Fatalf("canary group: %q", got)
+	}
+	if got := get("HCX130/version"); got != "2.2.3\n" {
+		t.Fatalf("canary version file: %q", got)
+	}
+	setChannels(`"10.0.0.0/8"`, 2)
+	if got := get("HCX130/matrix"); got != "stable" {
+		t.Fatalf("outside the canary group: %q", got)
+	}
+	if got := get("HCX330L/matrix"); got != "unlisted" {
+		t.Fatalf("a model the file does not list: %q", got)
 	}
 }
 

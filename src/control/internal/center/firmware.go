@@ -9,6 +9,7 @@ import (
 	"strings"
 	"time"
 
+	"signaling-server/internal/firmware"
 	"signaling-server/internal/sid"
 )
 
@@ -75,7 +76,13 @@ func (h *Handler) handleFirmware(w http.ResponseWriter, r *http.Request) {
 		h.reject(w)
 		return
 	}
-	path := filepath.Join(h.config.FirmwareDir, model, "matrix.pkg")
+	// Channels (R7): the canary group gets the canary version, others stable.
+	path, version, channel := h.config.Channels.Resolve(h.config.FirmwareDir, model, "matrix.pkg",
+		firmware.Who{Addr: remoteAddr(r), Tenant: verified.Tenant, SIDDigest: digest})
+	if version == "" {
+		path = filepath.Join(h.config.FirmwareDir, model, "matrix.pkg")
+		version, channel = "unversioned", "-"
+	}
 	f, err := os.Open(path)
 	if err != nil {
 		writeJSON(w, http.StatusNotFound, map[string]string{"error": "no firmware for this model"})
@@ -92,7 +99,7 @@ func (h *Handler) handleFirmware(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Content-Type", "application/octet-stream")
 	w.Header().Set("Cache-Control", "no-store")
 	if r.Method == http.MethodGet {
-		h.config.Logf("center: firmware %s (%d bytes) to SID %s from %s", model, info.Size(), short, remoteAddr(r))
+		h.config.Logf("center: firmware %s %s (%s, %d bytes) to SID %s from %s", model, version, channel, info.Size(), short, remoteAddr(r))
 	}
 	// ServeContent sets Content-Length, which the camera's downloader needs.
 	http.ServeContent(w, r, "matrix", info.ModTime(), f)
