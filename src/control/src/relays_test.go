@@ -19,11 +19,13 @@ import (
 	"testing"
 	"time"
 
+	"signaling-server/internal/center"
 	"signaling-server/internal/events"
 	"signaling-server/internal/fleet"
 	"signaling-server/internal/history"
 	"signaling-server/internal/host"
 	"signaling-server/internal/relay"
+	"signaling-server/internal/sid"
 )
 
 func relayServer(t *testing.T, secrets string) *Server {
@@ -305,17 +307,17 @@ func TestStatisticConnectionLogPagesAndColumns(t *testing.T) {
 		return w.Body.String()
 	}
 	first := page("")
-	if n := strings.Count(first, "<td>cam"); n != pageEvents {
+	if n := strings.Count(first, `title="cam`); n != pageEvents {
 		t.Fatalf("first page has %d rows", n)
 	}
 	if !strings.Contains(first, "cam119") || strings.Contains(first, "cam069") || !strings.Contains(first, "older →") || strings.Contains(first, "← newer") {
 		t.Fatal("first page should hold the newest 50 and link only to older ones")
 	}
-	if !strings.Contains(first, "<th>Path</th><th class=\"n\">Setup</th><th>Relays / from</th><th>Camera</th><th>Viewer</th>") {
+	if !strings.Contains(first, "<th>Path</th><th class=\"n\">Setup</th><th>Relays / from</th><th>Camera / SID</th><th>Viewer</th>") {
 		t.Fatal("Path, Setup and Relays / from should come before Camera and Viewer")
 	}
 	last := page("?page=3&type=request")
-	if n := strings.Count(last, "<td>cam"); n != 20 || !strings.Contains(last, "cam000") || strings.Contains(last, "older →") || !strings.Contains(last, "← newer") {
+	if n := strings.Count(last, `title="cam`); n != 20 || !strings.Contains(last, "cam000") || strings.Contains(last, "older →") || !strings.Contains(last, "← newer") {
 		t.Fatalf("last page: %d rows", n)
 	}
 	if !strings.Contains(last, "type=request") {
@@ -323,5 +325,35 @@ func TestStatisticConnectionLogPagesAndColumns(t *testing.T) {
 	}
 	if past := page("?page=9"); !strings.Contains(past, "No more events") {
 		t.Fatal("a page past the end should say so")
+	}
+}
+
+// The camera search takes a SID: it finds the events of every device that
+// used it, and the SID itself never appears in the page.
+func TestStatisticConnectionLogSearchBySID(t *testing.T) {
+	dir := t.TempDir()
+	srv := NewServer("", dir+"/")
+	log, err := events.Open(filepath.Join(dir, "events"), 30)
+	if err != nil {
+		t.Fatal(err)
+	}
+	srv.events = log
+	sidText := strings.Repeat("A", sid.EncodedSize)
+	short := shortSID(center.Digest(sidText))
+	log.Add(events.Event{Type: events.Camera, Camera: "olddevice", SID: short, Result: "online"})
+	log.Add(events.Event{Type: events.Camera, Camera: "newdevice", SID: short, Result: "takeover"})
+	log.Add(events.Event{Type: events.Camera, Camera: "otherdevice", SID: "0123456789ab", Result: "online"})
+	allow, _ := parsePlayerAllow("115.78.12.186")
+	srv.statisticAllow = allow
+	req := httptest.NewRequest(http.MethodGet, statisticPath+"?camera="+sidText, nil)
+	req.RemoteAddr = "115.78.12.186:1000"
+	w := httptest.NewRecorder()
+	srv.ServeHTTP(w, req)
+	body := w.Body.String()
+	if !strings.Contains(body, `title="olddevice"`) || !strings.Contains(body, `title="newdevice"`) || strings.Contains(body, "otherdevice") {
+		t.Fatal("a SID search should find both devices of that SID and no other")
+	}
+	if strings.Contains(body, sidText) || !strings.Contains(body, `value="`+short+`"`) {
+		t.Fatal("the page should keep the short SID digest, not the SID")
 	}
 }

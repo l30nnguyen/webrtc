@@ -132,8 +132,14 @@ given time can be looked up with its outcome and cause.
 | `camera` | `online`, `offline` | camera |
 | `relay` | `registered`, `restarted`, `stopping`, `silent`, `back` | relay, detail |
 
+Camera events also carry `sid`: the first 12 hex digits of SHA-256 of the
+camera's SID (the short form Center's log prints), since a device ID changes
+when a SID moves to another device. Logs written before server 2.7.7 lack it.
+
 About 1 KB per viewing attempt; a day's file is capped at 512 MB.
 `/admin/statistic` searches it by time, camera, viewer, event and result;
+the camera field takes a device ID, a SID or its digest (a SID is turned into
+the short digest, so it never stays in the page links);
 `/admin/statistic/events?from=2026-11-03T08:00&to=2026-11-03T09:00&camera=ID&result=failed&format=csv`
 serves the same search (at most 5000 events, newest first).
 

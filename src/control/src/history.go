@@ -113,6 +113,24 @@ func (s *Server) sampleControl() {
 }
 
 // addEvent records an event in the connection log (-event-dir).
+// shortSID is a SID digest in the connection log's short form (see
+// events.Event.SID).
+func shortSID(digest string) string {
+	if len(digest) < 12 {
+		return ""
+	}
+	return digest[:12]
+}
+
+// viewerCameraSID is the SID of the camera a viewer's ticket is for: a
+// scoped player ticket carries that camera's SID digest.
+func viewerCameraSID(c *Client) string {
+	if c.CameraIDScope == "" {
+		return ""
+	}
+	return shortSID(c.Digest)
+}
+
 func (s *Server) addEvent(e events.Event) {
 	if s.events != nil {
 		s.events.Add(e)

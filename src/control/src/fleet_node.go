@@ -83,9 +83,9 @@ func (s *Server) recordReport(c *Client, msg map[string]interface{}) {
 	e := events.Event{Type: events.Report, Role: "viewer", Result: report.Result, Error: report.Error, Path: report.Path,
 		SetupMillis: report.SetupMillis, RelayOffered: &report.RelayOffered, RelayReady: &report.RelayReady, Country: c.Country}
 	if report.Role == stats.RoleCamera {
-		e.Role, e.Camera, e.CameraVersion = "camera", c.ID, s.cameraVersion(c)
+		e.Role, e.Camera, e.SID, e.CameraVersion = "camera", c.ID, shortSID(c.Digest), s.cameraVersion(c)
 	} else {
-		e.Viewer, e.Camera = c.ID, c.CameraIDScope
+		e.Viewer, e.Camera, e.SID = c.ID, c.CameraIDScope, viewerCameraSID(c)
 	}
 	if protocol, _ := msg["relay_protocol"].(string); report.Path == "relay" && relayProtocols[protocol] {
 		e.RelayProtocol = protocol
@@ -168,7 +168,7 @@ func (s *Server) recordQuality(c *Client, msg map[string]interface{}) {
 	if q.Poor() {
 		result += " poor"
 	}
-	s.addEvent(events.Event{Type: events.Report, Role: "camera", Camera: c.ID, Viewer: viewerID,
+	s.addEvent(events.Event{Type: events.Report, Role: "camera", Camera: c.ID, SID: shortSID(c.Digest), Viewer: viewerID,
 		Result: result, Detail: qualityText(q), Country: q.Country, CameraVersion: s.cameraVersion(c)})
 }
 

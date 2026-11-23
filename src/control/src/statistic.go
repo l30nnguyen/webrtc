@@ -2,6 +2,7 @@ package main
 
 import (
 	"encoding/csv"
+	"encoding/hex"
 	"encoding/json"
 	"fmt"
 	"html/template"
@@ -13,6 +14,7 @@ import (
 	"strings"
 	"time"
 
+	"signaling-server/internal/center"
 	"signaling-server/internal/events"
 	"signaling-server/internal/fleet"
 	"signaling-server/internal/history"
@@ -134,8 +136,28 @@ func searchFrom(r *http.Request) eventSearch {
 	if err != nil || page < 1 || page > 1000 {
 		page = 1
 	}
-	return eventSearch{From: clip(v.Get("from")), To: clip(v.Get("to")), Camera: clip(v.Get("camera")),
+	return eventSearch{From: clip(v.Get("from")), To: clip(v.Get("to")), Camera: cameraSearch(v.Get("camera")),
 		Viewer: clip(v.Get("viewer")), Type: clip(v.Get("type")), Result: clip(v.Get("result")), Page: page}
+}
+
+// cameraSearch is the camera field of the connection log search: a device
+// ID, a SID or its digest. A SID or a digest becomes the short SID form the
+// log keeps (events.Event.SID), so the SID itself never stays in the page's
+// links.
+func cameraSearch(text string) string {
+	text = strings.TrimSpace(text)
+	if validRegisteredCameraSID(text) {
+		return shortSID(center.Digest(text))
+	}
+	if len(text) == 64 {
+		if _, err := hex.DecodeString(text); err == nil {
+			return strings.ToLower(text[:12])
+		}
+	}
+	if len(text) > 128 {
+		return text[:128]
+	}
+	return text
 }
 
 // pageStep is the row step a chart over hours uses.
@@ -496,7 +518,7 @@ func (s *Server) handleStatisticEvents(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Content-Type", "text/csv; charset=utf-8")
 	w.Header().Set("Content-Disposition", `attachment; filename="events.csv"`)
 	out := csv.NewWriter(w)
-	out.Write([]string{"time", "type", "result", "error", "camera", "viewer", "role", "path", "relay_protocol",
+	out.Write([]string{"time", "type", "result", "error", "camera", "sid", "viewer", "role", "path", "relay_protocol",
 		"relay_offered", "relay_ready", "setup_ms", "relays", "relay", "from", "detail", "version", "country", "camera_version"})
 	flag := func(b *bool) string {
 		if b == nil {
@@ -509,7 +531,7 @@ func (s *Server) handleStatisticEvents(w http.ResponseWriter, r *http.Request) {
 		if e.SetupMillis > 0 {
 			setup = strconv.Itoa(e.SetupMillis)
 		}
-		out.Write([]string{e.T, e.Type, e.Result, e.Error, e.Camera, e.Viewer, e.Role, e.Path, e.RelayProtocol,
+		out.Write([]string{e.T, e.Type, e.Result, e.Error, e.Camera, e.SID, e.Viewer, e.Role, e.Path, e.RelayProtocol,
 			flag(e.RelayOffered), flag(e.RelayReady), setup, strings.Join(e.Relays, " "), e.Relay, e.From, e.Detail, e.Version, e.Country, e.CameraVersion})
 	}
 	out.Flush()
@@ -556,6 +578,21 @@ var statisticTemplate = template.Must(template.New("statistic").Funcs(template.F
 		return "?" + v.Encode() + "#events"
 	},
 	"add": func(a, b int) int { return a + b },
+	// short is the start of a long ID; the full one is in the cell's title.
+	"short": func(id string) string {
+		if len(id) > 10 {
+			return id[:10] + "…"
+		}
+		return id
+	},
+	// findLink is this page searching the connection log for one camera
+	// or viewer.
+	"findLink": func(hours int, key, value string) string {
+		v := url.Values{}
+		v.Set(key, value)
+		v.Set("hours", strconv.Itoa(hours))
+		return "?" + v.Encode() + "#events"
+	},
 	"eventsLink": func(q eventSearch, format string) string {
 		v := url.Values{}
 		for key, value := range map[string]string{"from": q.From, "to": q.To, "camera": q.Camera, "viewer": q.Viewer, "type": q.Type, "result": q.Result} {
@@ -573,7 +610,7 @@ var statisticTemplate = template.Must(template.New("statistic").Funcs(template.F
 :root{--bg:#f7f7f5;--card:#fff;--fg:#1d1d1b;--muted:#6b6b66;--line:#e3e2dd;--up:#1f7a4a;--down:#b3261e;--s1:#2f5fb3;--s2:#c06a1b;--s3:#1f8a70;--s4:#b3261e;--s5:#2f5fb3}
 @media (prefers-color-scheme:dark){:root{--bg:#161615;--card:#1f1f1d;--fg:#ecebe6;--muted:#a3a29b;--line:#34332f;--up:#5cc28b;--down:#f2766d;--s1:#7aa5f0;--s2:#e9a25f;--s3:#5cc2a6;--s4:#f2766d;--s5:#7aa5f0}}
 *{box-sizing:border-box}body{margin:0;background:var(--bg);color:var(--fg);font:14px/1.45 system-ui,-apple-system,"Segoe UI",sans-serif}
-main{max-width:1100px;margin:0 auto;padding:24px 16px 48px}h1{font-size:20px;margin:0 0 4px}h2{font-size:16px;margin:28px 0 10px}h3{font-size:13px;margin:12px 0 4px;color:var(--muted);font-weight:600}
+main{max-width:1400px;margin:0 auto;padding:24px 16px 48px}h1{font-size:20px;margin:0 0 4px}h2{font-size:16px;margin:28px 0 10px}h3{font-size:13px;margin:12px 0 4px;color:var(--muted);font-weight:600}
 .sub{color:var(--muted);margin:0 0 16px}.card{background:var(--card);border:1px solid var(--line);border-radius:10px;padding:16px;margin:0 0 14px;overflow-x:auto}
 table{border-collapse:collapse;width:100%;font-variant-numeric:tabular-nums}th,td{text-align:left;padding:6px 10px;border-bottom:1px solid var(--line);white-space:nowrap}
 th{color:var(--muted);font-weight:600;font-size:12px}td.n,th.n{text-align:right}.up{color:var(--up);font-weight:600}.down{color:var(--down);font-weight:600}
@@ -585,7 +622,10 @@ th{color:var(--muted);font-weight:600;font-size:12px}td.n,th.n{text-align:right}
 .legend .s1:before{background:var(--s1)}.legend .s2:before{background:var(--s2)}.legend .s3:before{background:var(--s3)}.legend .s4:before{background:var(--s4)}.legend .s5:before{background:var(--s5);opacity:.35}
 .search{display:flex;flex-wrap:wrap;gap:8px 12px;align-items:end;margin-bottom:12px}.search label{display:flex;flex-direction:column;font-size:12px;color:var(--muted);gap:2px}
 .search input,.search select,.search button{font:inherit;color:var(--fg);background:var(--bg);border:1px solid var(--line);border-radius:6px;padding:4px 6px}.search button{cursor:pointer}
-table.events td{font-size:13px}tr.bad td:nth-child(3),tr.bad td:nth-child(4){color:var(--down);font-weight:600}
+.scroll{max-height:70vh;overflow:auto;border:1px solid var(--line);border-radius:6px}
+table.events th{position:sticky;top:0;background:var(--card);z-index:1;box-shadow:0 1px 0 var(--line)}
+table.events td{font-size:13px;vertical-align:top}table.events td.wrap{white-space:normal;min-width:220px;max-width:420px}
+table.events .id{font-family:ui-monospace,Menlo,Consolas,monospace;font-size:12px}table.events .id a{text-decoration:none}table.events .sid{color:var(--muted);display:block}tr.bad td:nth-child(3),tr.bad td:nth-child(4){color:var(--down);font-weight:600}
 .pager{color:var(--muted);margin:10px 0 0;font-size:13px}.legend .range{margin-left:auto}.empty{color:var(--muted);margin:0}a{color:var(--s1)}nav a{margin-right:10px}
 </style></head><body><main>
 <h1>Region statistics</h1>
@@ -599,17 +639,18 @@ table.events td{font-size:13px}tr.bad td:nth-child(3),tr.bad td:nth-child(4){col
 <div class="card"><form method="get" action="#events" class="search">
 <label>From (UTC)<input type="datetime-local" name="from" value="{{.Search.From}}"></label>
 <label>To (UTC)<input type="datetime-local" name="to" value="{{.Search.To}}"></label>
-<label>Camera<input name="camera" value="{{.Search.Camera}}" size="24"></label>
+<label>Camera (device ID or SID)<input name="camera" value="{{.Search.Camera}}" size="24"></label>
 <label>Viewer<input name="viewer" value="{{.Search.Viewer}}" size="16"></label>
 <label>Event<select name="type"><option value="">any</option>{{range $t := eventTypes}}<option{{if eq $t $.Search.Type}} selected{{end}}>{{$t}}</option>{{end}}</select></label>
 <label>Result<select name="result"><option value="">any</option>{{range $r := eventResults}}<option{{if eq $r $.Search.Result}} selected{{end}}>{{$r}}</option>{{end}}</select></label>
 <input type="hidden" name="hours" value="{{.Hours}}"><button>Search</button>
 <a href="{{eventsLink .Search "csv"}}">CSV</a><a href="{{eventsLink .Search "json"}}">JSON</a></form>
-{{if .Events}}<table class="events">
-<tr><th>Time (UTC)</th><th>Event</th><th>Result</th><th>Cause</th><th>Path</th><th class="n">Setup</th><th>Relays / from</th><th>Camera</th><th>Viewer</th></tr>
-{{range .Events}}<tr class="{{if or (eq .Result "failed") (eq .Result "camera_offline") (eq .Result "silent") (eq .Type "refused")}}bad{{end}}"><td>{{.T}}</td><td>{{.Type}}{{with .Role}} ({{.}}){{end}}{{with .Version}} v{{.}}{{end}}{{with .CameraVersion}} cam v{{.}}{{end}}{{with .Country}} {{.}}{{end}}</td><td>{{.Result}}</td><td>{{.Error}}{{.Detail}}</td>
-<td>{{.Path}}{{with .RelayProtocol}} over {{.}}{{end}}</td><td class="n">{{if .SetupMillis}}{{.SetupMillis}} ms{{end}}</td><td>{{range .Relays}}{{.}} {{end}}{{.Relay}}{{.From}}</td><td>{{.Camera}}</td><td>{{.Viewer}}</td></tr>{{end}}
-</table>
+{{if .Events}}<div class="scroll"><table class="events">
+<tr><th>Time (UTC)</th><th>Event</th><th>Result</th><th>Cause</th><th>Path</th><th class="n">Setup</th><th>Relays / from</th><th>Camera / SID</th><th>Viewer</th></tr>
+{{range .Events}}<tr class="{{if or (eq .Result "failed") (eq .Result "camera_offline") (eq .Result "silent") (eq .Type "refused")}}bad{{end}}"><td>{{.T}}</td><td>{{.Type}}{{with .Role}} ({{.}}){{end}}{{with .Version}} v{{.}}{{end}}{{with .CameraVersion}} cam v{{.}}{{end}}{{with .Country}} {{.}}{{end}}</td><td>{{.Result}}</td><td class="wrap">{{.Error}}{{.Detail}}</td>
+<td>{{.Path}}{{with .RelayProtocol}} over {{.}}{{end}}</td><td class="n">{{if .SetupMillis}}{{.SetupMillis}} ms{{end}}</td><td>{{range .Relays}}{{.}} {{end}}{{.Relay}}{{.From}}</td><td class="id">{{with .Camera}}<a href="{{findLink $.Hours "camera" .}}" title="{{.}}">{{short .}}</a>{{end}}{{with .SID}}<a class="sid" href="{{findLink $.Hours "camera" .}}" title="SID digest {{.}}: every device that used this SID">sid {{.}}</a>{{end}}</td>
+<td class="id">{{with .Viewer}}<a href="{{findLink $.Hours "viewer" .}}" title="{{.}}">{{short .}}</a>{{end}}</td></tr>{{end}}
+</table></div>
 <p class="pager">Page {{.Search.Page}}{{if gt .Search.Page 1}} · <a href="{{pageLink .Search .Hours 1}}">newest</a> · <a href="{{pageLink .Search .Hours (add .Search.Page -1)}}">← newer</a>{{end}}{{if .More}} · <a href="{{pageLink .Search .Hours (add .Search.Page 1)}}">older →</a>{{end}}</p>
 {{else if gt .Search.Page 1}}<p class="empty">No more events. <a href="{{pageLink .Search .Hours 1}}">Back to the newest</a>.</p>
 {{else}}<p class="empty">No events match.</p>{{end}}</div>{{end}}

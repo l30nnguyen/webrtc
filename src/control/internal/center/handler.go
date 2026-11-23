@@ -632,7 +632,7 @@ func (h *Handler) takeOver(w http.ResponseWriter, record, candidate activation.R
 		h.reject(w)
 		return replaced, false
 	}
-	info := TakeoverInfo{Tenant: record.Tenant, FromDevice: record.DeviceID, ToDevice: candidate.DeviceID, NewAddress: from}
+	info := TakeoverInfo{Tenant: record.Tenant, Digest: record.Digest, FromDevice: record.DeviceID, ToDevice: candidate.DeviceID, NewAddress: from}
 	info.OldAddress, _ = h.config.Addresses.Get(record.DeviceID)
 	info.OldCountry, info.NewCountry = h.countryOf(info.OldAddress), h.countryOf(from)
 	info.SameNetwork = sameNetwork(info.OldAddress, from)

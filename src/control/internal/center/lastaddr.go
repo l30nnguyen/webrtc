@@ -119,6 +119,7 @@ func sameNetwork(a, b netip.Addr) bool {
 // TakeoverInfo describes one takeover for OnTakeover.
 type TakeoverInfo struct {
 	Tenant, FromDevice, ToDevice string
+	Digest                       string // the SID's digest (lowercase hex)
 	// OldAddress is where the old holder last verified from (invalid when
 	// unknown), NewAddress where the new camera verifies from now.
 	OldAddress, NewAddress netip.Addr

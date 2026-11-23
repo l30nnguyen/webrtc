@@ -40,6 +40,10 @@ type Event struct {
 	T      string `json:"t"` // RFC 3339 UTC, milliseconds
 	Type   string `json:"type"`
 	Camera string `json:"camera,omitempty"` // device ID
+	// SID is the camera's SID as the first 12 hex digits of its SHA-256,
+	// the short form Center's log prints. A device ID changes when a SID
+	// moves to another device; this lets the log be searched by SID.
+	SID    string `json:"sid,omitempty"`
 	Viewer string `json:"viewer,omitempty"` // viewer client ID
 	// Role is who sent a report: camera or viewer.
 	Role string `json:"role,omitempty"`
@@ -216,7 +220,7 @@ func (l *Log) Find(q Query) ([]Event, bool) {
 			if json.Unmarshal(scanner.Bytes(), &e) != nil || e.T < from || e.T >= to {
 				continue
 			}
-			if (q.Type != "" && e.Type != q.Type) || (q.Camera != "" && e.Camera != q.Camera) ||
+			if (q.Type != "" && e.Type != q.Type) || (q.Camera != "" && e.Camera != q.Camera && e.SID != q.Camera) ||
 				(q.Viewer != "" && e.Viewer != q.Viewer) || (q.Result != "" && e.Result != q.Result) ||
 				(q.Relay != "" && e.Relay != q.Relay && !contains(e.Relays, q.Relay)) {
 				continue

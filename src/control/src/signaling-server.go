@@ -445,7 +445,7 @@ func (s *Server) handleWebSocket(w http.ResponseWriter, r *http.Request) {
 		s.nodeLink.cameraChanged(c.ID, true)
 	}
 	if c.Role == admission.RoleCamera {
-		s.addEvent(events.Event{Type: events.Camera, Camera: c.ID, Result: "online"})
+		s.addEvent(events.Event{Type: events.Camera, Camera: c.ID, SID: shortSID(c.Digest), Result: "online"})
 	}
 
 	log.Printf("Client %s connected tenant=%q role=%s", clientID, tenant, role)
@@ -464,7 +464,7 @@ func (s *Server) readPump(c *Client) {
 		}
 		s.mu.Unlock()
 		if removed && c.Role == admission.RoleCamera {
-			s.addEvent(events.Event{Type: events.Camera, Camera: c.ID, Result: "offline"})
+			s.addEvent(events.Event{Type: events.Camera, Camera: c.ID, SID: shortSID(c.Digest), Result: "offline"})
 		}
 		if removed && s.nodeLink != nil && c.Role == admission.RoleCamera && admission.ValidDeviceID(c.ID) {
 			s.nodeLink.cameraChanged(c.ID, false)
@@ -637,7 +637,7 @@ func (s *Server) readPump(c *Client) {
 				}
 				s.countStat("requests", func(counters *stats.Counters) { counters.RequestFrom(c.Country) })
 				s.viewerCountries.remember(clientKey(c.Tenant, c.ID), c.Country)
-				s.addEvent(events.Event{Type: events.Request, Camera: dest.ID, Viewer: c.ID, Result: "forwarded", Relays: s.relayNames(servers), Country: c.Country, CameraVersion: destVersion})
+				s.addEvent(events.Event{Type: events.Request, Camera: dest.ID, SID: shortSID(dest.Digest), Viewer: c.ID, Result: "forwarded", Relays: s.relayNames(servers), Country: c.Country, CameraVersion: destVersion})
 			}
 			if c.Role == admission.RoleCamera && dest.Role == admission.RolePlayer && msg["type"] == "offer" {
 				s.addRelayURLs(msg)
@@ -650,7 +650,7 @@ func (s *Server) readPump(c *Client) {
 		} else {
 			if isViewerRequest {
 				s.countStat("camera_offline", (*stats.Counters).CameraOffline)
-				s.addEvent(events.Event{Type: events.Request, Camera: destID, Viewer: c.ID, Result: "camera_offline"})
+				s.addEvent(events.Event{Type: events.Request, Camera: destID, SID: viewerCameraSID(c), Viewer: c.ID, Result: "camera_offline"})
 			}
 			data, _ := json.Marshal(map[string]string{"type": "error", "msg": "Device offline"})
 			select {
@@ -1049,7 +1049,7 @@ func configureServer(srv *Server, opts serverOptions) error {
 						"). If the SID leaked: block it and issue a new one"
 				}
 				srv.countHistory(counts)
-				srv.addEvent(events.Event{Type: events.Camera, Camera: info.ToDevice, Result: "takeover", Detail: detail})
+				srv.addEvent(events.Event{Type: events.Camera, Camera: info.ToDevice, SID: shortSID(info.Digest), Result: "takeover", Detail: detail})
 			},
 		})
 		if err != nil {
