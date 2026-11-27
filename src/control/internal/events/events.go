@@ -69,6 +69,13 @@ type Event struct {
 	// Country is the viewer's country for a request or a viewer report, the
 	// camera's for a camera report (from the Center's ticket, ST-1).
 	Country string `json:"country,omitempty"`
+	// Steps are how long the steps of a viewing setup took, in milliseconds
+	// (ST-5): on a camera's connected report auth_ms, offer_ms, answer_ms
+	// (from the camera's session start); on its first quality report
+	// channel_ms, video_ms; on a request "answered" event the server's view:
+	// connect_ms (viewer connected -> request), offer_ms (request -> camera's
+	// offer passed on), answer_ms (offer -> viewer's answer).
+	Steps map[string]int `json:"steps,omitempty"`
 }
 
 // Log appends events to day files and removes files older than Days.
@@ -240,6 +247,31 @@ func (l *Log) Find(q Query) ([]Event, bool) {
 		}
 	}
 	return out, false
+}
+
+// Scan calls fn for every event from from (inclusive) to to (exclusive),
+// oldest first, without a result limit.
+func (l *Log) Scan(from, to time.Time, fn func(Event)) {
+	if l == nil {
+		return
+	}
+	first, last := from.UTC().Format("2006-01-02T15:04:05.000Z"), to.UTC().Format("2006-01-02T15:04:05.000Z")
+	for d := from.UTC().Truncate(24 * time.Hour); d.Before(to); d = d.AddDate(0, 0, 1) {
+		f, err := os.Open(filepath.Join(l.dir, d.Format("2006-01-02")+".jsonl"))
+		if err != nil {
+			continue
+		}
+		scanner := bufio.NewScanner(f)
+		scanner.Buffer(make([]byte, 64<<10), 1<<20)
+		for scanner.Scan() {
+			var e Event
+			if json.Unmarshal(scanner.Bytes(), &e) != nil || e.T < first || e.T >= last {
+				continue
+			}
+			fn(e)
+		}
+		f.Close()
+	}
 }
 
 func contains(list []string, s string) bool {

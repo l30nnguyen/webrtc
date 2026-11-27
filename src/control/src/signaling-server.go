@@ -81,6 +81,12 @@ type Client struct {
 	pingMu        sync.Mutex
 	pingTime      time.Time
 	release       func() // frees the connection's per-source slot
+	// Setup timing of a viewer's current request (ST-5): when it connected,
+	// sent its request, and when the camera's offer was passed on to it.
+	connectedAt time.Time
+	timingMu    sync.Mutex
+	requestAt   time.Time
+	offerAt     time.Time
 }
 
 func (c *Client) Close() {
@@ -133,6 +139,10 @@ type Server struct {
 	firmware *firmware.Channels
 	// statisticAllow limits /admin/statistic; empty: not served.
 	statisticAllow []netip.Prefix
+	// stopping is set when the server is told to stop: new connections are
+	// refused and health says so while the connected clients are told to
+	// come back (R4).
+	stopping atomic.Bool
 }
 
 func NewServer(playerPath string, rootDir string) *Server {
@@ -327,6 +337,11 @@ func isCenterPath(path string) bool {
 }
 
 func (s *Server) handleWebSocket(w http.ResponseWriter, r *http.Request) {
+	if s.stopping.Load() {
+		w.Header().Set("Retry-After", "5")
+		http.Error(w, "Server restarting", http.StatusServiceUnavailable)
+		return
+	}
 	clientID := strings.Split(strings.TrimPrefix(r.URL.Path, "/"), "/")[0]
 	if clientID == "" {
 		http.Error(w, "Client ID required", http.StatusBadRequest)
@@ -424,9 +439,10 @@ func (s *Server) handleWebSocket(w http.ResponseWriter, r *http.Request) {
 			Path:        r.URL.Path,
 			Type:        deviceType,
 		},
-		Send:    make(chan []byte, 256),
-		done:    make(chan struct{}),
-		release: release,
+		Send:        make(chan []byte, 256),
+		done:        make(chan struct{}),
+		release:     release,
+		connectedAt: time.Now(),
 	}
 	c.touch()
 
@@ -638,9 +654,17 @@ func (s *Server) readPump(c *Client) {
 				s.countStat("requests", func(counters *stats.Counters) { counters.RequestFrom(c.Country) })
 				s.viewerCountries.remember(clientKey(c.Tenant, c.ID), c.Country)
 				s.addEvent(events.Event{Type: events.Request, Camera: dest.ID, SID: shortSID(dest.Digest), Viewer: c.ID, Result: "forwarded", Relays: s.relayNames(servers), Country: c.Country, CameraVersion: destVersion})
+				c.requestForwarded(time.Now())
 			}
 			if c.Role == admission.RoleCamera && dest.Role == admission.RolePlayer && msg["type"] == "offer" {
 				s.addRelayURLs(msg)
+				dest.offerForwarded(time.Now())
+			}
+			if c.Role == admission.RolePlayer && dest.Role == admission.RoleCamera && msg["type"] == "answer" {
+				if steps := c.answerForwarded(time.Now()); steps != nil {
+					s.addEvent(events.Event{Type: events.Request, Camera: dest.ID, SID: shortSID(dest.Digest), Viewer: c.ID,
+						Result: "answered", Country: c.Country, CameraVersion: destVersion, Steps: steps})
+				}
 			}
 			data, _ := json.Marshal(msg)
 			select {
@@ -827,8 +851,13 @@ func (s *Server) handleHealth(w http.ResponseWriter, r *http.Request) {
 	s.mu.RUnlock()
 
 	w.Header().Set("Access-Control-Allow-Origin", "*")
+	status := "ok"
+	if s.stopping.Load() {
+		status = "stopping"
+		w.WriteHeader(http.StatusServiceUnavailable)
+	}
 	health := map[string]interface{}{
-		"status":           "ok",
+		"status":           status,
 		"clients":          n,
 		"version":          s.loadVersion(),
 		"ticket_admission": s.admission != nil,

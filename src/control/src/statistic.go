@@ -90,6 +90,7 @@ type statisticPage struct {
 	RelayData []source
 	Others    []fleet.RelayStatus
 	Days      []history.Row
+	Setup     *setupTable // viewing setup time per step (ST-5); nil without a connection log
 	DataLink  string
 	Error     string
 }
@@ -246,6 +247,10 @@ func (s *Server) handleStatistic(w http.ResponseWriter, r *http.Request) {
 		days, _ := s.history.Rows(history.Query{From: now.AddDate(0, 0, -30), To: now.Add(time.Minute), Step: history.Day})
 		sort.SliceStable(days, func(i, j int) bool { return days[i].T > days[j].T })
 		page.Days = days
+	}
+	if s.events != nil {
+		setup := s.setupTiming(from, now.Add(time.Minute))
+		page.Setup = &setup
 	}
 	page.Search = searchFrom(r)
 	if s.events == nil {
@@ -519,7 +524,7 @@ func (s *Server) handleStatisticEvents(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Content-Disposition", `attachment; filename="events.csv"`)
 	out := csv.NewWriter(w)
 	out.Write([]string{"time", "type", "result", "error", "camera", "sid", "viewer", "role", "path", "relay_protocol",
-		"relay_offered", "relay_ready", "setup_ms", "relays", "relay", "from", "detail", "version", "country", "camera_version"})
+		"relay_offered", "relay_ready", "setup_ms", "relays", "relay", "from", "detail", "version", "country", "camera_version", "steps"})
 	flag := func(b *bool) string {
 		if b == nil {
 			return ""
@@ -532,9 +537,24 @@ func (s *Server) handleStatisticEvents(w http.ResponseWriter, r *http.Request) {
 			setup = strconv.Itoa(e.SetupMillis)
 		}
 		out.Write([]string{e.T, e.Type, e.Result, e.Error, e.Camera, e.SID, e.Viewer, e.Role, e.Path, e.RelayProtocol,
-			flag(e.RelayOffered), flag(e.RelayReady), setup, strings.Join(e.Relays, " "), e.Relay, e.From, e.Detail, e.Version, e.Country, e.CameraVersion})
+			flag(e.RelayOffered), flag(e.RelayReady), setup, strings.Join(e.Relays, " "), e.Relay, e.From, e.Detail, e.Version, e.Country, e.CameraVersion,
+			stepsText(e.Steps)})
 	}
 	out.Flush()
+}
+
+// stepsText is a log entry's step times, e.g. "answer_ms=850 offer_ms=1200".
+func stepsText(steps map[string]int) string {
+	keys := make([]string, 0, len(steps))
+	for k := range steps {
+		keys = append(keys, k)
+	}
+	sort.Strings(keys)
+	parts := make([]string, len(keys))
+	for i, k := range keys {
+		parts[i] = k + "=" + strconv.Itoa(steps[k])
+	}
+	return strings.Join(parts, " ")
 }
 
 func sortedKeys(m map[string]bool) []string {
@@ -562,7 +582,7 @@ var statisticTemplate = template.Must(template.New("statistic").Funcs(template.F
 		return []string{events.Request, events.Report, events.Refused, events.Camera, events.Relay}
 	},
 	"eventResults": func() []string {
-		return []string{"connected", "failed", "forwarded", "camera_offline", "online", "offline",
+		return []string{"connected", "failed", "forwarded", "answered", "camera_offline", "online", "offline",
 			"no_ticket", "bad_ticket", "too_many_connections", "registered", "restarted", "stopping", "silent", "back"}
 	},
 	// pageLink is this page with the same search on connection log page n.
@@ -647,13 +667,24 @@ table.events .id{font-family:ui-monospace,Menlo,Consolas,monospace;font-size:12p
 <a href="{{eventsLink .Search "csv"}}">CSV</a><a href="{{eventsLink .Search "json"}}">JSON</a></form>
 {{if .Events}}<div class="scroll"><table class="events">
 <tr><th>Time (UTC)</th><th>Event</th><th>Result</th><th>Cause</th><th>Path</th><th class="n">Setup</th><th>Relays / from</th><th>Camera / SID</th><th>Viewer</th></tr>
-{{range .Events}}<tr class="{{if or (eq .Result "failed") (eq .Result "camera_offline") (eq .Result "silent") (eq .Type "refused")}}bad{{end}}"><td>{{.T}}</td><td>{{.Type}}{{with .Role}} ({{.}}){{end}}{{with .Version}} v{{.}}{{end}}{{with .CameraVersion}} cam v{{.}}{{end}}{{with .Country}} {{.}}{{end}}</td><td>{{.Result}}</td><td class="wrap">{{.Error}}{{.Detail}}</td>
+{{range .Events}}<tr class="{{if or (eq .Result "failed") (eq .Result "camera_offline") (eq .Result "silent") (eq .Type "refused")}}bad{{end}}"><td>{{.T}}</td><td>{{.Type}}{{with .Role}} ({{.}}){{end}}{{with .Version}} v{{.}}{{end}}{{with .CameraVersion}} cam v{{.}}{{end}}{{with .Country}} {{.}}{{end}}</td><td>{{.Result}}</td><td class="wrap">{{.Error}}{{.Detail}}{{range $k, $v := .Steps}} {{$k}} {{$v}}{{end}}</td>
 <td>{{.Path}}{{with .RelayProtocol}} over {{.}}{{end}}</td><td class="n">{{if .SetupMillis}}{{.SetupMillis}} ms{{end}}</td><td>{{range .Relays}}{{.}} {{end}}{{.Relay}}{{.From}}</td><td class="id">{{with .Camera}}<a href="{{findLink $.Hours "camera" .}}" title="{{.}}">{{short .}}</a>{{end}}{{with .SID}}<a class="sid" href="{{findLink $.Hours "camera" .}}" title="SID digest {{.}}: every device that used this SID">sid {{.}}</a>{{end}}</td>
 <td class="id">{{with .Viewer}}<a href="{{findLink $.Hours "viewer" .}}" title="{{.}}">{{short .}}</a>{{end}}</td></tr>{{end}}
 </table></div>
 <p class="pager">Page {{.Search.Page}}{{if gt .Search.Page 1}} · <a href="{{pageLink .Search .Hours 1}}">newest</a> · <a href="{{pageLink .Search .Hours (add .Search.Page -1)}}">← newer</a>{{end}}{{if .More}} · <a href="{{pageLink .Search .Hours (add .Search.Page 1)}}">older →</a>{{end}}</p>
 {{else if gt .Search.Page 1}}<p class="empty">No more events. <a href="{{pageLink .Search .Hours 1}}">Back to the newest</a>.</p>
 {{else}}<p class="empty">No events match.</p>{{end}}</div>{{end}}
+
+{{with .Setup}}<h2 id="setup">Viewing setup time, last {{$.Hours}} hours</h2>
+<div class="card"><table>
+<tr><th>Step</th><th>Measured by</th><th class="n">Views</th><th class="n">p50</th><th class="n">p90</th><th class="n">p95</th></tr>
+{{range .Steps}}<tr><td>{{.Label}}</td><td>{{.Who}}</td><td class="n">{{.N}}</td><td class="n">{{.P50}}</td><td class="n">{{.P90}}</td><td class="n">{{.P95}}</td></tr>{{end}}
+</table>
+<h3>Request → connected, by path</h3><table>
+<tr><th>Path</th><th>Measured by</th><th class="n">Views</th><th class="n">p50</th><th class="n">p90</th><th class="n">p95</th></tr>
+{{range .ByPath}}<tr><td>{{.Label}}</td><td>{{.Who}}</td><td class="n">{{.N}}</td><td class="n">{{.P50}}</td><td class="n">{{.P90}}</td><td class="n">{{.P95}}</td></tr>{{end}}
+</table>
+<p class="empty">Camera steps count from the camera's session start (camera 2.2.5 and later; "request → connected" from every camera). Server steps need control server 2.8.0. p90: 9 in 10 views were at most this long.</p></div>{{end}}
 
 <h2>Control server, last {{.Hours}} hours</h2>
 {{range .Control}}<div class="card"><div class="head"><b>{{.Name}}</b><span>{{.Region}}</span></div>

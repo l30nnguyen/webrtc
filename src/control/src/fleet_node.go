@@ -84,6 +84,9 @@ func (s *Server) recordReport(c *Client, msg map[string]interface{}) {
 		SetupMillis: report.SetupMillis, RelayOffered: &report.RelayOffered, RelayReady: &report.RelayReady, Country: c.Country}
 	if report.Role == stats.RoleCamera {
 		e.Role, e.Camera, e.SID, e.CameraVersion = "camera", c.ID, shortSID(c.Digest), s.cameraVersion(c)
+		if report.Result == stats.ResultConnected {
+			e.Steps = reportSteps(msg, "auth_ms", "offer_ms", "answer_ms")
+		}
 	} else {
 		e.Viewer, e.Camera, e.SID = c.ID, c.CameraIDScope, viewerCameraSID(c)
 	}
@@ -169,7 +172,8 @@ func (s *Server) recordQuality(c *Client, msg map[string]interface{}) {
 		result += " poor"
 	}
 	s.addEvent(events.Event{Type: events.Report, Role: "camera", Camera: c.ID, SID: shortSID(c.Digest), Viewer: viewerID,
-		Result: result, Detail: qualityText(q), Country: q.Country, CameraVersion: s.cameraVersion(c)})
+		Result: result, Detail: qualityText(q), Country: q.Country, CameraVersion: s.cameraVersion(c),
+		Steps: reportSteps(msg, "channel_ms", "video_ms")})
 }
 
 // cameraVersion is the version a camera gave in its register message.

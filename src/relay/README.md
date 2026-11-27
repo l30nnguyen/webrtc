@@ -126,7 +126,7 @@ given time can be looked up with its outcome and cause.
 
 | Event | Result | With |
 |---|---|---|
-| `request` | `forwarded`, `camera_offline` | camera, viewer, relays handed out |
+| `request` | `forwarded`, `camera_offline`, `answered` | camera, viewer, relays handed out; `answered` (server 2.8.0+): the server's step times |
 | `report` | `connected`, `failed` | role (camera or viewer), camera, viewer, error (the cause), path, relay_protocol, relay offered/ready, setup_ms |
 | `refused` | `no_ticket`, `bad_ticket`, `too_many_connections` | source address, the client ID asked for (at most one a minute per address and reason) |
 | `camera` | `online`, `offline` | camera |
@@ -135,6 +135,17 @@ given time can be looked up with its outcome and cause.
 Camera events also carry `sid`: the first 12 hex digits of SHA-256 of the
 camera's SID (the short form Center's log prints), since a device ID changes
 when a SID moves to another device. Logs written before server 2.7.7 lack it.
+
+**Setup step times** (`steps`, milliseconds, server 2.8.0+, ST-5):
+
+| Event | Steps |
+|---|---|
+| `request` `answered` (the server's view) | `connect_ms` viewer connected → request; `offer_ms` request → the camera's offer passed on; `answer_ms` offer → the viewer's answer |
+| camera `report` `connected` (camera 2.2.5+) | `auth_ms` password check; `offer_ms`, `answer_ms` from the camera's session start (`setup_ms` is connected) |
+| camera `report` `quality start` (or `quality end` of a view shorter than 10 s) | `channel_ms` data channel open, `video_ms` first live video frame sent, from the session start |
+
+`/admin/statistic` sums them for its period in "Viewing setup time": p50, p90
+and p95 per step, and request → connected by path.
 
 About 1 KB per viewing attempt; a day's file is capped at 512 MB.
 `/admin/statistic` searches it by time, camera, viewer, event and result;

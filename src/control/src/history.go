@@ -55,12 +55,14 @@ func (s *Server) countHistory(counts map[string]int64) {
 	s.history.Count(history.SourceControl, name, region, counts)
 }
 
-// saveOnStop writes the open minute of statistics and the viewing counters
-// (statsPath, when set) when systemd stops the server, then exits.
+// saveOnStop tells the connected clients the server is restarting (R4),
+// writes the open minute of statistics and the viewing counters (statsPath,
+// when set) when systemd stops the server, then exits.
 func (s *Server) saveOnStop(statsPath string) {
 	stop := make(chan os.Signal, 1)
 	signal.Notify(stop, syscall.SIGTERM, syscall.SIGINT)
 	<-stop
+	s.stopClients(1500 * time.Millisecond)
 	if s.history != nil {
 		s.history.Close()
 	}
